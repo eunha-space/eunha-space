@@ -573,7 +573,7 @@ async fn render_tenant(
         return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Configuration rendered, but the tenant did not become healthy after restart.".into()));
     }
     let checksum = format!("{:x}", Sha256::digest(rendered_config.as_bytes()));
-    sqlx::query("UPDATE tenants SET rendered_revision=$1,rendered_checksum=$2,observed_state='unknown',updated_at=now() WHERE id=$3")
+    sqlx::query("UPDATE tenants SET rendered_revision=$1,rendered_checksum=$2,observed_state='healthy',updated_at=now() WHERE id=$3")
         .bind(revision).bind(checksum).bind(id).execute(&s.db).await?;
     sqlx::query("UPDATE operations SET status='succeeded',detail=jsonb_build_object('revision',$1),finished_at=now() WHERE id=$2")
         .bind(revision).bind(op).execute(&s.db).await?;
