@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
         .connect(&database_url)
         .await?;
     sqlx::migrate!().run(&db).await?;
+    normalize_r2_buckets(&db).await?;
 
     match args.command {
         Some(Command::SetOperator { username }) => return set_operator(&db, &username).await,
@@ -201,7 +202,7 @@ async fn import(
     binary_path: PathBuf,
 ) -> Result<()> {
     let raw = tokio::fs::read_to_string(&config_path).await?;
-    let parsed: toml::Value = toml::from_str(&raw).context("tenant config is not valid TOML")?;
+    let mut parsed: toml::Value = toml::from_str(&raw).context("tenant config is not valid TOML")?;
     let instance = parsed
         .get("instance")
         .and_then(toml::Value::as_table)
@@ -209,15 +210,20 @@ async fn import(
     let domain = instance
         .get("domain")
         .and_then(toml::Value::as_str)
-        .context("missing instance.domain")?;
+        .context("missing instance.domain")?
+        .to_owned();
     let title = instance
         .get("title")
         .and_then(toml::Value::as_str)
-        .unwrap_or(domain);
+        .unwrap_or(&domain)
+        .to_owned();
     let bind = parsed
         .get("bind_address")
         .and_then(toml::Value::as_str)
-        .context("missing bind_address")?;
+        .context("missing bind_address")?
+        .to_owned();
+    let bucket_name = take_r2_bucket(&mut parsed)?;
+    let normalized_config = toml::to_string(&parsed).context("serializing normalized tenant config")?;
     let runtime_id = Uuid::new_v4();
     let mut tx = db.begin().await?;
     let runtime_id: Uuid = sqlx::query_scalar("INSERT INTO runtimes(id,name,host,tenant_directory,service_label,binary_path,bind_address) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(name) DO UPDATE SET host=excluded.host,tenant_directory=excluded.tenant_directory,service_label=excluded.service_label,binary_path=excluded.binary_path,bind_address=excluded.bind_address RETURNING id")
@@ -226,11 +232,61 @@ async fn import(
     let tenant_file_name = format!("{}.toml", domain.replace('.', "-"));
     let imported_from = config_path.to_string_lossy().to_string();
     let id: Uuid = sqlx::query_scalar("INSERT INTO tenants(id,domain,title,runtime_id,desired_state,observed_state,config_toml,tenant_file_name,imported_from) VALUES($1,$2,$3,$4,'running','unknown',$5,$6,$7) ON CONFLICT(domain) DO UPDATE SET title=excluded.title,runtime_id=excluded.runtime_id,config_toml=excluded.config_toml,tenant_file_name=excluded.tenant_file_name,config_revision=tenants.config_revision+1,updated_at=now() RETURNING id")
-        .bind(tenant_id).bind(domain).bind(title).bind(runtime_id).bind(raw).bind(tenant_file_name).bind(imported_from).fetch_one(&mut *tx).await?;
+        .bind(tenant_id).bind(&domain).bind(title).bind(runtime_id).bind(normalized_config).bind(tenant_file_name).bind(imported_from).fetch_one(&mut *tx).await?;
+    sqlx::query("INSERT INTO r2_buckets(tenant_id,bucket_name) VALUES($1,$2) ON CONFLICT(tenant_id) DO UPDATE SET bucket_name=excluded.bucket_name,lifecycle_state='ready',updated_at=now()")
+        .bind(id).bind(bucket_name).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,detail,finished_at) VALUES($1,$2,'import','succeeded',jsonb_build_object('source',$3),now())")
         .bind(Uuid::new_v4()).bind(id).bind(config_path.to_string_lossy().as_ref()).execute(&mut *tx).await?;
     tx.commit().await?;
     println!("Imported {domain} as {id}; no runtime files were changed.");
+    Ok(())
+}
+
+fn take_r2_bucket(config: &mut toml::Value) -> Result<String> {
+    let media_storage = config
+        .get_mut("media_storage")
+        .and_then(toml::Value::as_table_mut)
+        .context("missing [media_storage]")?;
+    media_storage
+        .remove("bucket")
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .context("missing media_storage.bucket")
+}
+
+fn insert_r2_bucket(config: &mut toml::Value, bucket_name: &str) -> Result<()> {
+    let media_storage = config
+        .get_mut("media_storage")
+        .and_then(toml::Value::as_table_mut)
+        .context("missing [media_storage]")?;
+    media_storage.insert("bucket".into(), toml::Value::String(bucket_name.to_owned()));
+    Ok(())
+}
+
+async fn normalize_r2_buckets(db: &PgPool) -> Result<()> {
+    let tenants = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT t.id,t.config_toml FROM tenants t LEFT JOIN r2_buckets b ON b.tenant_id=t.id WHERE b.tenant_id IS NULL",
+    )
+    .fetch_all(db)
+    .await?;
+    for (tenant_id, config_toml) in tenants {
+        let mut config: toml::Value = toml::from_str(&config_toml)
+            .with_context(|| format!("tenant {tenant_id} has invalid stored TOML"))?;
+        let bucket_name = take_r2_bucket(&mut config)
+            .with_context(|| format!("tenant {tenant_id} is missing an R2 bucket"))?;
+        let normalized_config = toml::to_string(&config)?;
+        let mut tx = db.begin().await?;
+        sqlx::query("INSERT INTO r2_buckets(tenant_id,bucket_name) VALUES($1,$2)")
+            .bind(tenant_id)
+            .bind(bucket_name)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("UPDATE tenants SET config_toml=$1,config_revision=config_revision+1,updated_at=now() WHERE id=$2")
+            .bind(normalized_config)
+            .bind(tenant_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+    }
     Ok(())
 }
 
@@ -388,14 +444,14 @@ async fn render_tenant(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (operator_id, _) = operator(&headers, &s.db).await?;
-    let row = sqlx::query_as::<_, (String, String, String, String, String, String, String, i64)>(
-        "SELECT t.domain,t.config_toml,r.host,r.tenant_directory,r.service_label,r.bind_address,t.tenant_file_name,t.config_revision FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
+    let row = sqlx::query_as::<_, (String, String, String, String, String, String, String, String, i64)>(
+        "SELECT t.domain,t.config_toml,r.host,r.tenant_directory,r.service_label,r.bind_address,t.tenant_file_name,b.bucket_name,t.config_revision FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
     )
     .bind(id)
     .fetch_optional(&s.db)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Tenant not found".into()))?;
-    let (domain, config_toml, runtime_host, tenant_directory, service_label, bind_address, tenant_file_name, revision) = row;
+    let (domain, config_toml, runtime_host, tenant_directory, service_label, bind_address, tenant_file_name, bucket_name, revision) = row;
     let op = Uuid::new_v4();
     sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,requested_by,started_at) VALUES($1,$2,'render','running',$3,now())")
         .bind(op).bind(id).bind(operator_id).execute(&s.db).await?;
@@ -409,7 +465,7 @@ async fn render_tenant(
         mark_operation_failed(&s.db, op, "The stored runtime target is invalid.").await;
         return Err(ApiError(StatusCode::CONFLICT, "The stored runtime target is invalid.".into()));
     }
-    let parsed: toml::Value = match toml::from_str(&config_toml) {
+    let mut parsed: toml::Value = match toml::from_str(&config_toml) {
         Ok(value) => value,
         Err(_) => {
             mark_operation_failed(&s.db, op, "The stored tenant configuration is invalid TOML.").await;
@@ -421,6 +477,11 @@ async fn render_tenant(
         mark_operation_failed(&s.db, op, "The stored configuration domain does not match the tenant.").await;
         return Err(ApiError(StatusCode::CONFLICT, "The stored configuration does not match this tenant.".into()));
     }
+    if insert_r2_bucket(&mut parsed, &bucket_name).is_err() {
+        mark_operation_failed(&s.db, op, "The stored tenant configuration is missing media storage settings.").await;
+        return Err(ApiError(StatusCode::CONFLICT, "The stored configuration is missing media storage settings.".into()));
+    }
+    let rendered_config = toml::to_string(&parsed).map_err(ApiError::from)?;
 
     let directory = PathBuf::from(tenant_directory);
     if tokio::fs::metadata(&directory).await.map(|meta| !meta.is_dir()).unwrap_or(true) {
@@ -429,7 +490,7 @@ async fn render_tenant(
     }
     let target = directory.join(&tenant_file_name);
     let temporary = directory.join(format!(".{tenant_file_name}.{}", Uuid::new_v4()));
-    if tokio::fs::write(&temporary, config_toml.as_bytes()).await.is_err() {
+    if tokio::fs::write(&temporary, rendered_config.as_bytes()).await.is_err() {
         mark_operation_failed(&s.db, op, "The tenant configuration could not be written.").await;
         return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Could not render the tenant configuration.".into()));
     }
@@ -474,7 +535,7 @@ async fn render_tenant(
         mark_operation_failed(&s.db, op, "Configuration rendered and restarted, but the tenant did not become healthy.").await;
         return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Configuration rendered, but the tenant did not become healthy after restart.".into()));
     }
-    let checksum = format!("{:x}", Sha256::digest(config_toml.as_bytes()));
+    let checksum = format!("{:x}", Sha256::digest(rendered_config.as_bytes()));
     sqlx::query("UPDATE tenants SET rendered_revision=$1,rendered_checksum=$2,observed_state='unknown',updated_at=now() WHERE id=$3")
         .bind(revision).bind(checksum).bind(id).execute(&s.db).await?;
     sqlx::query("UPDATE operations SET status='succeeded',detail=jsonb_build_object('revision',$1),finished_at=now() WHERE id=$2")
