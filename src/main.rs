@@ -162,8 +162,6 @@ async fn main() -> Result<()> {
         .connect(&database_url)
         .await?;
     sqlx::migrate!().run(&db).await?;
-    normalize_r2_buckets(&db).await?;
-    normalize_typed_configuration(&db).await?;
 
     match args.command {
         Some(Command::SetOperator { username }) => return set_operator(&db, &username).await,
@@ -295,7 +293,7 @@ fn take_r2_bucket(config: &mut toml::Value) -> Result<String> {
         .context("missing media_storage.bucket")
 }
 
-async fn normalize_r2_buckets(db: &PgPool) -> Result<()> {
+/* async fn normalize_r2_buckets(db: &PgPool) -> Result<()> {
     let tenants = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT t.id,t.config_toml FROM tenants t LEFT JOIN r2_buckets b ON b.tenant_id=t.id WHERE b.tenant_id IS NULL",
     )
@@ -340,7 +338,7 @@ async fn normalize_typed_configuration(db: &PgPool) -> Result<()> {
         tx.commit().await?;
     }
     Ok(())
-}
+} */
 
 fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
