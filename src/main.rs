@@ -16,7 +16,7 @@ use axum::{
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{PgPool, postgres::PgPoolOptions, types::Json as SqlJson};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 use time::OffsetDateTime;
 use tower_http::{
@@ -105,6 +105,47 @@ struct Login {
     password: String,
 }
 
+#[derive(Deserialize, Serialize)]
+struct TenantToml {
+    database_url: String,
+    #[serde(default)] database_pool: DatabasePoolToml,
+    redis_url: String,
+    #[serde(default)] redis_coordination_url: Option<String>,
+    #[serde(default)] redis_key_prefix: String,
+    #[serde(default = "default_true")] redis_process_metrics: bool,
+    bind_address: String,
+    media_storage: MediaStorageToml,
+    #[serde(default)] smtp: Option<SmtpToml>,
+    resend: ResendToml,
+    instance: InstanceToml,
+    #[serde(default)] active_record_encryption: Option<EncryptionToml>,
+    #[serde(default)] software_update_url: Option<String>,
+    #[serde(default)] allowed_private_networks: Vec<String>,
+    #[serde(default)] sign_integrity_proofs: bool,
+    #[serde(default)] workers: WorkersToml,
+    #[serde(default)] limits: LimitsToml,
+}
+fn default_true() -> bool { true }
+#[derive(Deserialize, Serialize)] struct DatabasePoolToml { #[serde(default = "d20")] max_connections:i32, #[serde(default)] min_connections:i32, #[serde(default = "d30")] acquire_timeout_seconds:i64, #[serde(default = "d600")] idle_timeout_seconds:i64 }
+fn d20()->i32{20} fn d30()->i64{30} fn d600()->i64{600}
+impl Default for DatabasePoolToml { fn default()->Self{Self{max_connections:20,min_connections:0,acquire_timeout_seconds:30,idle_timeout_seconds:600}} }
+#[derive(Deserialize, Serialize)] struct MediaStorageToml { #[serde(skip_serializing_if="Option::is_none")] bucket:Option<String>, region:String, endpoint:Option<String>, access_key_id:String, secret_access_key:String, base_url:String }
+#[derive(Deserialize, Serialize)] struct ResendToml { api_key:String, from:String }
+#[derive(Deserialize, Serialize)] struct SmtpToml { host:String, port:i32, username:String, password:String, from:String }
+#[derive(Deserialize, Serialize)] struct EncryptionToml { primary_key:String, key_derivation_salt:String }
+#[derive(Deserialize, Serialize)] struct InstanceToml { domain:String,title:String,#[serde(default)]description:String,#[serde(default)]short_description:String,contact_email:Option<String>,#[serde(default="default_true")]registrations_open:bool,#[serde(default)]approval_required:bool,vapid_private_key:String,vapid_public_key:String,icon_url:Option<String>,#[serde(default)]privacy_policy:String,#[serde(default)]terms_of_service:String }
+#[derive(Deserialize, Serialize)] struct WorkersToml { #[serde(default="one")]delivery_workers:i32,#[serde(default="d50")]delivery_batch:i64,#[serde(default="d16")]delivery_concurrency:i32,#[serde(default="one")]inbox_workers:i32,#[serde(default="d20i")]inbox_batch:i64,#[serde(default="d4")]inbox_concurrency:i32,#[serde(default="d30")]queue_idle_poll_seconds:i64,#[serde(default="d256")]process_delivery_concurrency:i32 }
+fn one()->i32{1} fn d50()->i64{50} fn d16()->i32{16} fn d20i()->i64{20} fn d4()->i32{4} fn d256()->i32{256}
+impl Default for WorkersToml{fn default()->Self{Self{delivery_workers:1,delivery_batch:50,delivery_concurrency:16,inbox_workers:1,inbox_batch:20,inbox_concurrency:4,queue_idle_poll_seconds:30,process_delivery_concurrency:256}}}
+#[derive(Deserialize, Serialize, Default)] struct LimitsToml { max_concurrent_requests:Option<i32>,process_max_tenants:Option<i32>,process_database_connections:Option<i64> }
+
+#[derive(Deserialize)]
+struct StoredConfig { database_url:String, database_pool_max_connections:i32, database_pool_min_connections:i32, database_pool_acquire_timeout_seconds:i64, database_pool_idle_timeout_seconds:i64, redis_url:String, redis_coordination_url:Option<String>, redis_key_prefix:String, redis_process_metrics:bool, resend_api_key:String, resend_from:String, smtp_host:Option<String>,smtp_port:Option<i32>,smtp_username:Option<String>,smtp_password:Option<String>,smtp_from:Option<String>,active_record_encryption_primary_key:Option<String>,active_record_encryption_key_derivation_salt:Option<String>, media_storage_region:String, media_storage_endpoint:Option<String>, media_storage_access_key_id:String, media_storage_secret_access_key:String, media_storage_base_url:String, software_update_url:Option<String>, allowed_private_networks:Vec<String>, sign_integrity_proofs:bool, delivery_workers:i32,delivery_batch:i64,delivery_concurrency:i32,inbox_workers:i32,inbox_batch:i64,inbox_concurrency:i32,queue_idle_poll_seconds:i64,process_delivery_concurrency:i32,max_concurrent_requests:Option<i32>,process_max_tenants:Option<i32>,process_database_connections:Option<i64> }
+#[derive(Deserialize)]
+struct StoredTenant { domain:String,title:String,description:String,short_description:String,contact_email:Option<String>,registrations_open:bool,approval_required:bool,vapid_private_key:Option<String>,vapid_public_key:Option<String>,icon_url:Option<String>,privacy_policy:String,terms_of_service:String }
+fn required(value: Option<String>, name: &str) -> Result<String> { value.with_context(|| format!("typed configuration is missing {name}")) }
+fn typed_toml(tenant: StoredTenant, config: StoredConfig, bucket: String, bind_address: String) -> Result<TenantToml> { let smtp=match(config.smtp_host,config.smtp_port,config.smtp_username,config.smtp_password,config.smtp_from){(None,None,None,None,None)=>None,(h,p,u,pw,f)=>Some(SmtpToml{host:required(h,"smtp_host")?,port:p.context("typed configuration is missing smtp_port")?,username:required(u,"smtp_username")?,password:required(pw,"smtp_password")?,from:required(f,"smtp_from")?})};let encryption=match(config.active_record_encryption_primary_key,config.active_record_encryption_key_derivation_salt){(None,None)=>None,(p,s)=>Some(EncryptionToml{primary_key:required(p,"active_record_encryption_primary_key")?,key_derivation_salt:required(s,"active_record_encryption_key_derivation_salt")?})}; Ok(TenantToml{database_url:config.database_url,database_pool:DatabasePoolToml{max_connections:config.database_pool_max_connections,min_connections:config.database_pool_min_connections,acquire_timeout_seconds:config.database_pool_acquire_timeout_seconds,idle_timeout_seconds:config.database_pool_idle_timeout_seconds},redis_url:config.redis_url,redis_coordination_url:config.redis_coordination_url,redis_key_prefix:config.redis_key_prefix,redis_process_metrics:config.redis_process_metrics,bind_address,media_storage:MediaStorageToml{bucket:Some(bucket),region:config.media_storage_region,endpoint:config.media_storage_endpoint,access_key_id:config.media_storage_access_key_id,secret_access_key:config.media_storage_secret_access_key,base_url:config.media_storage_base_url},smtp,resend:ResendToml{api_key:config.resend_api_key,from:config.resend_from},instance:InstanceToml{domain:tenant.domain,title:tenant.title,description:tenant.description,short_description:tenant.short_description,contact_email:tenant.contact_email,registrations_open:tenant.registrations_open,approval_required:tenant.approval_required,vapid_private_key:required(tenant.vapid_private_key,"vapid_private_key")?,vapid_public_key:required(tenant.vapid_public_key,"vapid_public_key")?,icon_url:tenant.icon_url,privacy_policy:tenant.privacy_policy,terms_of_service:tenant.terms_of_service},active_record_encryption:encryption,software_update_url:config.software_update_url,allowed_private_networks:config.allowed_private_networks,sign_integrity_proofs:config.sign_integrity_proofs,workers:WorkersToml{delivery_workers:config.delivery_workers,delivery_batch:config.delivery_batch,delivery_concurrency:config.delivery_concurrency,inbox_workers:config.inbox_workers,inbox_batch:config.inbox_batch,inbox_concurrency:config.inbox_concurrency,queue_idle_poll_seconds:config.queue_idle_poll_seconds,process_delivery_concurrency:config.process_delivery_concurrency},limits:LimitsToml{max_concurrent_requests:config.max_concurrent_requests,process_max_tenants:config.process_max_tenants,process_database_connections:config.process_database_connections}}) }
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -122,6 +163,7 @@ async fn main() -> Result<()> {
         .await?;
     sqlx::migrate!().run(&db).await?;
     normalize_r2_buckets(&db).await?;
+    normalize_typed_configuration(&db).await?;
 
     match args.command {
         Some(Command::SetOperator { username }) => return set_operator(&db, &username).await,
@@ -290,6 +332,25 @@ async fn normalize_r2_buckets(db: &PgPool) -> Result<()> {
     Ok(())
 }
 
+async fn normalize_typed_configuration(db: &PgPool) -> Result<()> {
+    let rows = sqlx::query_as::<_, (Uuid, String)>("SELECT t.id,t.config_toml FROM tenants t LEFT JOIN tenant_configuration c ON c.tenant_id=t.id WHERE c.tenant_id IS NULL").fetch_all(db).await?;
+    for (id, raw) in rows {
+        let config: TenantToml = toml::from_str(&raw).with_context(|| format!("tenant {id} has invalid configuration"))?;
+        let mut tx = db.begin().await?;
+        sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,resend_api_key,resend_from,media_storage_region,media_storage_endpoint,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url,redis_coordination_url,redis_key_prefix,redis_process_metrics,software_update_url,allowed_private_networks,sign_integrity_proofs,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,delivery_workers,delivery_batch,delivery_concurrency,inbox_workers,inbox_batch,inbox_concurrency,queue_idle_poll_seconds,process_delivery_concurrency,max_concurrent_requests,process_max_tenants,process_database_connections,active_record_encryption_primary_key,active_record_encryption_key_derivation_salt,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)")
+            .bind(id).bind(&config.database_url).bind(&config.redis_url).bind(&config.resend.api_key).bind(&config.resend.from).bind(&config.media_storage.region).bind(&config.media_storage.endpoint).bind(&config.media_storage.access_key_id).bind(&config.media_storage.secret_access_key).bind(&config.media_storage.base_url)
+            .bind(&config.redis_coordination_url).bind(&config.redis_key_prefix).bind(config.redis_process_metrics).bind(&config.software_update_url).bind(&config.allowed_private_networks).bind(config.sign_integrity_proofs)
+            .bind(config.database_pool.max_connections).bind(config.database_pool.min_connections).bind(config.database_pool.acquire_timeout_seconds).bind(config.database_pool.idle_timeout_seconds)
+            .bind(config.workers.delivery_workers).bind(config.workers.delivery_batch).bind(config.workers.delivery_concurrency).bind(config.workers.inbox_workers).bind(config.workers.inbox_batch).bind(config.workers.inbox_concurrency).bind(config.workers.queue_idle_poll_seconds).bind(config.workers.process_delivery_concurrency)
+            .bind(config.limits.max_concurrent_requests).bind(config.limits.process_max_tenants).bind(config.limits.process_database_connections)
+            .bind(config.active_record_encryption.as_ref().map(|x| &x.primary_key)).bind(config.active_record_encryption.as_ref().map(|x| &x.key_derivation_salt)).bind(config.smtp.as_ref().map(|x| &x.host)).bind(config.smtp.as_ref().map(|x| x.port)).bind(config.smtp.as_ref().map(|x| &x.username)).bind(config.smtp.as_ref().map(|x| &x.password)).bind(config.smtp.as_ref().map(|x| &x.from)).execute(&mut *tx).await?;
+        sqlx::query("UPDATE tenants SET description=$1,short_description=$2,contact_email=$3,registrations_open=$4,approval_required=$5,vapid_private_key=$6,vapid_public_key=$7,icon_url=$8,privacy_policy=$9,terms_of_service=$10,config_revision=config_revision+1,updated_at=now() WHERE id=$11")
+            .bind(&config.instance.description).bind(&config.instance.short_description).bind(&config.instance.contact_email).bind(config.instance.registrations_open).bind(config.instance.approval_required).bind(&config.instance.vapid_private_key).bind(&config.instance.vapid_public_key).bind(&config.instance.icon_url).bind(&config.instance.privacy_policy).bind(&config.instance.terms_of_service).bind(id).execute(&mut *tx).await?;
+        tx.commit().await?;
+    }
+    Ok(())
+}
+
 fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
@@ -444,14 +505,15 @@ async fn render_tenant(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (operator_id, _) = operator(&headers, &s.db).await?;
-    let row = sqlx::query_as::<_, (String, String, String, String, String, String, String, String, i64)>(
-        "SELECT t.domain,t.config_toml,r.host,r.tenant_directory,r.service_label,r.bind_address,t.tenant_file_name,b.bucket_name,t.config_revision FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
+    let row = sqlx::query_as::<_, (SqlJson<StoredTenant>, SqlJson<StoredConfig>, String, String, String, String, String, String, i64)>(
+        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,r.host,r.tenant_directory,r.service_label,r.bind_address,t.tenant_file_name,t.config_revision FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
     )
     .bind(id)
     .fetch_optional(&s.db)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Tenant not found".into()))?;
-    let (domain, config_toml, runtime_host, tenant_directory, service_label, bind_address, tenant_file_name, bucket_name, revision) = row;
+    let (SqlJson(tenant), SqlJson(config), bucket_name, runtime_host, tenant_directory, service_label, bind_address, tenant_file_name, revision) = row;
+    let domain = tenant.domain.clone();
     let op = Uuid::new_v4();
     sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,requested_by,started_at) VALUES($1,$2,'render','running',$3,now())")
         .bind(op).bind(id).bind(operator_id).execute(&s.db).await?;
@@ -465,23 +527,9 @@ async fn render_tenant(
         mark_operation_failed(&s.db, op, "The stored runtime target is invalid.").await;
         return Err(ApiError(StatusCode::CONFLICT, "The stored runtime target is invalid.".into()));
     }
-    let mut parsed: toml::Value = match toml::from_str(&config_toml) {
-        Ok(value) => value,
-        Err(_) => {
-            mark_operation_failed(&s.db, op, "The stored tenant configuration is invalid TOML.").await;
-            return Err(ApiError(StatusCode::CONFLICT, "The stored tenant configuration is invalid.".into()));
-        }
-    };
-    let config_domain = parsed.get("instance").and_then(toml::Value::as_table).and_then(|instance| instance.get("domain")).and_then(toml::Value::as_str);
-    if config_domain != Some(&domain) {
-        mark_operation_failed(&s.db, op, "The stored configuration domain does not match the tenant.").await;
-        return Err(ApiError(StatusCode::CONFLICT, "The stored configuration does not match this tenant.".into()));
-    }
-    if insert_r2_bucket(&mut parsed, &bucket_name).is_err() {
-        mark_operation_failed(&s.db, op, "The stored tenant configuration is missing media storage settings.").await;
-        return Err(ApiError(StatusCode::CONFLICT, "The stored configuration is missing media storage settings.".into()));
-    }
-    let rendered_config = toml::to_string(&parsed).map_err(ApiError::from)?;
+    let typed = typed_toml(tenant, config, bucket_name, bind_address.clone()).map_err(ApiError::from)?;
+    let rendered_config = toml::to_string_pretty(&typed).map_err(ApiError::from)?;
+    toml::from_str::<TenantToml>(&rendered_config).map_err(ApiError::from)?;
 
     let directory = PathBuf::from(tenant_directory);
     if tokio::fs::metadata(&directory).await.map(|meta| !meta.is_dir()).unwrap_or(true) {
