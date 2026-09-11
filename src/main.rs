@@ -25,6 +25,8 @@ use tower_http::{
 };
 use uuid::Uuid;
 
+// SQLx embeds the complete migration set in this binary at compile time.
+
 #[derive(Parser)]
 struct Args {
     #[command(subcommand)]
