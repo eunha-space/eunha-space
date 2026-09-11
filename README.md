@@ -36,3 +36,19 @@ atomically replaces only the adopted tenant filename in `<tenant-directory>`, gi
 `0600`, and restarts that runtime's launchd service. It validates the stored
 TOML and its instance domain before writing. A control plane on another machine
 refuses the action rather than attempting to reach into a remote filesystem.
+
+## Runtime releases
+
+Eunha code is released once per shared runtime, never per tenant. eunha.space
+builds an immutable bundle from its sibling `../eunha` checkout, including the
+release binary and built frontend, then transfers that bundle over SSH to the
+runtime host. Runtime hosts need neither a source checkout nor build tooling.
+The release operation runs the embedded migrations before an atomic `current`
+switch, health-checks the service, and restores the prior release on failure.
+Its command output is never persisted. The control plane serializes the fleet:
+only one runtime can deploy at a time.
+
+Operators can use **Deploy latest** for a selected runtime. Enabling automatic
+deployment makes the control plane poll `origin/main` every five minutes; each runtime is advanced
+only after the prior runtime completed and only when its recorded deployed
+commit differs. Automatic deployment is opt-in and disabled by default.
