@@ -193,6 +193,7 @@ async fn main() -> Result<()> {
             .timeout(Duration::from_secs(4))
             .build()?,
     });
+    tokio::spawn(health_reconciler(state.clone()));
     let api = Router::new()
         .route("/session", post(login).delete(logout))
         .route("/session/me", get(me))
@@ -421,7 +422,7 @@ async fn tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     operator(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.desired_state,t.observed_state,t.config_revision,t.rendered_revision,t.tenant_file_name,r.name runtime_name,r.bind_address,t.updated_at FROM tenants t JOIN runtimes r ON r.id=t.runtime_id ORDER BY t.domain").fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.desired_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,t.tenant_file_name,r.name runtime_name,r.bind_address,t.updated_at FROM tenants t JOIN runtimes r ON r.id=t.runtime_id ORDER BY t.domain").fetch_all(&s.db).await?))
 }
 async fn operations(
     State(s): State<Shared>,
@@ -449,13 +450,36 @@ async fn check_tenant(
         .map(|r| r.status().is_success())
         .unwrap_or(false);
     let observed = if healthy { "healthy" } else { "unhealthy" };
-    sqlx::query("UPDATE tenants SET observed_state=$1,updated_at=now() WHERE id=$2")
+    sqlx::query("UPDATE tenants SET observed_state=$1,observed_at=now(),observation_error=NULL,updated_at=now() WHERE id=$2")
         .bind(observed)
         .bind(id)
         .execute(&s.db)
         .await?;
     sqlx::query("UPDATE operations SET status='succeeded',detail=jsonb_build_object('healthy',$1),finished_at=now() WHERE id=$2").bind(healthy).bind(op).execute(&s.db).await?;
     Ok(Json(serde_json::json!({"healthy": healthy})))
+}
+
+async fn health_reconciler(state: Shared) {
+    loop {
+        let rows = sqlx::query_as::<_, (Uuid, String, String)>(
+            "SELECT t.id,t.domain,r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.desired_state='running'",
+        )
+        .fetch_all(&state.db)
+        .await;
+        if let Ok(rows) = rows {
+            for (id, domain, bind_address) in rows {
+                let result = state.client.get(format!("http://{bind_address}/api/v2/instance")).header("Host", domain).send().await;
+                let (observed, error) = match result {
+                    Ok(response) if response.status().is_success() => ("healthy", None),
+                    Ok(response) => ("unhealthy", Some(format!("Health endpoint returned {}", response.status()))),
+                    Err(_) => ("unhealthy", Some("Health endpoint was unreachable.".to_string())),
+                };
+                let _ = sqlx::query("UPDATE tenants SET observed_state=$1,observed_at=now(),observation_error=$2,updated_at=now() WHERE id=$3")
+                    .bind(observed).bind(error).bind(id).execute(&state.db).await;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
 }
 
 fn is_safe_domain(domain: &str) -> bool {
@@ -567,13 +591,13 @@ async fn render_tenant(
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     if !healthy {
-        sqlx::query("UPDATE tenants SET observed_state='unhealthy',updated_at=now() WHERE id=$1")
+        sqlx::query("UPDATE tenants SET observed_state='unhealthy',observed_at=now(),observation_error='Tenant did not become healthy after restart.',updated_at=now() WHERE id=$1")
             .bind(id).execute(&s.db).await?;
         mark_operation_failed(&s.db, op, "Configuration rendered and restarted, but the tenant did not become healthy.").await;
         return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Configuration rendered, but the tenant did not become healthy after restart.".into()));
     }
     let checksum = format!("{:x}", Sha256::digest(rendered_config.as_bytes()));
-    sqlx::query("UPDATE tenants SET rendered_revision=$1,rendered_checksum=$2,observed_state='healthy',updated_at=now() WHERE id=$3")
+    sqlx::query("UPDATE tenants SET rendered_revision=$1,rendered_checksum=$2,observed_state='healthy',observed_at=now(),observation_error=NULL,updated_at=now() WHERE id=$3")
         .bind(revision).bind(checksum).bind(id).execute(&s.db).await?;
     sqlx::query("UPDATE operations SET status='succeeded',detail=jsonb_build_object('revision',$1),finished_at=now() WHERE id=$2")
         .bind(revision).bind(op).execute(&s.db).await?;
