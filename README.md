@@ -30,7 +30,7 @@ the console APIs return only operational metadata.
 
 Set `CONTROL_RUNTIME_HOST` to the runtime's exact `host` value on the machine
 that owns its tenant directory. The console's **Render & restart** action then
-atomically replaces only `<tenant-directory>/<domain>.toml`, gives it mode
+atomically replaces only the adopted tenant filename in `<tenant-directory>`, gives it mode
 `0600`, and restarts that runtime's launchd service. It validates the stored
 TOML and its instance domain before writing. A control plane on another machine
 refuses the action rather than attempting to reach into a remote filesystem.

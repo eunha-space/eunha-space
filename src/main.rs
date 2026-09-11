@@ -81,6 +81,7 @@ struct TenantSummary {
     observed_state: String,
     config_revision: i64,
     rendered_revision: Option<i64>,
+    tenant_file_name: String,
     runtime_name: String,
     bind_address: String,
     updated_at: OffsetDateTime,
@@ -220,9 +221,10 @@ async fn import(
     let runtime_id: Uuid = sqlx::query_scalar("INSERT INTO runtimes(id,name,host,tenant_directory,service_label,binary_path,bind_address) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(name) DO UPDATE SET host=excluded.host,tenant_directory=excluded.tenant_directory,service_label=excluded.service_label,binary_path=excluded.binary_path,bind_address=excluded.bind_address RETURNING id")
         .bind(runtime_id).bind(&runtime_name).bind(&host).bind(tenant_directory.to_string_lossy().as_ref()).bind(&service_label).bind(binary_path.to_string_lossy().as_ref()).bind(bind).fetch_one(&mut *tx).await?;
     let tenant_id = Uuid::new_v4();
+    let tenant_file_name = format!("{}.toml", domain.replace('.', "-"));
     let imported_from = config_path.to_string_lossy().to_string();
-    let id: Uuid = sqlx::query_scalar("INSERT INTO tenants(id,domain,title,runtime_id,desired_state,observed_state,config_toml,imported_from) VALUES($1,$2,$3,$4,'running','unknown',$5,$6) ON CONFLICT(domain) DO UPDATE SET title=excluded.title,runtime_id=excluded.runtime_id,config_toml=excluded.config_toml,config_revision=tenants.config_revision+1,updated_at=now() RETURNING id")
-        .bind(tenant_id).bind(domain).bind(title).bind(runtime_id).bind(raw).bind(imported_from).fetch_one(&mut *tx).await?;
+    let id: Uuid = sqlx::query_scalar("INSERT INTO tenants(id,domain,title,runtime_id,desired_state,observed_state,config_toml,tenant_file_name,imported_from) VALUES($1,$2,$3,$4,'running','unknown',$5,$6,$7) ON CONFLICT(domain) DO UPDATE SET title=excluded.title,runtime_id=excluded.runtime_id,config_toml=excluded.config_toml,tenant_file_name=excluded.tenant_file_name,config_revision=tenants.config_revision+1,updated_at=now() RETURNING id")
+        .bind(tenant_id).bind(domain).bind(title).bind(runtime_id).bind(raw).bind(tenant_file_name).bind(imported_from).fetch_one(&mut *tx).await?;
     sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,detail,finished_at) VALUES($1,$2,'import','succeeded',jsonb_build_object('source',$3),now())")
         .bind(Uuid::new_v4()).bind(id).bind(config_path.to_string_lossy().as_ref()).execute(&mut *tx).await?;
     tx.commit().await?;
@@ -311,7 +313,7 @@ async fn tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     operator(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.desired_state,t.observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at FROM tenants t JOIN runtimes r ON r.id=t.runtime_id ORDER BY t.domain").fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.desired_state,t.observed_state,t.config_revision,t.rendered_revision,t.tenant_file_name,r.name runtime_name,r.bind_address,t.updated_at FROM tenants t JOIN runtimes r ON r.id=t.runtime_id ORDER BY t.domain").fetch_all(&s.db).await?))
 }
 async fn operations(
     State(s): State<Shared>,
@@ -363,6 +365,13 @@ fn is_safe_launchd_label(label: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
+fn is_safe_tenant_file_name(file_name: &str) -> bool {
+    file_name.ends_with(".toml")
+        && file_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+}
+
 async fn mark_operation_failed(db: &PgPool, id: Uuid, message: &str) {
     let _ = sqlx::query("UPDATE operations SET status='failed',error=$1,finished_at=now() WHERE id=$2")
         .bind(message)
@@ -377,14 +386,14 @@ async fn render_tenant(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (operator_id, _) = operator(&headers, &s.db).await?;
-    let row = sqlx::query_as::<_, (String, String, String, String, String, i64)>(
-        "SELECT t.domain,t.config_toml,r.host,r.tenant_directory,r.service_label,t.config_revision FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
+    let row = sqlx::query_as::<_, (String, String, String, String, String, String, i64)>(
+        "SELECT t.domain,t.config_toml,r.host,r.tenant_directory,r.service_label,t.tenant_file_name,t.config_revision FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
     )
     .bind(id)
     .fetch_optional(&s.db)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Tenant not found".into()))?;
-    let (domain, config_toml, runtime_host, tenant_directory, service_label, revision) = row;
+    let (domain, config_toml, runtime_host, tenant_directory, service_label, tenant_file_name, revision) = row;
     let op = Uuid::new_v4();
     sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,requested_by,started_at) VALUES($1,$2,'render','running',$3,now())")
         .bind(op).bind(id).bind(operator_id).execute(&s.db).await?;
@@ -394,7 +403,7 @@ async fn render_tenant(
         mark_operation_failed(&s.db, op, "This control plane is not the configured runtime host.").await;
         return Err(ApiError(StatusCode::CONFLICT, "This runtime is managed by a different control-plane host.".into()));
     }
-    if !is_safe_domain(&domain) || !is_safe_launchd_label(&service_label) {
+    if !is_safe_domain(&domain) || !is_safe_launchd_label(&service_label) || !is_safe_tenant_file_name(&tenant_file_name) {
         mark_operation_failed(&s.db, op, "The stored runtime target is invalid.").await;
         return Err(ApiError(StatusCode::CONFLICT, "The stored runtime target is invalid.".into()));
     }
@@ -416,8 +425,8 @@ async fn render_tenant(
         mark_operation_failed(&s.db, op, "The tenant directory is unavailable.").await;
         return Err(ApiError(StatusCode::CONFLICT, "The tenant directory is unavailable.".into()));
     }
-    let target = directory.join(format!("{domain}.toml"));
-    let temporary = directory.join(format!(".{domain}.{}.toml", Uuid::new_v4()));
+    let target = directory.join(&tenant_file_name);
+    let temporary = directory.join(format!(".{tenant_file_name}.{}", Uuid::new_v4()));
     if tokio::fs::write(&temporary, config_toml.as_bytes()).await.is_err() {
         mark_operation_failed(&s.db, op, "The tenant configuration could not be written.").await;
         return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Could not render the tenant configuration.".into()));
