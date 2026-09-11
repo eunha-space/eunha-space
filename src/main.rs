@@ -84,6 +84,7 @@ struct TenantSummary {
     tenant_file_name: String,
     runtime_name: String,
     bind_address: String,
+    #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
 }
 
@@ -94,6 +95,7 @@ struct OperationSummary {
     kind: String,
     status: String,
     error: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
 }
 
