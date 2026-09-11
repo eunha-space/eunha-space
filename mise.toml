@@ -1,0 +1,15 @@
+[tools]
+node = "lts"
+pnpm = "11.9.0"
+rust = "latest"
+
+[tasks.dev]
+run = "cargo run"
+
+[tasks.frontend]
+run = "cd frontend && pnpm install --frozen-lockfile && pnpm run build"
+
+[tasks.build]
+depends = ["frontend"]
+run = "cargo build --release"
+
