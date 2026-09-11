@@ -154,6 +154,7 @@ async fn main() -> Result<()> {
         .route("/session/me", get(me))
         .route("/tenants", get(tenants))
         .route("/tenants/{id}/check", post(check_tenant))
+        .route("/tenants/{id}/render", post(render_tenant))
         .route("/operations", get(operations));
     let frontend = ServeDir::new("frontend/dist")
         .not_found_service(ServeFile::new("frontend/dist/index.html"));
@@ -345,4 +346,112 @@ async fn check_tenant(
         .await?;
     sqlx::query("UPDATE operations SET status='succeeded',detail=jsonb_build_object('healthy',$1),finished_at=now() WHERE id=$2").bind(healthy).bind(op).execute(&s.db).await?;
     Ok(Json(serde_json::json!({"healthy": healthy})))
+}
+
+fn is_safe_domain(domain: &str) -> bool {
+    !domain.is_empty()
+        && domain.len() <= 253
+        && domain
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+}
+
+fn is_safe_launchd_label(label: &str) -> bool {
+    !label.is_empty()
+        && label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+async fn mark_operation_failed(db: &PgPool, id: Uuid, message: &str) {
+    let _ = sqlx::query("UPDATE operations SET status='failed',error=$1,finished_at=now() WHERE id=$2")
+        .bind(message)
+        .bind(id)
+        .execute(db)
+        .await;
+}
+
+async fn render_tenant(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let row = sqlx::query_as::<_, (String, String, String, String, String, i64)>(
+        "SELECT t.domain,t.config_toml,r.host,r.tenant_directory,r.service_label,t.config_revision FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
+    )
+    .bind(id)
+    .fetch_optional(&s.db)
+    .await?
+    .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Tenant not found".into()))?;
+    let (domain, config_toml, runtime_host, tenant_directory, service_label, revision) = row;
+    let op = Uuid::new_v4();
+    sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,requested_by,started_at) VALUES($1,$2,'render','running',$3,now())")
+        .bind(op).bind(id).bind(operator_id).execute(&s.db).await?;
+
+    let configured_host = std::env::var("CONTROL_RUNTIME_HOST").unwrap_or_default();
+    if configured_host.is_empty() || configured_host != runtime_host {
+        mark_operation_failed(&s.db, op, "This control plane is not the configured runtime host.").await;
+        return Err(ApiError(StatusCode::CONFLICT, "This runtime is managed by a different control-plane host.".into()));
+    }
+    if !is_safe_domain(&domain) || !is_safe_launchd_label(&service_label) {
+        mark_operation_failed(&s.db, op, "The stored runtime target is invalid.").await;
+        return Err(ApiError(StatusCode::CONFLICT, "The stored runtime target is invalid.".into()));
+    }
+    let parsed: toml::Value = match toml::from_str(&config_toml) {
+        Ok(value) => value,
+        Err(_) => {
+            mark_operation_failed(&s.db, op, "The stored tenant configuration is invalid TOML.").await;
+            return Err(ApiError(StatusCode::CONFLICT, "The stored tenant configuration is invalid.".into()));
+        }
+    };
+    let config_domain = parsed.get("instance").and_then(toml::Value::as_table).and_then(|instance| instance.get("domain")).and_then(toml::Value::as_str);
+    if config_domain != Some(&domain) {
+        mark_operation_failed(&s.db, op, "The stored configuration domain does not match the tenant.").await;
+        return Err(ApiError(StatusCode::CONFLICT, "The stored configuration does not match this tenant.".into()));
+    }
+
+    let directory = PathBuf::from(tenant_directory);
+    if tokio::fs::metadata(&directory).await.map(|meta| !meta.is_dir()).unwrap_or(true) {
+        mark_operation_failed(&s.db, op, "The tenant directory is unavailable.").await;
+        return Err(ApiError(StatusCode::CONFLICT, "The tenant directory is unavailable.".into()));
+    }
+    let target = directory.join(format!("{domain}.toml"));
+    let temporary = directory.join(format!(".{domain}.{}.toml", Uuid::new_v4()));
+    if tokio::fs::write(&temporary, config_toml.as_bytes()).await.is_err() {
+        mark_operation_failed(&s.db, op, "The tenant configuration could not be written.").await;
+        return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Could not render the tenant configuration.".into()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if tokio::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600)).await.is_err() {
+            let _ = tokio::fs::remove_file(&temporary).await;
+            mark_operation_failed(&s.db, op, "The tenant configuration permissions could not be set.").await;
+            return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Could not secure the rendered configuration.".into()));
+        }
+    }
+    if tokio::fs::rename(&temporary, &target).await.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        mark_operation_failed(&s.db, op, "The tenant configuration could not be activated.").await;
+        return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Could not activate the rendered configuration.".into()));
+    }
+    let uid = match tokio::process::Command::new("id").arg("-u").output().await {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+        _ => {
+            mark_operation_failed(&s.db, op, "The service account could not be identified after rendering.").await;
+            return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Configuration rendered, but the service could not be restarted.".into()));
+        }
+    };
+    let launch_target = format!("gui/{uid}/{service_label}");
+    if !matches!(tokio::process::Command::new("launchctl").args(["kickstart", "-k", &launch_target]).output().await, Ok(output) if output.status.success()) {
+        mark_operation_failed(&s.db, op, "Configuration rendered, but launchd could not restart the instance.").await;
+        return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Configuration rendered, but the instance could not be restarted.".into()));
+    }
+    let checksum = format!("{:x}", Sha256::digest(config_toml.as_bytes()));
+    sqlx::query("UPDATE tenants SET rendered_revision=$1,rendered_checksum=$2,observed_state='unknown',updated_at=now() WHERE id=$3")
+        .bind(revision).bind(checksum).bind(id).execute(&s.db).await?;
+    sqlx::query("UPDATE operations SET status='succeeded',detail=jsonb_build_object('revision',$1),finished_at=now() WHERE id=$2")
+        .bind(revision).bind(op).execute(&s.db).await?;
+    Ok(Json(serde_json::json!({"rendered": true, "revision": revision})))
 }
