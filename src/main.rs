@@ -37,21 +37,6 @@ struct Args {
 enum Command {
     /// Create or replace an operator password from EUNHA_SPACE_ADMIN_PASSWORD.
     SetOperator { username: String },
-    /// Import an existing tenant configuration without changing its runtime.
-    Import {
-        #[arg(long)]
-        config: PathBuf,
-        #[arg(long)]
-        runtime_name: String,
-        #[arg(long)]
-        host: String,
-        #[arg(long)]
-        tenant_directory: PathBuf,
-        #[arg(long)]
-        service_label: String,
-        #[arg(long)]
-        binary_path: PathBuf,
-    },
 }
 
 #[derive(Clone)]
@@ -83,7 +68,6 @@ struct TenantSummary {
     observed_state: String,
     config_revision: i64,
     rendered_revision: Option<i64>,
-    tenant_file_name: String,
     runtime_name: String,
     bind_address: String,
     #[serde(with = "time::serde::rfc3339")]
@@ -167,25 +151,6 @@ async fn main() -> Result<()> {
 
     match args.command {
         Some(Command::SetOperator { username }) => return set_operator(&db, &username).await,
-        Some(Command::Import {
-            config,
-            runtime_name,
-            host,
-            tenant_directory,
-            service_label,
-            binary_path,
-        }) => {
-            return import(
-                &db,
-                config,
-                runtime_name,
-                host,
-                tenant_directory,
-                service_label,
-                binary_path,
-            )
-            .await;
-        }
         None => {}
     }
 
@@ -234,114 +199,6 @@ async fn set_operator(db: &PgPool, username: &str) -> Result<()> {
     println!("Operator {username} is ready.");
     Ok(())
 }
-
-async fn import(
-    db: &PgPool,
-    config_path: PathBuf,
-    runtime_name: String,
-    host: String,
-    tenant_directory: PathBuf,
-    service_label: String,
-    binary_path: PathBuf,
-) -> Result<()> {
-    let raw = tokio::fs::read_to_string(&config_path).await?;
-    let mut parsed: toml::Value = toml::from_str(&raw).context("tenant config is not valid TOML")?;
-    let instance = parsed
-        .get("instance")
-        .and_then(toml::Value::as_table)
-        .context("missing [instance]")?;
-    let domain = instance
-        .get("domain")
-        .and_then(toml::Value::as_str)
-        .context("missing instance.domain")?
-        .to_owned();
-    let title = instance
-        .get("title")
-        .and_then(toml::Value::as_str)
-        .unwrap_or(&domain)
-        .to_owned();
-    let bind = parsed
-        .get("bind_address")
-        .and_then(toml::Value::as_str)
-        .context("missing bind_address")?
-        .to_owned();
-    let bucket_name = take_r2_bucket(&mut parsed)?;
-    let normalized_config = toml::to_string(&parsed).context("serializing normalized tenant config")?;
-    let runtime_id = Uuid::new_v4();
-    let mut tx = db.begin().await?;
-    let runtime_id: Uuid = sqlx::query_scalar("INSERT INTO runtimes(id,name,host,tenant_directory,service_label,binary_path,bind_address) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(name) DO UPDATE SET host=excluded.host,tenant_directory=excluded.tenant_directory,service_label=excluded.service_label,binary_path=excluded.binary_path,bind_address=excluded.bind_address RETURNING id")
-        .bind(runtime_id).bind(&runtime_name).bind(&host).bind(tenant_directory.to_string_lossy().as_ref()).bind(&service_label).bind(binary_path.to_string_lossy().as_ref()).bind(bind).fetch_one(&mut *tx).await?;
-    let tenant_id = Uuid::new_v4();
-    let tenant_file_name = format!("{}.toml", domain.replace('.', "-"));
-    let imported_from = config_path.to_string_lossy().to_string();
-    let id: Uuid = sqlx::query_scalar("INSERT INTO tenants(id,domain,title,runtime_id,desired_state,observed_state,config_toml,tenant_file_name,imported_from) VALUES($1,$2,$3,$4,'running','unknown',$5,$6,$7) ON CONFLICT(domain) DO UPDATE SET title=excluded.title,runtime_id=excluded.runtime_id,config_toml=excluded.config_toml,tenant_file_name=excluded.tenant_file_name,config_revision=tenants.config_revision+1,updated_at=now() RETURNING id")
-        .bind(tenant_id).bind(&domain).bind(title).bind(runtime_id).bind(normalized_config).bind(tenant_file_name).bind(imported_from).fetch_one(&mut *tx).await?;
-    sqlx::query("INSERT INTO r2_buckets(tenant_id,bucket_name) VALUES($1,$2) ON CONFLICT(tenant_id) DO UPDATE SET bucket_name=excluded.bucket_name,lifecycle_state='ready',updated_at=now()")
-        .bind(id).bind(bucket_name).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,detail,finished_at) VALUES($1,$2,'import','succeeded',jsonb_build_object('source',$3),now())")
-        .bind(Uuid::new_v4()).bind(id).bind(config_path.to_string_lossy().as_ref()).execute(&mut *tx).await?;
-    tx.commit().await?;
-    println!("Imported {domain} as {id}; no runtime files were changed.");
-    Ok(())
-}
-
-fn take_r2_bucket(config: &mut toml::Value) -> Result<String> {
-    let media_storage = config
-        .get_mut("media_storage")
-        .and_then(toml::Value::as_table_mut)
-        .context("missing [media_storage]")?;
-    media_storage
-        .remove("bucket")
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .context("missing media_storage.bucket")
-}
-
-/* async fn normalize_r2_buckets(db: &PgPool) -> Result<()> {
-    let tenants = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT t.id,t.config_toml FROM tenants t LEFT JOIN r2_buckets b ON b.tenant_id=t.id WHERE b.tenant_id IS NULL",
-    )
-    .fetch_all(db)
-    .await?;
-    for (tenant_id, config_toml) in tenants {
-        let mut config: toml::Value = toml::from_str(&config_toml)
-            .with_context(|| format!("tenant {tenant_id} has invalid stored TOML"))?;
-        let bucket_name = take_r2_bucket(&mut config)
-            .with_context(|| format!("tenant {tenant_id} is missing an R2 bucket"))?;
-        let normalized_config = toml::to_string(&config)?;
-        let mut tx = db.begin().await?;
-        sqlx::query("INSERT INTO r2_buckets(tenant_id,bucket_name) VALUES($1,$2)")
-            .bind(tenant_id)
-            .bind(bucket_name)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("UPDATE tenants SET config_toml=$1,config_revision=config_revision+1,updated_at=now() WHERE id=$2")
-            .bind(normalized_config)
-            .bind(tenant_id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-    }
-    Ok(())
-}
-
-async fn normalize_typed_configuration(db: &PgPool) -> Result<()> {
-    let rows = sqlx::query_as::<_, (Uuid, String)>("SELECT t.id,t.config_toml FROM tenants t LEFT JOIN tenant_configuration c ON c.tenant_id=t.id WHERE c.tenant_id IS NULL").fetch_all(db).await?;
-    for (id, raw) in rows {
-        let config: TenantToml = toml::from_str(&raw).with_context(|| format!("tenant {id} has invalid configuration"))?;
-        let mut tx = db.begin().await?;
-        sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,resend_api_key,resend_from,media_storage_region,media_storage_endpoint,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url,redis_coordination_url,redis_key_prefix,redis_process_metrics,software_update_url,allowed_private_networks,sign_integrity_proofs,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,delivery_workers,delivery_batch,delivery_concurrency,inbox_workers,inbox_batch,inbox_concurrency,queue_idle_poll_seconds,process_delivery_concurrency,max_concurrent_requests,process_max_tenants,process_database_connections,active_record_encryption_primary_key,active_record_encryption_key_derivation_salt,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38)")
-            .bind(id).bind(&config.database_url).bind(&config.redis_url).bind(&config.resend.api_key).bind(&config.resend.from).bind(&config.media_storage.region).bind(&config.media_storage.endpoint).bind(&config.media_storage.access_key_id).bind(&config.media_storage.secret_access_key).bind(&config.media_storage.base_url)
-            .bind(&config.redis_coordination_url).bind(&config.redis_key_prefix).bind(config.redis_process_metrics).bind(&config.software_update_url).bind(&config.allowed_private_networks).bind(config.sign_integrity_proofs)
-            .bind(config.database_pool.max_connections).bind(config.database_pool.min_connections).bind(config.database_pool.acquire_timeout_seconds).bind(config.database_pool.idle_timeout_seconds)
-            .bind(config.workers.delivery_workers).bind(config.workers.delivery_batch).bind(config.workers.delivery_concurrency).bind(config.workers.inbox_workers).bind(config.workers.inbox_batch).bind(config.workers.inbox_concurrency).bind(config.workers.queue_idle_poll_seconds).bind(config.workers.process_delivery_concurrency)
-            .bind(config.limits.max_concurrent_requests).bind(config.limits.process_max_tenants).bind(config.limits.process_database_connections)
-            .bind(config.active_record_encryption.as_ref().map(|x| &x.primary_key)).bind(config.active_record_encryption.as_ref().map(|x| &x.key_derivation_salt)).bind(config.smtp.as_ref().map(|x| &x.host)).bind(config.smtp.as_ref().map(|x| x.port)).bind(config.smtp.as_ref().map(|x| &x.username)).bind(config.smtp.as_ref().map(|x| &x.password)).bind(config.smtp.as_ref().map(|x| &x.from)).execute(&mut *tx).await?;
-        sqlx::query("UPDATE tenants SET description=$1,short_description=$2,contact_email=$3,registrations_open=$4,approval_required=$5,vapid_private_key=$6,vapid_public_key=$7,icon_url=$8,privacy_policy=$9,terms_of_service=$10,config_revision=config_revision+1,updated_at=now() WHERE id=$11")
-            .bind(&config.instance.description).bind(&config.instance.short_description).bind(&config.instance.contact_email).bind(config.instance.registrations_open).bind(config.instance.approval_required).bind(&config.instance.vapid_private_key).bind(&config.instance.vapid_public_key).bind(&config.instance.icon_url).bind(&config.instance.privacy_policy).bind(&config.instance.terms_of_service).bind(id).execute(&mut *tx).await?;
-        tx.commit().await?;
-    }
-    Ok(())
-} */
 
 fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
@@ -424,7 +281,7 @@ async fn tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     operator(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.desired_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,t.tenant_file_name,r.name runtime_name,r.bind_address,t.updated_at FROM tenants t JOIN runtimes r ON r.id=t.runtime_id ORDER BY t.domain").fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.desired_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at FROM tenants t JOIN runtimes r ON r.id=t.runtime_id ORDER BY t.domain").fetch_all(&s.db).await?))
 }
 async fn operations(
     State(s): State<Shared>,
@@ -451,9 +308,14 @@ async fn check_tenant(
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false);
-    let observed = if healthy { "healthy" } else { "unhealthy" };
-    sqlx::query("UPDATE tenants SET observed_state=$1,observed_at=now(),observation_error=NULL,updated_at=now() WHERE id=$2")
+    let (observed, error) = if healthy {
+        ("healthy", None)
+    } else {
+        ("unhealthy", Some("Health endpoint was unreachable or returned an unsuccessful status."))
+    };
+    sqlx::query("UPDATE tenants SET observed_state=$1,observed_at=now(),observation_error=$2 WHERE id=$3")
         .bind(observed)
+        .bind(error)
         .bind(id)
         .execute(&s.db)
         .await?;
@@ -463,6 +325,12 @@ async fn check_tenant(
 
 async fn health_reconciler(state: Shared) {
     loop {
+        let _ = sqlx::query("DELETE FROM sessions WHERE expires_at <= now()")
+            .execute(&state.db)
+            .await;
+        let _ = sqlx::query("UPDATE tenants SET observed_state='disabled',observed_at=now(),observation_error=NULL WHERE desired_state='disabled' AND observed_state IS DISTINCT FROM 'disabled'")
+            .execute(&state.db)
+            .await;
         let rows = sqlx::query_as::<_, (Uuid, String, String)>(
             "SELECT t.id,t.domain,r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.desired_state='running'",
         )
@@ -476,7 +344,7 @@ async fn health_reconciler(state: Shared) {
                     Ok(response) => ("unhealthy", Some(format!("Health endpoint returned {}", response.status()))),
                     Err(_) => ("unhealthy", Some("Health endpoint was unreachable.".to_string())),
                 };
-                let _ = sqlx::query("UPDATE tenants SET observed_state=$1,observed_at=now(),observation_error=$2,updated_at=now() WHERE id=$3")
+                let _ = sqlx::query("UPDATE tenants SET observed_state=$1,observed_at=now(),observation_error=$2 WHERE id=$3")
                     .bind(observed).bind(error).bind(id).execute(&state.db).await;
             }
         }
@@ -506,6 +374,10 @@ fn is_safe_tenant_file_name(file_name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
 }
 
+fn tenant_file_name(domain: &str) -> String {
+    format!("{}.toml", domain.replace('.', "-"))
+}
+
 async fn mark_operation_failed(db: &PgPool, id: Uuid, message: &str) {
     let _ = sqlx::query("UPDATE operations SET status='failed',error=$1,finished_at=now() WHERE id=$2")
         .bind(message)
@@ -520,15 +392,16 @@ async fn render_tenant(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (operator_id, _) = operator(&headers, &s.db).await?;
-    let row = sqlx::query_as::<_, (SqlJson<StoredTenant>, SqlJson<StoredConfig>, String, String, String, String, String, String, i64)>(
-        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,r.host,r.tenant_directory,r.service_label,r.bind_address,t.tenant_file_name,t.config_revision FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
+    let row = sqlx::query_as::<_, (SqlJson<StoredTenant>, SqlJson<StoredConfig>, String, String, String, String, String, i64)>(
+        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,r.host,r.tenant_directory,r.service_label,r.bind_address,t.config_revision FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
     )
     .bind(id)
     .fetch_optional(&s.db)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Tenant not found".into()))?;
-    let (SqlJson(tenant), SqlJson(config), bucket_name, runtime_host, tenant_directory, service_label, bind_address, tenant_file_name, revision) = row;
+    let (SqlJson(tenant), SqlJson(config), bucket_name, runtime_host, tenant_directory, service_label, bind_address, revision) = row;
     let domain = tenant.domain.clone();
+    let tenant_file_name = tenant_file_name(&domain);
     let op = Uuid::new_v4();
     sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,requested_by,started_at) VALUES($1,$2,'render','running',$3,now())")
         .bind(op).bind(id).bind(operator_id).execute(&s.db).await?;

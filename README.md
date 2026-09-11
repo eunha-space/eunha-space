@@ -2,8 +2,9 @@
 
 The control plane for hosted Eunha instances. PostgreSQL's typed tenant,
 configuration, and R2-resource rows are authoritative; runtime TOML files are
-generated projections and never a second source of truth. `config_toml` is a
-legacy import record and is not read while rendering a tenant.
+generated projections and never a second source of truth. A tenant's runtime
+filename is derived from its domain (for example, `seoul.earth` becomes
+`seoul-earth.toml`).
 
 ## Development
 
