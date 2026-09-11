@@ -386,14 +386,14 @@ async fn render_tenant(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (operator_id, _) = operator(&headers, &s.db).await?;
-    let row = sqlx::query_as::<_, (String, String, String, String, String, String, i64)>(
-        "SELECT t.domain,t.config_toml,r.host,r.tenant_directory,r.service_label,t.tenant_file_name,t.config_revision FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
+    let row = sqlx::query_as::<_, (String, String, String, String, String, String, String, i64)>(
+        "SELECT t.domain,t.config_toml,r.host,r.tenant_directory,r.service_label,r.bind_address,t.tenant_file_name,t.config_revision FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
     )
     .bind(id)
     .fetch_optional(&s.db)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Tenant not found".into()))?;
-    let (domain, config_toml, runtime_host, tenant_directory, service_label, tenant_file_name, revision) = row;
+    let (domain, config_toml, runtime_host, tenant_directory, service_label, bind_address, tenant_file_name, revision) = row;
     let op = Uuid::new_v4();
     sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,requested_by,started_at) VALUES($1,$2,'render','running',$3,now())")
         .bind(op).bind(id).bind(operator_id).execute(&s.db).await?;
@@ -456,6 +456,21 @@ async fn render_tenant(
     if !matches!(tokio::process::Command::new("launchctl").args(["kickstart", "-k", &launch_target]).output().await, Ok(output) if output.status.success()) {
         mark_operation_failed(&s.db, op, "Configuration rendered, but launchd could not restart the instance.").await;
         return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Configuration rendered, but the instance could not be restarted.".into()));
+    }
+    let health_url = format!("http://{bind_address}/api/v2/instance");
+    let mut healthy = false;
+    for _ in 0..20 {
+        if s.client.get(&health_url).header("Host", &domain).send().await.map(|response| response.status().is_success()).unwrap_or(false) {
+            healthy = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if !healthy {
+        sqlx::query("UPDATE tenants SET observed_state='unhealthy',updated_at=now() WHERE id=$1")
+            .bind(id).execute(&s.db).await?;
+        mark_operation_failed(&s.db, op, "Configuration rendered and restarted, but the tenant did not become healthy.").await;
+        return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Configuration rendered, but the tenant did not become healthy after restart.".into()));
     }
     let checksum = format!("{:x}", Sha256::digest(config_toml.as_bytes()));
     sqlx::query("UPDATE tenants SET rendered_revision=$1,rendered_checksum=$2,observed_state='unknown',updated_at=now() WHERE id=$3")
