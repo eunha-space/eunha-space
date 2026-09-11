@@ -1,8 +1,9 @@
 # eunha.space
 
-The control plane for hosted Eunha instances. PostgreSQL is authoritative for
-tenant configuration; runtime TOML files are generated projections and never a
-second source of truth.
+The control plane for hosted Eunha instances. PostgreSQL's typed tenant,
+configuration, and R2-resource rows are authoritative; runtime TOML files are
+generated projections and never a second source of truth. `config_toml` is a
+legacy import record and is not read while rendering a tenant.
 
 ## Development
 

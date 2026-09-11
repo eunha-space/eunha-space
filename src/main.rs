@@ -295,15 +295,6 @@ fn take_r2_bucket(config: &mut toml::Value) -> Result<String> {
         .context("missing media_storage.bucket")
 }
 
-fn insert_r2_bucket(config: &mut toml::Value, bucket_name: &str) -> Result<()> {
-    let media_storage = config
-        .get_mut("media_storage")
-        .and_then(toml::Value::as_table_mut)
-        .context("missing [media_storage]")?;
-    media_storage.insert("bucket".into(), toml::Value::String(bucket_name.to_owned()));
-    Ok(())
-}
-
 async fn normalize_r2_buckets(db: &PgPool) -> Result<()> {
     let tenants = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT t.id,t.config_toml FROM tenants t LEFT JOIN r2_buckets b ON b.tenant_id=t.id WHERE b.tenant_id IS NULL",
