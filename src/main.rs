@@ -162,7 +162,7 @@ async fn main() -> Result<()> {
         .fallback_service(frontend)
         .layer(TraceLayer::new_for_http())
         .with_state(state);
-    let bind = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:61000".into());
+    let bind = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:60001".into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind, "eunha.space control plane listening");
     axum::serve(listener, app).await?;

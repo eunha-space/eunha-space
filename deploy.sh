@@ -13,11 +13,11 @@ LABEL="space.eunha.control-plane"
 launchctl kickstart -k "gui/$UID_N/$LABEL"
 
 for _ in $(seq 1 30); do
-    if curl -sf -o /dev/null http://127.0.0.1:61000/api/session/me; then
+    if curl -sf -o /dev/null http://127.0.0.1:60001/api/session/me; then
         exit 0
     fi
     # A protected endpoint answering 401 proves the HTTP service is ready too.
-    if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:61000/api/session/me)" = 401 ]; then
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:60001/api/session/me)" = 401 ]; then
         exit 0
     fi
     sleep 1
