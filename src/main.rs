@@ -622,24 +622,31 @@ const REDACTED: &str = "<redacted>";
 
 /// Keeps the shape an operator needs to recognise a connection while masking
 /// the password: `postgresql://eunha:<redacted>@127.0.0.1/eunha_seoul_earth`.
+///
+/// Anything this cannot parse with confidence is withheld outright rather than
+/// echoed back, so an unencoded delimiter inside a password cannot leak it.
 fn redact_connection_url(value: &str) -> String {
     let Some((scheme, rest)) = value.split_once("://") else {
         return REDACTED.to_owned();
     };
-    let (authority, path) = match rest.split_once('/') {
-        Some((authority, path)) => (authority, Some(path)),
-        None => (rest, None),
-    };
-    let Some((userinfo, host)) = authority.split_once('@') else {
-        return value.to_owned();
-    };
-    let userinfo = match userinfo.split_once(':') {
-        Some((user, _)) => format!("{user}:{REDACTED}"),
-        None => userinfo.to_owned(),
-    };
-    match path {
-        Some(path) => format!("{scheme}://{userinfo}@{host}/{path}"),
-        None => format!("{scheme}://{userinfo}@{host}"),
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    // A credential may also ride in the query string; that shape is not parsed.
+    if tail.to_ascii_lowercase().contains("password=") {
+        return REDACTED.to_owned();
+    }
+    match authority.rsplit_once('@') {
+        Some((userinfo, host)) => {
+            let userinfo = match userinfo.split_once(':') {
+                Some((user, _)) => format!("{user}:{REDACTED}"),
+                None => userinfo.to_owned(),
+            };
+            format!("{scheme}://{userinfo}@{host}{tail}")
+        }
+        // An '@' past the authority means an unencoded delimiter split the
+        // credentials; the parse is untrustworthy, so withhold the value.
+        None if tail.contains('@') => REDACTED.to_owned(),
+        None => format!("{scheme}://{authority}{tail}"),
     }
 }
 
@@ -1304,4 +1311,50 @@ async fn render_tenant(
     Ok(Json(
         serde_json::json!({"rendered": true, "revision": revision}),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{REDACTED, redact_connection_url};
+
+    #[test]
+    fn masks_a_password_but_keeps_the_connection_recognisable() {
+        assert_eq!(
+            redact_connection_url("postgresql://eunha:s3cret@127.0.0.1/eunha_seoul_earth"),
+            format!("postgresql://eunha:{REDACTED}@127.0.0.1/eunha_seoul_earth")
+        );
+        assert_eq!(
+            redact_connection_url("postgresql://eunha:s3cret@db:5432/eunha?sslmode=require"),
+            format!("postgresql://eunha:{REDACTED}@db:5432/eunha?sslmode=require")
+        );
+    }
+
+    #[test]
+    fn leaves_credential_free_urls_alone() {
+        for url in [
+            "postgresql://limeburst@localhost/eunha_seoul_earth",
+            "redis://127.0.0.1:6379/3",
+            "redis://127.0.0.1:6379",
+        ] {
+            assert_eq!(redact_connection_url(url), url);
+        }
+    }
+
+    #[test]
+    fn withholds_anything_it_cannot_parse_confidently() {
+        // An unencoded delimiter inside the password ends the authority early.
+        assert_eq!(
+            redact_connection_url("postgresql://eunha:pa/ss@127.0.0.1/eunha"),
+            REDACTED
+        );
+        assert_eq!(
+            redact_connection_url("postgresql://eunha:pa?ss@127.0.0.1/eunha"),
+            REDACTED
+        );
+        assert_eq!(
+            redact_connection_url("redis://127.0.0.1:6379?password=s3cret"),
+            REDACTED
+        );
+        assert_eq!(redact_connection_url("not-a-url"), REDACTED);
+    }
 }
