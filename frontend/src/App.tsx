@@ -97,8 +97,10 @@ export function App() {
       try {
         await api(path, { method: "POST", body: body ? JSON.stringify(body) : undefined });
         await load({ manual: true });
+        return true;
       } catch (failure) {
         setError(errorMessage(failure));
+        return false;
       } finally {
         setBusy("");
       }

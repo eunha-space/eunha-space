@@ -15,6 +15,19 @@ mise run frontend
 CONTROL_DATABASE_URL=postgresql://... cargo run
 ```
 
+Tenant provisioning uses `CONTROL_PROVISION_DATABASE_URL` for PostgreSQL role
+and database creation. The account must have `CREATEROLE` and `CREATEDB`; when
+the variable is omitted, the control-plane connection is used. New tenants copy
+shared provider settings from the oldest ready tenant on their selected runtime,
+while receiving fresh database, encryption, and VAPID credentials plus
+`t/<lowercase-hyphenated-uuid>` media isolation. No provider secret is returned
+by the API or written to an operation event.
+
+Provisioning is a persisted sequence of database creation, migration, render,
+reload, and health-check steps. Interrupted work resumes after restart. Failed
+work remains retained and can be retried from the tenant inventory; it is never
+implicitly deprovisioned or purged.
+
 Create the first operator without putting a password in shell history:
 
 ```sh

@@ -4,6 +4,7 @@ export type Tenant = {
   id: string;
   domain: string;
   title: string;
+  lifecycle_state: "provisioning" | "ready" | "failed" | "deprovisioning" | "retained" | "purged";
   desired_state: string;
   observed_state: TenantState;
   config_revision: number;

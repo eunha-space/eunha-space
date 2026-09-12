@@ -1,10 +1,13 @@
 import { useMemo, useState } from "react";
-import { HardDrive, Inbox, RefreshCw } from "lucide-react";
+import { HardDrive, Inbox, Plus, RefreshCw } from "lucide-react";
 import { pendingRender, type Runtime, type Tenant } from "@/api";
 import { absoluteTime, relativeTime } from "@/format";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { ActionButton } from "@/components/console/action-button";
@@ -17,7 +20,7 @@ type Props = {
   tenants: Tenant[];
   runtimes: Runtime[];
   busy: string;
-  act: (path: string, key: string, body?: object) => void;
+  act: (path: string, key: string, body?: object) => Promise<boolean>;
 };
 
 const NEEDS_ATTENTION = new Set(["unhealthy", "unknown"]);
@@ -123,6 +126,7 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
             </CardDescription>
           </div>
           <div className="flex flex-wrap items-center gap-3">
+            <CreateTenantDialog runtimes={runtimes} busy={busy === "create-tenant"} act={act} />
             <div className="flex items-center gap-2">
               <Switch
                 id="group-by-instance"
@@ -197,6 +201,11 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                           Pending render
                         </Badge>
                       )}
+                      {tenant.lifecycle_state !== "ready" && (
+                        <Badge variant="outline" className={tenant.lifecycle_state === "failed" ? "text-destructive" : "text-pending"}>
+                          {tenant.lifecycle_state}
+                        </Badge>
+                      )}
                       {tenant.desired_state !== "running" && (
                         <Badge variant="outline" className="text-muted-foreground">
                           Desired: {tenant.desired_state}
@@ -245,6 +254,11 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                     </div>
                   </dl>
                   <div className="col-span-2 flex flex-wrap gap-2 xl:col-span-1 xl:justify-end">
+                    {tenant.lifecycle_state === "failed" && (
+                      <ActionButton busy={busy === `retry-${tenant.id}`} onClick={() => act(`/tenants/${tenant.id}/retry`, `retry-${tenant.id}`)}>
+                        Retry provisioning
+                      </ActionButton>
+                    )}
                     <TenantConfigDialog tenantId={tenant.id} domain={tenant.domain} />
                     <ActionButton
                       icon={<RefreshCw />}
@@ -273,5 +287,48 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
         )}
       </Card>
     </div>
+  );
+}
+
+function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy: boolean; act: Props["act"] }) {
+  const [open, setOpen] = useState(false);
+  const [domain, setDomain] = useState("");
+  const [title, setTitle] = useState("");
+  const [email, setEmail] = useState("");
+  const [runtimeId, setRuntimeId] = useState("");
+  const [registrationsOpen, setRegistrationsOpen] = useState(true);
+  const [approvalRequired, setApprovalRequired] = useState(false);
+  const selectedRuntime = runtimeId || runtimes[0]?.id || "";
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    const ok = await act("/tenants", "create-tenant", {
+      domain, title, contact_email: email || null, runtime_id: selectedRuntime,
+      registrations_open: registrationsOpen, approval_required: approvalRequired,
+    });
+    if (ok) { setOpen(false); setDomain(""); setTitle(""); setEmail(""); }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger render={<Button />}><Plus />Provision tenant</DialogTrigger>
+      <DialogContent>
+        <form onSubmit={submit} className="grid gap-5">
+          <DialogHeader>
+            <DialogTitle>Provision a tenant</DialogTitle>
+            <DialogDescription>The control plane creates isolated PostgreSQL credentials and UUID-scoped Redis and media keys, then migrates and activates the tenant.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4">
+            <div className="grid gap-2"><Label htmlFor="tenant-domain">Domain</Label><Input id="tenant-domain" value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="community.example" required /></div>
+            <div className="grid gap-2"><Label htmlFor="tenant-title">Name</Label><Input id="tenant-title" value={title} onChange={(e) => setTitle(e.target.value)} required /></div>
+            <div className="grid gap-2"><Label htmlFor="tenant-email">Contact email</Label><Input id="tenant-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
+            <div className="grid gap-2"><Label htmlFor="tenant-runtime">Runtime</Label><select id="tenant-runtime" className="border-input bg-background h-9 rounded-md border px-3 text-sm" value={selectedRuntime} onChange={(e) => setRuntimeId(e.target.value)} required>{runtimes.map((runtime) => <option key={runtime.id} value={runtime.id}>{runtime.instance_name} / {runtime.name}</option>)}</select></div>
+            <div className="flex items-center justify-between gap-4"><Label htmlFor="registrations-open">Open registrations</Label><Switch id="registrations-open" checked={registrationsOpen} onCheckedChange={setRegistrationsOpen} /></div>
+            <div className="flex items-center justify-between gap-4"><Label htmlFor="approval-required">Require approval</Label><Switch id="approval-required" checked={approvalRequired} onCheckedChange={setApprovalRequired} /></div>
+          </div>
+          <DialogFooter><Button type="submit" disabled={busy || !selectedRuntime}>{busy ? "Provisioning…" : "Provision tenant"}</Button></DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
