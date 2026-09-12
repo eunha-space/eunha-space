@@ -44,7 +44,7 @@ export function Releases({ runtimes, busy, act }: Props) {
                 <div className="min-w-0">
                   <h3 className="font-semibold">{runtime.name}</h3>
                   <p className="text-muted-foreground mt-0.5 text-sm break-words">
-                    {runtime.host} · {runtime.tenant_count} tenant
+                    {runtime.instance_address} · {runtime.tenant_count} tenant
                     {runtime.tenant_count === 1 ? "" : "s"}
                   </p>
                   <p
@@ -95,7 +95,7 @@ export function Releases({ runtimes, busy, act }: Props) {
                   disabledReason="A release for this runtime is already in progress."
                   confirm={{
                     title: `Deploy the latest Eunha to ${runtime.name}?`,
-                    description: `This builds the current central release and rolls it out to every tenant on ${runtime.name} (${runtime.tenant_count} tenant${runtime.tenant_count === 1 ? "" : "s"}) on ${runtime.host}. The runtime restarts, and a failed health check restores the previous release.`,
+                    description: `This builds the current central release and rolls it out to every tenant on ${runtime.name} (${runtime.tenant_count} tenant${runtime.tenant_count === 1 ? "" : "s"}) on ${runtime.instance_address}. The runtime restarts, and a failed health check restores the previous release.`,
                     action: "Deploy to the fleet",
                   }}
                   onClick={() => act(`/runtimes/${runtime.id}/release`, `release-${runtime.id}`)}

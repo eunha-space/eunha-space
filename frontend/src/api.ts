@@ -26,8 +26,8 @@ export type Operation = {
 export type Runtime = {
   id: string;
   name: string;
-  /** The machine the runtime runs on, normalised into the hosts table. */
-  host: string;
+  /** Address of the instance the runtime runs on, from the instances table. */
+  instance_address: string;
   bind_address: string;
   service_label: string;
   tenant_directory: string;

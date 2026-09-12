@@ -6,7 +6,8 @@ import { Instances } from "@/Instances";
 import { Login } from "@/Login";
 import { Operations } from "@/Operations";
 import { Releases } from "@/Releases";
-import { Servers } from "@/Servers";
+import { Tenants } from "@/Tenants";
+import { pathFor, useRoute, type View } from "@/router";
 import { Alert, AlertAction, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -21,13 +22,11 @@ type Session =
   | { state: "signed-in"; username: string }
   | { state: "error"; message: string };
 
-type View = "instances" | "servers" | "releases" | "operations";
-
 const POLL_INTERVAL = 3000;
 
 export function App() {
   const [session, setSession] = useState<Session>({ state: "loading" });
-  const [view, setView] = useState<View>("instances");
+  const [view, navigate] = useRoute();
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
   const [operations, setOperations] = useState<Operation[]>([]);
@@ -148,13 +147,13 @@ export function App() {
     setSession({ state: "signed-out" });
   }
 
-  const sections = [
-    { id: "instances" as const, label: "Instances", icon: Server },
-    { id: "servers" as const, label: "Servers", icon: HardDrive },
-    { id: "releases" as const, label: "Releases", icon: Rocket },
-    { id: "operations" as const, label: "Operations", icon: Activity },
+  const sections: { id: View; label: string; icon: typeof Server }[] = [
+    { id: "tenants", label: "Tenants", icon: Server },
+    { id: "instances", label: "Instances", icon: HardDrive },
+    { id: "releases", label: "Releases", icon: Rocket },
+    { id: "operations", label: "Operations", icon: Activity },
   ];
-  const heading = sections.find((section) => section.id === view)?.label ?? "Instances";
+  const heading = sections.find((section) => section.id === view)?.label ?? "Tenants";
 
   return (
     <TooltipProvider delay={200}>
@@ -172,10 +171,16 @@ export function App() {
               <Button
                 key={section.id}
                 variant="ghost"
+                render={<a href={pathFor(section.id)} />}
                 aria-current={view === section.id ? "page" : undefined}
                 aria-label={section.label}
                 title={section.label}
-                onClick={() => setView(section.id)}
+                onClick={(event) => {
+                  // Let modified clicks fall through to the browser.
+                  if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+                  event.preventDefault();
+                  navigate(section.id);
+                }}
                 className={cn(
                   // The mobile bar is icon-only; four labelled items do not fit.
                   "justify-start max-md:size-8 max-md:justify-center max-md:p-0",
@@ -252,10 +257,10 @@ export function App() {
             </Alert>
           )}
 
-          {view === "instances" && (
-            <Instances tenants={tenants} runtimes={runtimes} busy={busy} act={act} />
+          {view === "tenants" && (
+            <Tenants tenants={tenants} runtimes={runtimes} busy={busy} act={act} />
           )}
-          {view === "servers" && <Servers runtimes={runtimes} tenants={tenants} />}
+          {view === "instances" && <Instances runtimes={runtimes} tenants={tenants} />}
           {view === "releases" && <Releases runtimes={runtimes} busy={busy} act={act} />}
           {view === "operations" && <Operations operations={operations} />}
 
