@@ -176,14 +176,18 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                   key={tenant.id}
                   className={cn(
                     "hover:bg-muted/40 grid items-center gap-4 p-5 transition-colors",
-                    "grid-cols-[auto_1fr] xl:grid-cols-[auto_minmax(12rem,1fr)_minmax(18rem,1.2fr)_auto]",
+                    "grid-cols-[auto_1fr] xl:grid-cols-[auto_minmax(10rem,16rem)_minmax(0,1fr)_auto]",
                     index > 0 && "border-border border-t",
                   )}
                 >
                   <StatusDot state={tenant.observed_state} />
                   <div className="min-w-0">
-                    <h3 className="font-semibold">{tenant.domain}</h3>
-                    <p className="text-muted-foreground mt-0.5 text-sm">{tenant.title}</p>
+                    <h3 className="truncate font-semibold" title={tenant.domain}>
+                      {tenant.domain}
+                    </h3>
+                    <p className="text-muted-foreground mt-0.5 truncate text-sm" title={tenant.title}>
+                      {tenant.title}
+                    </p>
                     <div className="mt-1.5 flex flex-wrap gap-1.5 empty:hidden">
                       {pendingRender(tenant) && (
                         <Badge
