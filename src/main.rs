@@ -539,7 +539,7 @@ async fn main() -> Result<()> {
                 zone_id,
                 api_token,
                 cname_target: std::env::var("CLOUDFLARE_SAAS_CNAME_TARGET")
-                    .unwrap_or_else(|_| "t.eunha.space".into()),
+                    .unwrap_or_else(|_| "customers.eunha.space".into()),
             }),
             _ => None,
         },

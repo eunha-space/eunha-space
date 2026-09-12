@@ -36,7 +36,7 @@ platform domains (default `eunha.space`). Provisioning `garden` with
 
 Custom domains require `CLOUDFLARE_ZONE_ID` and `CLOUDFLARE_API_TOKEN`; the
 token needs SSL and Certificates Write and remains process-only. Customers are
-instructed to CNAME to `t.eunha.space`, configurable with
+instructed to CNAME to `customers.eunha.space`, configurable with
 `CLOUDFLARE_SAAS_CNAME_TARGET`. Cloudflare IDs, activation state, and public
 DNS validation instructions are stored, but the token is not. A first custom
 domain becomes canonical only before a local account exists. Later verified
