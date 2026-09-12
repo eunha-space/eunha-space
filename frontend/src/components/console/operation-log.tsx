@@ -41,7 +41,7 @@ export function OperationLog({ operationId, live }: { operationId: string; live:
 
   useEffect(() => {
     if (!live || !tail.current) return;
-    const viewport = tail.current.querySelector<HTMLElement>("[data-radix-scroll-area-viewport]");
+    const viewport = tail.current.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]');
     if (viewport) viewport.scrollTop = viewport.scrollHeight;
   }, [events, live]);
 
