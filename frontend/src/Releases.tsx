@@ -44,7 +44,7 @@ export function Releases({ runtimes, busy, act }: Props) {
                 <div className="min-w-0">
                   <h3 className="font-semibold">{runtime.name}</h3>
                   <p className="text-muted-foreground mt-0.5 text-sm break-words">
-                    {runtime.instance_address} · {runtime.tenant_count} tenant
+                    {runtime.instance_name} ({runtime.instance_address}) · {runtime.tenant_count} tenant
                     {runtime.tenant_count === 1 ? "" : "s"}
                   </p>
                   <p

@@ -34,10 +34,10 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
   const [query, setQuery] = useState("");
 
   const hostByRuntime = useMemo(
-    () => new Map(runtimes.map((runtime) => [runtime.name, runtime.instance_address])),
+    () => new Map(runtimes.map((runtime) => [runtime.name, runtime.instance_name])),
     [runtimes],
   );
-  const hostCount = useMemo(() => new Set(runtimes.map((r) => r.instance_address)).size, [runtimes]);
+  const hostCount = useMemo(() => new Set(runtimes.map((r) => r.instance_name)).size, [runtimes]);
 
   // Grouping only earns its headers once the fleet spans more than one instance.
   const [grouped, setGrouped] = useState<boolean | null>(null);

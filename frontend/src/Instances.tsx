@@ -13,12 +13,12 @@ import { EmptyState } from "@/components/console/status";
  * legitimately share one.
  */
 export function Instances({ runtimes, tenants }: { runtimes: Runtime[]; tenants: Tenant[] }) {
-  const hosts = useMemo(() => {
+  const instances = useMemo(() => {
     const grouped = new Map<string, Runtime[]>();
     for (const runtime of runtimes) {
-      const existing = grouped.get(runtime.instance_address);
+      const existing = grouped.get(runtime.instance_name);
       if (existing) existing.push(runtime);
-      else grouped.set(runtime.instance_address, [runtime]);
+      else grouped.set(runtime.instance_name, [runtime]);
     }
     return [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [runtimes]);
@@ -33,7 +33,7 @@ export function Instances({ runtimes, tenants }: { runtimes: Runtime[]; tenants:
     return grouped;
   }, [tenants]);
 
-  if (hosts.length === 0) {
+  if (instances.length === 0) {
     return (
       <Card className="p-0">
         <EmptyState icon={<HardDrive />}>No instances are registered.</EmptyState>
@@ -43,22 +43,27 @@ export function Instances({ runtimes, tenants }: { runtimes: Runtime[]; tenants:
 
   return (
     <div className="grid gap-4">
-      {hosts.map(([host, hostRuntimes]) => {
-        const hostTenants = hostRuntimes.reduce((total, runtime) => total + runtime.tenant_count, 0);
+      {instances.map(([instanceName, instanceRuntimes]) => {
+        const instanceTenants = instanceRuntimes.reduce(
+          (total, runtime) => total + runtime.tenant_count,
+          0,
+        );
+        const instanceAddress = instanceRuntimes[0]?.instance_address;
         return (
-          <Card key={host} className="gap-0 overflow-hidden p-0">
+          <Card key={instanceName} className="gap-0 overflow-hidden p-0">
             <CardHeader className="flex flex-row items-center gap-3 p-5">
               <HardDrive className="text-muted-foreground" />
               <div className="min-w-0 flex-1">
-                <CardTitle className="font-mono">{host}</CardTitle>
+                <CardTitle className="font-mono">{instanceName}</CardTitle>
                 <CardDescription>
-                  {hostRuntimes.length} runtime{hostRuntimes.length === 1 ? "" : "s"} ·{" "}
-                  {hostTenants} tenant{hostTenants === 1 ? "" : "s"}
+                  {instanceAddress} · {instanceRuntimes.length} runtime
+                  {instanceRuntimes.length === 1 ? "" : "s"} · {instanceTenants} tenant
+                  {instanceTenants === 1 ? "" : "s"}
                 </CardDescription>
               </div>
             </CardHeader>
             <Separator />
-            {hostRuntimes.map((runtime, index) => (
+            {instanceRuntimes.map((runtime, index) => (
               <div
                 key={runtime.id}
                 className={index > 0 ? "border-border border-t p-5" : "p-5"}
