@@ -567,6 +567,10 @@ async fn main() -> Result<()> {
             "/tenants/{id}/domains",
             get(tenant_domains).post(attach_domain),
         )
+        .route(
+            "/tenants/{id}/domains/{domain_id}/cloudflare",
+            post(adopt_legacy_domain),
+        )
         .route("/tenants/{id}/configuration", get(tenant_configuration))
         .route("/tenants/{id}/render", post(render_tenant))
         .route("/runtimes", get(runtimes))
@@ -932,6 +936,45 @@ async fn attach_domain(
     sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) SELECT $1,t.id,t.runtime_id,'custom_domain_attach','running',$2,jsonb_build_object('hostname',$3),now() FROM tenants t WHERE t.id=$4")
         .bind(operation_id).bind(operator_id).bind(&body.hostname).bind(tenant_id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Custom hostname registration queued.')")
+        .bind(operation_id).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"id": domain_id, "operation_id": operation_id})),
+    ))
+}
+
+async fn adopt_legacy_domain(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path((tenant_id, domain_id)): Path<(Uuid, Uuid)>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let cloudflare = s.cloudflare.as_ref().ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Cloudflare for SaaS is not configured.".into(),
+        )
+    })?;
+    let operation_id = Uuid::new_v4();
+    let mut tx = s.db.begin().await?;
+    let hostname = sqlx::query_scalar::<_, String>(
+        "UPDATE tenant_domains d SET kind='custom',status='pending',cname_target=$1,cloudflare_id=NULL,cloudflare_status=NULL,ssl_status=NULL,ownership_name=NULL,ownership_value=NULL,error=NULL,attempts=0,updated_at=now() FROM tenants t WHERE d.id=$2 AND d.tenant_id=$3 AND d.kind='legacy' AND d.is_primary AND t.id=d.tenant_id AND t.lifecycle_state='ready' RETURNING d.hostname",
+    )
+    .bind(&cloudflare.cname_target)
+    .bind(domain_id)
+    .bind(tenant_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| {
+        ApiError(
+            StatusCode::CONFLICT,
+            "Only a ready tenant's legacy primary domain can be adopted.".into(),
+        )
+    })?;
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) SELECT $1,t.id,t.runtime_id,'custom_domain_attach','running',$2,jsonb_build_object('hostname',$3,'mode','adopt_legacy_primary'),now() FROM tenants t WHERE t.id=$4")
+        .bind(operation_id).bind(operator_id).bind(&hostname).bind(tenant_id).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Legacy primary domain queued for Cloudflare for SaaS adoption; ActivityPub identity is unchanged.')")
         .bind(operation_id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok((
@@ -1398,17 +1441,16 @@ async fn healthcheck_host(state: &Shared, tenant_id: Uuid, domain: &str) -> Resu
 async fn healthcheck_url(state: &Shared, bind_address: &str, domain: &str) -> Result<()> {
     let url = format!("http://{bind_address}/api/v2/instance");
     for _ in 0..30 {
-        if let Ok(response) = state.client.get(&url).header("Host", domain).send().await {
-            if response.status().is_success()
-                && response
-                    .json::<serde_json::Value>()
-                    .await
-                    .ok()
-                    .and_then(|body| body.get("domain")?.as_str().map(str::to_owned))
-                    .is_some_and(|served_domain| served_domain.eq_ignore_ascii_case(domain))
-            {
-                return Ok(());
-            }
+        if let Ok(response) = state.client.get(&url).header("Host", domain).send().await
+            && response.status().is_success()
+            && response
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| body.get("domain")?.as_str().map(str::to_owned))
+                .is_some_and(|served_domain| served_domain.eq_ignore_ascii_case(domain))
+        {
+            return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }

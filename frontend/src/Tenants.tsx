@@ -259,7 +259,7 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                         Retry provisioning
                       </ActionButton>
                     )}
-                    <DomainsDialog tenant={tenant} act={act} />
+                    <DomainsDialog tenant={tenant} busy={busy} act={act} />
                     <TenantConfigDialog tenantId={tenant.id} domain={tenant.domain} />
                     <ActionButton
                       icon={<RefreshCw />}
@@ -334,7 +334,7 @@ function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
   );
 }
 
-function DomainsDialog({ tenant, act }: { tenant: Tenant; act: Props["act"] }) {
+function DomainsDialog({ tenant, busy, act }: { tenant: Tenant; busy: string; act: Props["act"] }) {
   const [open, setOpen] = useState(false);
   const [hostname, setHostname] = useState("");
   const [domains, setDomains] = useState<TenantDomain[]>([]);
@@ -345,12 +345,27 @@ function DomainsDialog({ tenant, act }: { tenant: Tenant; act: Props["act"] }) {
       setHostname(""); await refresh();
     }
   }
+  async function adopt(domain: TenantDomain) {
+    if (await act(`/tenants/${tenant.id}/domains/${domain.id}/cloudflare`, `adopt-domain-${domain.id}`)) {
+      await refresh();
+    }
+  }
   return <Dialog open={open} onOpenChange={(next) => { setOpen(next); if (next) void refresh(); }}>
     <DialogTrigger render={<Button variant="outline" />}>Domains</DialogTrigger>
     <DialogContent>
-      <DialogHeader><DialogTitle>Domains for {tenant.domain}</DialogTitle><DialogDescription>A verified custom domain becomes the ActivityPub identity only while the tenant has no local accounts.</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>Domains for {tenant.domain}</DialogTitle><DialogDescription>Manage tenant routing and Cloudflare certificates. Adopting an existing primary domain does not change its ActivityPub identity.</DialogDescription></DialogHeader>
       <div className="grid gap-3">{domains.map((domain) => <div key={domain.id} className="bg-muted/50 rounded-md p-3 text-sm">
-        <div className="flex items-center justify-between gap-2"><span className="font-medium">{domain.hostname}</span><Badge variant="outline">{domain.is_primary ? "primary" : domain.status}</Badge></div>
+        <div className="flex items-center justify-between gap-2"><div className="min-w-0"><span className="block truncate font-medium">{domain.hostname}</span><span className="text-muted-foreground text-xs">{domain.kind === "legacy" ? "Existing domain" : domain.kind === "provided" ? "Eunha hostname" : "Cloudflare for SaaS"}</span></div><div className="flex shrink-0 gap-1"><Badge variant="outline">{domain.is_primary ? "primary" : domain.status}</Badge>{domain.kind === "custom" && <Badge variant="secondary">managed</Badge>}</div></div>
+        {domain.kind === "legacy" && domain.is_primary && <div className="mt-3 flex items-center justify-between gap-4 border-t pt-3"><p className="text-muted-foreground text-xs">Move TLS and routing to the shared Eunha tunnel without changing accounts or actor URLs.</p><ActionButton
+          variant="outline"
+          busy={busy === `adopt-domain-${domain.id}`}
+          confirm={{
+            title: `Manage ${domain.hostname} with Cloudflare?`,
+            description: `Cloudflare for SaaS will issue and manage its certificate. The domain remains the tenant's primary ActivityPub identity. After starting, point its DNS to ${domain.cname_target}.`,
+            action: "Start migration",
+          }}
+          onClick={() => adopt(domain)}
+        >Manage with Cloudflare</ActionButton></div>}
         {domain.kind === "custom" && domain.status !== "active" && <div className="text-muted-foreground mt-2 grid gap-1 font-mono text-xs"><span>CNAME {domain.hostname} → {domain.cname_target}</span>{domain.ownership_name && domain.ownership_value && <span>TXT {domain.ownership_name} → {domain.ownership_value}</span>}<span>Cloudflare: {domain.cloudflare_status ?? "queued"} · TLS: {domain.ssl_status ?? "queued"}</span></div>}
         {domain.error && <p className="text-destructive mt-2">{domain.error}</p>}
       </div>)}</div>
