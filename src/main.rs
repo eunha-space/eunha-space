@@ -717,6 +717,10 @@ fn tenant_database_url(admin_url: &str, tenant_id: Uuid, password: &str) -> Resu
     Ok(url.to_string())
 }
 
+fn tenant_redis_key_prefix(tenant_id: Uuid) -> String {
+    format!("t_{}_", tenant_id.simple())
+}
+
 fn generate_vapid_keypair() -> Result<(String, String)> {
     let signing_key = SigningKey::random(&mut OsRng);
     let pem = signing_key
@@ -804,7 +808,10 @@ async fn create_tenant(
     let encryption_primary = random_hex(32);
     let encryption_salt = random_hex(32);
     let prefix = format!("t/{tenant_id}");
-    let redis_prefix = format!("t:{}:", tenant_id.simple());
+    // Redis keyspaces are separated internally with `:`, so tenant-controlled
+    // prefixes themselves are restricted to Eunha's safe `[A-Za-z0-9_-]`
+    // alphabet.
+    let redis_prefix = tenant_redis_key_prefix(tenant_id);
 
     let mut tx = s.db.begin().await?;
     sqlx::query("INSERT INTO tenants(id,domain,aliases,title,runtime_id,desired_state,observed_state,lifecycle_state,contact_email,registrations_open,approval_required,vapid_private_key,vapid_public_key) VALUES($1,$2,$3,$4,$5,'running','unknown','provisioning',$6,$7,$8,$9,$10)")
@@ -1384,16 +1391,17 @@ async fn healthcheck_host(state: &Shared, tenant_id: Uuid, domain: &str) -> Resu
 async fn healthcheck_url(state: &Shared, bind_address: &str, domain: &str) -> Result<()> {
     let url = format!("http://{bind_address}/api/v2/instance");
     for _ in 0..30 {
-        if state
-            .client
-            .get(&url)
-            .header("Host", domain)
-            .send()
-            .await
-            .map(|response| response.status().is_success())
-            .unwrap_or(false)
-        {
-            return Ok(());
+        if let Ok(response) = state.client.get(&url).header("Host", domain).send().await {
+            if response.status().is_success()
+                && response
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|body| body.get("domain")?.as_str().map(str::to_owned))
+                    .is_some_and(|served_domain| served_domain.eq_ignore_ascii_case(domain))
+            {
+                return Ok(());
+            }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
@@ -2346,7 +2354,20 @@ async fn render_tenant(
 
 #[cfg(test)]
 mod tests {
-    use super::{REDACTED, redact_connection_url};
+    use super::{REDACTED, redact_connection_url, tenant_redis_key_prefix};
+    use uuid::Uuid;
+
+    #[test]
+    fn generated_redis_prefix_uses_eunhas_safe_alphabet() {
+        let id = Uuid::parse_str("9f81d608-3288-4224-9ef3-cfd4e33acf0e").unwrap();
+        let prefix = tenant_redis_key_prefix(id);
+        assert_eq!(prefix, "t_9f81d608328842249ef3cfd4e33acf0e_");
+        assert!(
+            prefix
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        );
+    }
 
     #[test]
     fn masks_a_password_but_keeps_the_connection_recognisable() {
