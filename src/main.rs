@@ -195,6 +195,8 @@ impl Default for DatabasePoolToml {
 struct MediaStorageToml {
     #[serde(skip_serializing_if = "Option::is_none")]
     bucket: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    key_prefix: String,
     region: String,
     endpoint: Option<String>,
     access_key_id: String,
@@ -323,6 +325,7 @@ struct StoredConfig {
     media_storage_access_key_id: String,
     media_storage_secret_access_key: String,
     media_storage_base_url: String,
+    media_storage_key_prefix: String,
     software_update_url: Option<String>,
     allowed_private_networks: Vec<String>,
     sign_integrity_proofs: bool,
@@ -403,6 +406,7 @@ fn typed_toml(
         bind_address,
         media_storage: MediaStorageToml {
             bucket: Some(bucket),
+            key_prefix: config.media_storage_key_prefix,
             region: config.media_storage_region,
             endpoint: config.media_storage_endpoint,
             access_key_id: config.media_storage_access_key_id,
