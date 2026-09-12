@@ -48,6 +48,10 @@ switch, health-checks the service, and restores the prior release on failure.
 Its command output is never persisted. The control plane serializes the fleet:
 only one runtime can deploy at a time.
 
+The admin console shows a live, persisted release tail while a runtime is
+running. It contains only fixed operational milestones; deploy command output is
+deliberately excluded so tenant secrets cannot reach the database or UI.
+
 Operators can use **Deploy latest** for a selected runtime. Enabling automatic
 deployment makes the control plane poll `origin/main` every five minutes; each runtime is advanced
 only after the prior runtime completed and only when its recorded deployed

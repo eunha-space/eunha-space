@@ -100,6 +100,14 @@ struct RuntimeSummary {
     deployed_ref: Option<String>,
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+struct OperationEvent {
+    id: i64,
+    message: String,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: OffsetDateTime,
+}
+
 #[derive(Deserialize)]
 struct Login {
     username: String,
@@ -476,6 +484,7 @@ async fn main() -> Result<()> {
             "/runtimes/{id}/automatic-release",
             post(set_automatic_release),
         )
+        .route("/operations/{id}/events", get(operation_events))
         .route("/operations", get(operations));
     let frontend = ServeDir::new("frontend/dist")
         .not_found_service(ServeFile::new("frontend/dist/index.html"));
@@ -600,6 +609,16 @@ async fn operations(
     Ok(Json(sqlx::query_as("SELECT o.id,t.domain,r.name runtime_name,o.kind,o.status,o.error,o.created_at FROM operations o LEFT JOIN tenants t ON t.id=o.tenant_id LEFT JOIN runtimes r ON r.id=o.runtime_id ORDER BY o.created_at DESC LIMIT 50").fetch_all(&s.db).await?))
 }
 
+async fn operation_events(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<OperationEvent>>, ApiError> {
+    operator(&headers, &s.db).await?;
+    Ok(Json(sqlx::query_as("SELECT id,message,created_at FROM operation_events WHERE operation_id=$1 ORDER BY id")
+        .bind(id).fetch_all(&s.db).await?))
+}
+
 async fn runtimes(
     State(s): State<Shared>,
     headers: HeaderMap,
@@ -684,12 +703,14 @@ async fn run_runtime_release(
     runtime: (String, String, String, String, String),
 ) {
     let (_, host, tenant_directory, service_label, bind_address) = runtime;
-    let result = match build_release().await {
-        Ok(release) => async_deploy_release(&host, &tenant_directory, &service_label, &bind_address, release).await,
+    release_event(&state.db, operation_id, "Release queued; validating the central source checkout.").await;
+    let result = match build_release(&state.db, operation_id).await {
+        Ok(release) => async_deploy_release(&state.db, operation_id, &host, &tenant_directory, &service_label, &bind_address, release).await,
         Err(message) => Err(message),
     };
     match result {
         Ok(reference) => {
+            release_event(&state.db, operation_id, "Runtime is healthy; recording the deployed release.").await;
             let _ = sqlx::query("UPDATE runtimes SET deployed_ref=COALESCE($1,deployed_ref),release_checked_at=now() WHERE id=$2")
                 .bind(reference).bind(runtime_id).execute(&state.db).await;
             let _ = sqlx::query(
@@ -698,8 +719,9 @@ async fn run_runtime_release(
             .bind(operation_id)
             .execute(&state.db)
             .await;
+            release_event(&state.db, operation_id, "Release completed successfully.").await;
         }
-        Err(message) => { let _ = fail_release(&state.db, operation_id, &message).await; }
+        Err(message) => { release_event(&state.db, operation_id, "Release failed; the previous release was retained or restored.").await; let _ = fail_release(&state.db, operation_id, &message).await; }
     }
 }
 
@@ -712,6 +734,11 @@ async fn fail_release(db: &PgPool, operation_id: Uuid, message: &str) -> Result<
     Ok(())
 }
 
+async fn release_event(db: &PgPool, operation_id: Uuid, message: &str) {
+    let _ = sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,$2)")
+        .bind(operation_id).bind(message).execute(db).await;
+}
+
 fn central_paths() -> Result<(PathBuf, PathBuf), String> {
     let exe = std::env::current_exe().map_err(|_| "Control-plane release directory is unavailable.".to_string())?;
     let root = exe.parent().and_then(FsPath::parent).and_then(FsPath::parent)
@@ -721,7 +748,7 @@ fn central_paths() -> Result<(PathBuf, PathBuf), String> {
     Ok((root.to_path_buf(), source))
 }
 
-async fn build_release() -> Result<(String, PathBuf), String> {
+async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathBuf), String> {
     let (root, source) = central_paths()?;
     let source_text = source.to_string_lossy().to_string();
     let status = tokio::process::Command::new("git")
@@ -731,6 +758,7 @@ async fn build_release() -> Result<(String, PathBuf), String> {
     if !status.status.success() || !status.stdout.is_empty() {
         return Err("Central Eunha checkout has uncommitted changes; releases require a commit.".into());
     }
+    release_event(db, operation_id, "Fetching the latest central Eunha source.").await;
     command_status("git", &["-C", &source_text, "fetch", "--prune", "--tags", "origin"], None).await?;
     let output = tokio::process::Command::new("git")
         .args(["-C", &source_text, "rev-parse", "origin/main"])
@@ -742,7 +770,8 @@ async fn build_release() -> Result<(String, PathBuf), String> {
     let reference = String::from_utf8(output.stdout).map_err(|_| "Could not read the central Eunha release.".to_string())?.trim().to_owned();
     if !is_git_sha(&reference) { return Err("Central Eunha release is invalid.".into()); }
     let artifact = root.join("releases").join(&reference);
-    if artifact.join("eunha").is_file() && artifact.join("frontend/dist/index.html").is_file() { return Ok((reference, artifact)); }
+    if artifact.join("eunha").is_file() && artifact.join("frontend/dist/index.html").is_file() { release_event(db, operation_id, "A verified central build already exists; reusing it.").await; return Ok((reference, artifact)); }
+    release_event(db, operation_id, "Building the Eunha frontend and release binary centrally.").await;
     command_status("git", &["-C", &source_text, "checkout", "--detach", "--quiet", &reference], None).await?;
     command_status("mise", &["exec", "--", "pnpm", "--dir", "frontend", "install", "--frozen-lockfile"], Some(&source)).await?;
     command_status("mise", &["exec", "--", "pnpm", "--dir", "frontend", "run", "build"], Some(&source)).await?;
@@ -757,13 +786,21 @@ async fn build_release() -> Result<(String, PathBuf), String> {
 }
 
 async fn command_status(program: &str, args: &[&str], cwd: Option<&FsPath>) -> Result<(), String> {
-    let mut command = tokio::process::Command::new(program);
+    let executable = match program {
+        "mise" => "/opt/homebrew/bin/mise",
+        "git" => "/usr/bin/git",
+        "cp" => "/bin/cp",
+        "ssh" | "scp" => "/usr/bin/ssh",
+        _ => program,
+    };
+    let executable = if program == "scp" { "/usr/bin/scp" } else { executable };
+    let mut command = tokio::process::Command::new(executable);
     command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     if let Some(cwd) = cwd { command.current_dir(cwd); }
     match command.status().await { Ok(status) if status.success() => Ok(()), _ => Err("Central release build failed.".into()) }
 }
 
-async fn async_deploy_release(host: &str, tenant_directory: &str, service_label: &str, bind_address: &str, release: (String, PathBuf)) -> Result<String, String> {
+async fn async_deploy_release(db: &PgPool, operation_id: Uuid, host: &str, tenant_directory: &str, service_label: &str, bind_address: &str, release: (String, PathBuf)) -> Result<String, String> {
     let (reference, artifact) = release;
     let tenant = FsPath::new(tenant_directory);
     let runtime_root = tenant.parent().ok_or_else(|| "Runtime release target is invalid.".to_string())?;
@@ -772,8 +809,11 @@ async fn async_deploy_release(host: &str, tenant_directory: &str, service_label:
     let release_path = releases.join(&reference);
     let artifact_text = artifact.to_string_lossy().to_string();
     let remote_staging = shell_quote(&staging.to_string_lossy());
+    release_event(db, operation_id, "Preparing the runtime release directory.").await;
     command_status("ssh", &[host, &format!("mkdir -p {}", shell_quote(&releases.to_string_lossy()))], None).await.map_err(|_| "Could not prepare the runtime release directory.".to_string())?;
+    release_event(db, operation_id, "Transferring the immutable release bundle to the runtime.").await;
     command_status("scp", &["-r", &artifact_text, &format!("{}:{}", host, remote_staging)], None).await.map_err(|_| "Could not transfer the runtime release bundle.".to_string())?;
+    release_event(db, operation_id, "Applying migrations, switching the runtime, and waiting for health.").await;
     let script = format!("set -eu; rel={}; stage={}; root={}; cd \"$root\"; \"$stage/eunha\" --tenants {} migrate; mv \"$stage\" \"$rel\"; previous=$(readlink current 2>/dev/null || true); ln -sfn \"$rel\" .current.new; mv -h .current.new current; launchctl kickstart -k gui/$(id -u)/{}; for i in $(seq 1 45); do curl -sf -m 5 -o /dev/null http://127.0.0.1:{}/api/v2/instance && exit 0; sleep 1; done; if [ -n \"$previous\" ]; then ln -sfn \"$previous\" .current.new; mv -h .current.new current; launchctl kickstart -k gui/$(id -u)/{}; fi; exit 1", shell_quote(&release_path.to_string_lossy()), remote_staging, shell_quote(&runtime_root.to_string_lossy()), shell_quote(tenant_directory), service_label, bind_address.rsplit(':').next().unwrap_or(""), service_label);
     command_status("ssh", &[host, &script], None).await.map_err(|_| "Runtime migration, switch, or health check failed; the prior release was restored when available.".to_string())?;
     Ok(reference)

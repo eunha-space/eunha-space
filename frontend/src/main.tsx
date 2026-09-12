@@ -6,6 +6,7 @@ import "./styles.css";
 type Tenant = { id:string; domain:string; title:string; desired_state:string; observed_state:string; config_revision:number; rendered_revision:number|null; runtime_name:string; bind_address:string; updated_at:string };
 type Operation = { id:string; domain:string|null; runtime_name:string|null; kind:string; status:string; error:string|null; created_at:string };
 type Runtime = { id:string; name:string; bind_address:string; auto_deploy_enabled:boolean; deployed_ref:string|null };
+type OperationEvent = { id:number; message:string; created_at:string };
 
 async function api<T>(path:string, init?:RequestInit):Promise<T>{
   const response=await fetch(`/api${path}`,{...init,headers:{"Content-Type":"application/json",...(init?.headers||{})}});
@@ -30,9 +31,13 @@ function Login({onLogin}:{onLogin:()=>void}){
 }
 
 function App(){
-  const [user,setUser]=useState<string|null|undefined>(undefined),[tenants,setTenants]=useState<Tenant[]>([]),[runtimes,setRuntimes]=useState<Runtime[]>([]),[ops,setOps]=useState<Operation[]>([]),[busy,setBusy]=useState<string|null>(null),[error,setError]=useState("");
+  const [user,setUser]=useState<string|null|undefined>(undefined),[tenants,setTenants]=useState<Tenant[]>([]),[runtimes,setRuntimes]=useState<Runtime[]>([]),[ops,setOps]=useState<Operation[]>([]),[events,setEvents]=useState<OperationEvent[]>([]),[busy,setBusy]=useState<string|null>(null),[error,setError]=useState("");
   async function load(){try{const me=await api<{username:string}>("/session/me");setUser(me.username);const [t,r,o]=await Promise.all([api<Tenant[]>("/tenants"),api<Runtime[]>("/runtimes"),api<Operation[]>("/operations")]);setTenants(t);setRuntimes(r);setOps(o)}catch{setUser(null)}}
   useEffect(()=>{load()},[]);
+  useEffect(()=>{const timer=window.setInterval(load,3000);return()=>window.clearInterval(timer)},[]);
+  const activeRelease=ops.find(o=>o.kind==="runtime_release"&&o.status==="running");
+  useEffect(()=>{if(!activeRelease){setEvents([]);return} const tail=()=>api<OperationEvent[]>(`/operations/${activeRelease.id}/events`).then(setEvents).catch(()=>{});tail();const timer=window.setInterval(tail,1000);return()=>window.clearInterval(timer)},[activeRelease?.id]);
+  useEffect(()=>{let panel=document.getElementById("runtime-release-tail");if(!activeRelease){panel?.remove();return}if(!panel){panel=document.createElement("section");panel.id="runtime-release-tail";panel.className="panel live-tail";document.querySelector(".workspace")?.append(panel)}panel.replaceChildren();const title=document.createElement("h2");title.textContent="Live release activity";panel.append(title);const list=document.createElement("ol");for(const event of events){const item=document.createElement("li"),time=document.createElement("time");time.textContent=new Date(event.created_at).toLocaleTimeString();item.append(time,document.createTextNode(event.message));list.append(item)}panel.append(list)},[activeRelease?.id,events]);
   if(user===undefined)return <div className="loading">Loading control plane…</div>;
   if(!user)return <Login onLogin={load}/>;
   async function check(id:string){setBusy(id);setError("");try{await api(`/tenants/${id}/check`,{method:"POST"});await load()}catch(e){setError(String(e instanceof Error?e.message:e))}finally{setBusy(null)}}
