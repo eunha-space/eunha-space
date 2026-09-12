@@ -10,7 +10,6 @@ import { Tenants } from "@/Tenants";
 import { pathFor, useRoute, type View } from "@/router";
 import { Alert, AlertAction, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Mark, ThemeToggle } from "@/components/console/brand";
 import { Spinner } from "@/components/console/status";
@@ -110,10 +109,8 @@ export function App() {
   if (session.state === "loading") {
     return (
       <div className="grid min-h-screen place-items-center gap-4 p-4">
-        <div className="grid w-full max-w-md justify-items-center gap-3">
+        <div className="grid justify-items-center gap-3">
           <Mark />
-          <Skeleton className="h-8 w-48" />
-          <Skeleton className="h-4 w-64" />
           <p className="text-muted-foreground flex items-center gap-2 text-sm">
             <Spinner label="Loading" className="size-4" /> Loading the control plane…
           </p>
