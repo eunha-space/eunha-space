@@ -1007,7 +1007,6 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
             .bearer_auth(&cloudflare.api_token)
             .json(&serde_json::json!({
                 "hostname": hostname,
-                "custom_metadata": { "eunha_tenant_id": tenant_id.to_string() },
                 "ssl": { "method": "http", "type": "dv", "settings": { "min_tls_version": "1.2" } }
             }))
             .send()
@@ -1069,12 +1068,20 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
         return Ok(());
     }
 
-    let primary_kind = sqlx::query_scalar::<_, String>(
-        "SELECT kind FROM tenant_domains WHERE tenant_id=$1 AND is_primary",
+    let (primary_id, primary_kind) = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id,kind FROM tenant_domains WHERE tenant_id=$1 AND is_primary",
     )
     .bind(tenant_id)
     .fetch_one(&state.db)
     .await?;
+    // An imported tenant can adopt its existing primary hostname into
+    // Cloudflare for SaaS. Its ActivityPub identity and runtime configuration
+    // are already correct, so activation only completes the durable operation.
+    if primary_id == id {
+        healthcheck_provisioned_tenant(state, tenant_id).await?;
+        finish_domain(&state.db, id).await?;
+        return Ok(());
+    }
     if primary_kind == "custom" {
         sqlx::query("UPDATE tenants SET aliases=CASE WHEN $1=ANY(aliases) THEN aliases ELSE array_append(aliases,$1) END,config_revision=config_revision+1,updated_at=now() WHERE id=$2")
             .bind(&hostname).bind(tenant_id).execute(&state.db).await?;
