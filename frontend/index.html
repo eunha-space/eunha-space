@@ -3,9 +3,18 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
     <link rel="icon" type="image/svg+xml" href="/eunha-symbol-light.svg" media="(prefers-color-scheme: light)" />
     <link rel="icon" type="image/svg+xml" href="/eunha-symbol-dark.svg" media="(prefers-color-scheme: dark)" />
     <title>eunha.space</title>
+    <script>
+      // Resolve the theme before first paint so the console never flashes the wrong one.
+      try {
+        var stored = localStorage.theme;
+        var dark = stored ? stored === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+        document.documentElement.classList.toggle("dark", dark);
+      } catch (_) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -1,0 +1,255 @@
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Activity, CircleAlert, Database, LogOut, RefreshCw, Server, X } from "lucide-react";
+import { ApiError, api, errorMessage, type Operation, type Runtime, type Tenant } from "@/api";
+import { relativeTime } from "@/format";
+import { Instances } from "@/Instances";
+import { Login } from "@/Login";
+import { Operations } from "@/Operations";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { Mark, ThemeToggle } from "@/components/console/brand";
+import { Spinner } from "@/components/console/status";
+import { cn } from "cn";
+
+type Session =
+  | { state: "loading" }
+  | { state: "signed-out" }
+  | { state: "signed-in"; username: string }
+  | { state: "error"; message: string };
+
+type View = "instances" | "operations";
+
+const POLL_INTERVAL = 3000;
+
+export function App() {
+  const [session, setSession] = useState<Session>({ state: "loading" });
+  const [view, setView] = useState<View>("instances");
+  const [tenants, setTenants] = useState<Tenant[]>([]);
+  const [runtimes, setRuntimes] = useState<Runtime[]>([]);
+  const [operations, setOperations] = useState<Operation[]>([]);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [updatedAt, setUpdatedAt] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+  const inFlight = useRef(false);
+
+  const load = useCallback(async (options: { manual?: boolean } = {}) => {
+    if (inFlight.current && !options.manual) return;
+    inFlight.current = true;
+    if (options.manual) setRefreshing(true);
+    try {
+      const me = await api<{ username: string }>("/session/me");
+      const [nextTenants, nextRuntimes, nextOperations] = await Promise.all([
+        api<Tenant[]>("/tenants"),
+        api<Runtime[]>("/runtimes"),
+        api<Operation[]>("/operations"),
+      ]);
+      setSession({ state: "signed-in", username: me.username });
+      setTenants(nextTenants);
+      setRuntimes(nextRuntimes);
+      setOperations(nextOperations);
+      setUpdatedAt(new Date().toISOString());
+      setNow(Date.now());
+    } catch (failure) {
+      if (failure instanceof ApiError && failure.status === 401) {
+        setSession({ state: "signed-out" });
+        setError("");
+      } else {
+        const message = errorMessage(failure);
+        setSession((current) => (current.state === "loading" ? { state: "error", message } : current));
+        setError(message);
+      }
+    } finally {
+      inFlight.current = false;
+      setRefreshing(false);
+    }
+  }, []);
+
+  /** Polling pauses while the tab is hidden and resumes the moment it is shown again. */
+  useEffect(() => {
+    void load();
+    const timer = setInterval(() => {
+      if (!document.hidden) void load();
+    }, POLL_INTERVAL);
+    const onVisibility = () => {
+      if (!document.hidden) void load();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [load]);
+
+  /** Keeps "updated 20 seconds ago" honest even when polling is paused. */
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(timer);
+  }, []);
+
+  const act = useCallback(
+    async (path: string, key: string, body?: object) => {
+      setBusy(key);
+      setError("");
+      try {
+        await api(path, { method: "POST", body: body ? JSON.stringify(body) : undefined });
+        await load({ manual: true });
+      } catch (failure) {
+        setError(errorMessage(failure));
+      } finally {
+        setBusy("");
+      }
+    },
+    [load],
+  );
+
+  if (session.state === "loading") {
+    return (
+      <div className="grid min-h-screen place-items-center gap-4 p-4">
+        <div className="grid w-full max-w-md justify-items-center gap-3">
+          <Mark />
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-4 w-64" />
+          <p className="text-muted-foreground flex items-center gap-2 text-sm">
+            <Spinner label="Loading" className="size-4" /> Loading the control plane…
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (session.state === "error") {
+    return (
+      <div className="grid min-h-screen place-items-center p-4">
+        <div className="grid justify-items-center gap-3 text-center">
+          <Mark />
+          <h1 className="text-2xl font-semibold tracking-tight">Control plane unreachable</h1>
+          <p className="text-muted-foreground max-w-prose text-sm">{session.message}</p>
+          <Button onClick={() => void load({ manual: true })}>
+            <RefreshCw />
+            Try again
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (session.state === "signed-out") {
+    return <Login done={() => void load({ manual: true })} />;
+  }
+
+  async function signOut() {
+    await api("/session", { method: "DELETE" });
+    setSession({ state: "signed-out" });
+  }
+
+  const sections = [
+    { id: "instances" as const, label: "Instances", icon: Server },
+    { id: "operations" as const, label: "Operations", icon: Activity },
+  ];
+
+  return (
+    <TooltipProvider delayDuration={200}>
+      <div className="min-h-screen md:grid md:grid-cols-[15rem_1fr]">
+        <aside className="bg-sidebar border-border flex items-center gap-3 border-b p-3 md:fixed md:h-screen md:w-60 md:flex-col md:items-stretch md:gap-0 md:border-r md:border-b-0 md:p-5">
+          <div className="flex items-center gap-3">
+            <Mark className="size-10" />
+            <div className="hidden flex-col md:flex">
+              <strong className="leading-tight">eunha.space</strong>
+              <span className="text-muted-foreground text-sm">Control plane</span>
+            </div>
+          </div>
+          <nav aria-label="Console sections" className="flex gap-1 md:mt-8 md:grid">
+            {sections.map((section) => (
+              <Button
+                key={section.id}
+                variant="ghost"
+                aria-current={view === section.id ? "page" : undefined}
+                onClick={() => setView(section.id)}
+                className={cn(
+                  "justify-start",
+                  view === section.id
+                    ? "bg-sidebar-accent text-sidebar-accent-foreground font-semibold"
+                    : "text-muted-foreground",
+                )}
+              >
+                <section.icon />
+                {section.label}
+              </Button>
+            ))}
+          </nav>
+          <div className="ml-auto flex items-center gap-2 md:mt-auto md:ml-0 md:justify-between md:border-t md:pt-4">
+            <span className="text-muted-foreground hidden truncate text-sm md:inline">
+              {session.username}
+            </span>
+            <Button variant="outline" size="icon" onClick={() => void signOut()} aria-label="Sign out" title="Sign out">
+              <LogOut />
+            </Button>
+          </div>
+        </aside>
+
+        <main
+          className="mx-auto w-full max-w-[92rem] p-4 md:col-start-2 md:px-8 md:py-8"
+          aria-busy={refreshing}
+        >
+          <header className="mb-6 flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <p className="text-primary mb-1 text-xs font-extrabold tracking-[0.18em]">RUNTIME FLEET</p>
+              <h1 className="text-3xl font-semibold tracking-tight">
+                {view === "instances" ? "Instances" : "Operations"}
+              </h1>
+            </div>
+            <div className="flex items-center gap-2">
+              <p className="text-muted-foreground flex items-center gap-1.5 text-sm whitespace-nowrap">
+                <span className="bg-primary size-1.5 animate-pulse rounded-full" aria-hidden="true" />
+                {updatedAt ? `Updated ${relativeTime(updatedAt, now)}` : "Awaiting first update"}
+              </p>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => void load({ manual: true })}
+                disabled={refreshing}
+                aria-label="Refresh now"
+                title="Refresh now"
+              >
+                <RefreshCw className={refreshing ? "animate-spin" : undefined} />
+              </Button>
+              <ThemeToggle />
+            </div>
+          </header>
+
+          {error && (
+            <Alert variant="destructive" role="alert" className="mb-4">
+              <CircleAlert />
+              <AlertDescription className="flex-1">{error}</AlertDescription>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setError("")}
+                aria-label="Dismiss this message"
+              >
+                <X />
+              </Button>
+            </Alert>
+          )}
+
+          {view === "instances" ? (
+            <Instances tenants={tenants} runtimes={runtimes} busy={busy} act={act} />
+          ) : (
+            <Operations operations={operations} />
+          )}
+
+          <Separator className="mt-8" />
+          <footer className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
+            <Database className="size-3.5" />
+            Control-plane PostgreSQL is authoritative · secret values never leave the API
+          </footer>
+        </main>
+      </div>
+    </TooltipProvider>
+  );
+}
