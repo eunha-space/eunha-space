@@ -34,9 +34,19 @@ platform domains (default `eunha.space`). Provisioning `garden` with
 `garden.eunha.site` as an alias. Infrastructure labels are reserved in the
 `reserved_subdomains` table.
 
-Custom domains require `CLOUDFLARE_ZONE_ID` and `CLOUDFLARE_API_TOKEN`; the
-token needs SSL and Certificates Write and remains process-only. Customers are
-instructed to CNAME to `customers.eunha.space`, configurable with
+Each runtime has an explicit `origin_hostname`, such as
+`shared-small.kr-seongsu-m4.origin.eunha.space`. Infrastructure must configure
+that hostname as a proxied DNS record for the runtime's dedicated Cloudflare
+Tunnel. The platform domains use one proxied wildcard DNS record. Provisioned
+hostnames are registered as Cloudflare for SaaS custom hostnames and routed to
+their runtime origin, so tenant count does not consume the zone's DNS-record
+quota.
+
+Provided and customer-owned domains require `CLOUDFLARE_ZONE_ID` and
+`CLOUDFLARE_API_TOKEN`; the token needs SSL and Certificates Write and remains
+process-only. Each hostname is registered with its tenant runtime's
+`origin_hostname`, while
+customers are instructed to CNAME to `customers.eunha.space`, configurable with
 `CLOUDFLARE_SAAS_CNAME_TARGET`. Cloudflare IDs, activation state, and public
 DNS validation instructions are stored, but the token is not. A first custom
 domain becomes canonical only before a local account exists. Later verified
@@ -83,3 +93,10 @@ Operators can use **Deploy latest** for a selected runtime. Enabling automatic
 deployment makes the control plane poll `origin/main` every five minutes; each runtime is advanced
 only after the prior runtime completed and only when its recorded deployed
 commit differs. Automatic deployment is opt-in and disabled by default.
+
+Router-enabled runtimes use HAProxy on their stable `bind_address` and two
+launchd-managed Eunha slots on `blue_bind_address` and `green_bind_address`.
+The deployer starts and health-checks the inactive slot, gracefully reloads
+HAProxy so new connections use it, drains the old slot, and then stops it. The
+one-time `ops/eunha-runtime-router bootstrap` cutover is required before setting
+`router_enabled`; subsequent releases are blue/green.

@@ -115,6 +115,10 @@ struct RuntimeSummary {
     bind_address: String,
     service_label: String,
     tenant_directory: String,
+    origin_hostname: String,
+    router_enabled: bool,
+    blue_bind_address: String,
+    green_bind_address: String,
     tenant_count: i64,
     auto_deploy_enabled: bool,
     deployed_ref: Option<String>,
@@ -788,6 +792,30 @@ async fn create_tenant(
         ));
     }
 
+    let origin_hostname =
+        sqlx::query_scalar::<_, String>("SELECT origin_hostname FROM runtimes WHERE id=$1")
+            .bind(body.runtime_id)
+            .fetch_optional(&s.db)
+            .await?
+            .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "Select a valid runtime.".into()))?;
+    if !is_valid_domain(&origin_hostname) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "The selected runtime has an invalid Cloudflare origin hostname.".into(),
+        ));
+    }
+    let cname_target = s
+        .cloudflare
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Cloudflare for SaaS is not configured.".into(),
+            )
+        })?
+        .cname_target
+        .clone();
+
     let template = sqlx::query_scalar::<_, Uuid>(
         "SELECT t.id FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.runtime_id=$1 AND t.lifecycle_state='ready' ORDER BY t.created_at LIMIT 1",
     ).bind(body.runtime_id).fetch_optional(&s.db).await?
@@ -841,12 +869,12 @@ async fn create_tenant(
     sqlx::query("INSERT INTO r2_buckets(tenant_id,bucket_name,lifecycle_state) SELECT $1,bucket_name,'provisioning' FROM r2_buckets WHERE tenant_id=$2")
         .bind(tenant_id).bind(template).execute(&mut *tx).await?;
     for (index, hostname) in provided_domains.iter().enumerate() {
-        sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary) VALUES($1,$2,$3,'provided','active',$4)")
-            .bind(Uuid::new_v4()).bind(tenant_id).bind(hostname).bind(index == 0).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary,cname_target) VALUES($1,$2,$3,'provided','pending',$4,$5)")
+            .bind(Uuid::new_v4()).bind(tenant_id).bind(hostname).bind(index == 0).bind(&cname_target).execute(&mut *tx).await?;
     }
     sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) VALUES($1,$2,$3,'tenant_provision','running',$4,jsonb_build_object('domain',$5),now())")
         .bind(operation_id).bind(tenant_id).bind(body.runtime_id).bind(operator_id).bind(&domain).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['database','migrate','render','reload','health'])")
+    sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['database','migrate','render','reload','health','routing'])")
         .bind(tenant_id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Tenant reserved; provisioning queued.')")
         .bind(operation_id).execute(&mut *tx).await?;
@@ -996,7 +1024,7 @@ fn is_valid_domain(domain: &str) -> bool {
 
 async fn domain_reconciler(state: Shared) {
     loop {
-        if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM tenant_domains WHERE kind='custom' AND status='pending' AND updated_at < now()-interval '15 seconds' ORDER BY created_at LIMIT 10")
+        if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT d.id FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id JOIN runtimes r ON r.id=t.runtime_id WHERE d.kind IN ('provided','custom') AND ((d.status='pending' AND d.updated_at < now()-interval '15 seconds') OR d.routed_origin_hostname IS DISTINCT FROM r.origin_hostname) ORDER BY d.created_at LIMIT 10")
             .fetch_all(&state.db).await {
             for id in ids {
                 if reconcile_domain(&state, id).await.is_err() { record_domain_error(&state.db, id).await; }
@@ -1007,8 +1035,8 @@ async fn domain_reconciler(state: Shared) {
 }
 
 async fn record_domain_error(db: &PgPool, id: Uuid) {
-    let message = "Custom domain activation failed without changing the tenant identity.";
-    let failed = sqlx::query_scalar::<_, bool>("UPDATE tenant_domains SET attempts=attempts+1,status=CASE WHEN attempts+1 >= 5 THEN 'failed' ELSE status END,error=$1,updated_at=now() WHERE id=$2 RETURNING status='failed'")
+    let message = "Hostname routing could not be reconciled; existing routing remains unchanged.";
+    let failed = sqlx::query_scalar::<_, bool>("UPDATE tenant_domains SET attempts=attempts+1,status=CASE WHEN status='pending' AND attempts+1 >= 5 THEN 'failed' ELSE status END,error=$1,updated_at=now() WHERE id=$2 RETURNING status='failed'")
         .bind(message).bind(id).fetch_optional(db).await;
     let is_failed = failed.ok().flatten().unwrap_or(false);
     if !is_failed {
@@ -1023,8 +1051,8 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
         .cloudflare
         .as_ref()
         .context("Cloudflare is not configured")?;
-    let (tenant_id, hostname, cloudflare_id) = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
-        "SELECT tenant_id,hostname,cloudflare_id FROM tenant_domains WHERE id=$1",
+    let (tenant_id, hostname, kind, cloudflare_id, origin_hostname, routed_origin_hostname) = sqlx::query_as::<_, (Uuid, String, String, Option<String>, String, Option<String>)>(
+        "SELECT d.tenant_id,d.hostname,d.kind,d.cloudflare_id,r.origin_hostname,d.routed_origin_hostname FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id JOIN runtimes r ON r.id=t.runtime_id WHERE d.id=$1",
     )
     .bind(id)
     .fetch_one(&state.db)
@@ -1033,10 +1061,20 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
         "https://api.cloudflare.com/client/v4/zones/{}/custom_hostnames",
         cloudflare.zone_id
     );
+    let origin_changed = routed_origin_hostname.as_deref() != Some(origin_hostname.as_str());
     let response: serde_json::Value = if let Some(cloudflare_id) = &cloudflare_id {
-        state
-            .client
-            .get(format!("{endpoint}/{cloudflare_id}"))
+        let request = if origin_changed {
+            state
+                .client
+                .patch(format!("{endpoint}/{cloudflare_id}"))
+                .json(&serde_json::json!({
+                    "custom_origin_server": origin_hostname,
+                    "ssl": { "method": "http", "type": "dv", "settings": { "min_tls_version": "1.2" } }
+                }))
+        } else {
+            state.client.get(format!("{endpoint}/{cloudflare_id}"))
+        };
+        request
             .bearer_auth(&cloudflare.api_token)
             .send()
             .await?
@@ -1050,6 +1088,7 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
             .bearer_auth(&cloudflare.api_token)
             .json(&serde_json::json!({
                 "hostname": hostname,
+                "custom_origin_server": origin_hostname,
                 "ssl": { "method": "http", "type": "dv", "settings": { "min_tls_version": "1.2" } }
             }))
             .send()
@@ -1083,8 +1122,8 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
     let ownership_value = result
         .pointer("/ownership_verification/value")
         .and_then(|v| v.as_str());
-    sqlx::query("UPDATE tenant_domains SET cloudflare_id=$1,cloudflare_status=$2,ssl_status=$3,ownership_name=$4,ownership_value=$5,updated_at=now() WHERE id=$6")
-        .bind(cf_id).bind(cf_status).bind(ssl_status).bind(ownership_name).bind(ownership_value).bind(id).execute(&state.db).await?;
+    sqlx::query("UPDATE tenant_domains SET cloudflare_id=$1,cloudflare_status=$2,ssl_status=$3,ownership_name=$4,ownership_value=$5,routed_origin_hostname=$6,updated_at=now() WHERE id=$7")
+        .bind(cf_id).bind(cf_status).bind(ssl_status).bind(ownership_name).bind(ownership_value).bind(&origin_hostname).bind(id).execute(&state.db).await?;
     anyhow::ensure!(
         !matches!(
             cf_status,
@@ -1103,6 +1142,7 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
             .patch(format!("{endpoint}/{cf_id}"))
             .bearer_auth(&cloudflare.api_token)
             .json(&serde_json::json!({
+                "custom_origin_server": origin_hostname,
                 "ssl": {"method": "http", "type": "dv", "settings": {"min_tls_version": "1.2"}}
             }))
             .send()
@@ -1122,6 +1162,11 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
     // are already correct, so activation only completes the durable operation.
     if primary_id == id {
         healthcheck_provisioned_tenant(state, tenant_id).await?;
+        finish_domain(&state.db, id).await?;
+        return Ok(());
+    }
+    if kind == "provided" {
+        healthcheck_host(state, tenant_id, &hostname).await?;
         finish_domain(&state.db, id).await?;
         return Ok(());
     }
@@ -1238,7 +1283,19 @@ async fn fail_provisioning(db: &PgPool, tenant_id: Uuid, step: &str) {
 }
 
 async fn provision_tenant(state: &Shared, tenant_id: Uuid) {
-    for step in ["database", "migrate", "render", "reload", "health"] {
+    for step in [
+        "database", "migrate", "render", "reload", "health", "routing",
+    ] {
+        if step == "routing" {
+            match tenant_routing_ready(&state.db, tenant_id).await {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(_) => {
+                    fail_provisioning(&state.db, tenant_id, step).await;
+                    return;
+                }
+            }
+        }
         let should_run = match provisioning_step(state, tenant_id, step).await {
             Ok(value) => value,
             Err(_) => return,
@@ -1254,6 +1311,7 @@ async fn provision_tenant(state: &Shared, tenant_id: Uuid) {
                 .map(|_| ()),
             "reload" => reload_provisioned_runtime(state, tenant_id).await,
             "health" => healthcheck_provisioned_tenant(state, tenant_id).await,
+            "routing" => Ok(()),
             _ => unreachable!(),
         };
         if result.is_err() {
@@ -1277,6 +1335,21 @@ async fn provision_tenant(state: &Shared, tenant_id: Uuid) {
     .await;
     let _ = sqlx::query("UPDATE operations SET status='succeeded',finished_at=now() WHERE id=(SELECT id FROM operations WHERE tenant_id=$1 AND kind='tenant_provision' AND status='running' ORDER BY created_at DESC LIMIT 1)")
         .bind(tenant_id).execute(&state.db).await;
+}
+
+async fn tenant_routing_ready(db: &PgPool, tenant_id: Uuid) -> Result<bool> {
+    let statuses = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM tenant_domains WHERE tenant_id=$1 AND kind='provided'",
+    )
+    .bind(tenant_id)
+    .fetch_all(db)
+    .await?;
+    anyhow::ensure!(!statuses.is_empty(), "tenant has no provided hostname");
+    anyhow::ensure!(
+        !statuses.iter().any(|status| status == "failed"),
+        "provided hostname routing failed"
+    );
+    Ok(statuses.iter().all(|status| status == "active"))
 }
 
 async fn create_tenant_database(state: &Shared, tenant_id: Uuid) -> Result<()> {
@@ -1394,16 +1467,14 @@ async fn render_provisioned_tenant(state: &Shared, tenant_id: Uuid) -> Result<()
 }
 
 async fn reload_provisioned_runtime(state: &Shared, tenant_id: Uuid) -> Result<()> {
-    let service_label = sqlx::query_scalar::<_, String>(
-        "SELECT r.service_label FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
+    let (service_label, router_enabled, tenant_directory) = sqlx::query_as::<_, (String, bool, String)>(
+        "SELECT r.service_label,r.router_enabled,r.tenant_directory FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
     )
     .bind(tenant_id)
     .fetch_one(&state.db)
     .await?;
-    anyhow::ensure!(
-        is_safe_launchd_label(&service_label),
-        "invalid service label"
-    );
+    let service_label =
+        active_runtime_label(&service_label, router_enabled, &tenant_directory).await?;
     let uid = tokio::process::Command::new("id")
         .arg("-u")
         .output()
@@ -1420,6 +1491,31 @@ async fn reload_provisioned_runtime(state: &Shared, tenant_id: Uuid) -> Result<(
         .await?;
     anyhow::ensure!(output.status.success(), "launchd reload failed");
     Ok(())
+}
+
+async fn active_runtime_label(
+    service_label: &str,
+    router_enabled: bool,
+    tenant_directory: &str,
+) -> Result<String> {
+    anyhow::ensure!(
+        is_safe_launchd_label(service_label),
+        "invalid service label"
+    );
+    if !router_enabled {
+        return Ok(service_label.to_owned());
+    }
+    let state = PathBuf::from(tenant_directory)
+        .parent()
+        .context("runtime directory has no parent")?
+        .join("router/active-slot");
+    let slot = tokio::fs::read_to_string(state).await?;
+    let slot = slot.trim();
+    anyhow::ensure!(
+        matches!(slot, "blue" | "green"),
+        "invalid active runtime slot"
+    );
+    Ok(format!("{service_label}.{slot}"))
 }
 
 async fn healthcheck_provisioned_tenant(state: &Shared, tenant_id: Uuid) -> Result<()> {
@@ -1585,7 +1681,7 @@ async fn runtimes(
     headers: HeaderMap,
 ) -> Result<Json<Vec<RuntimeSummary>>, ApiError> {
     operator(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT r.id,r.name,i.name instance_name,i.address instance_address,r.bind_address,r.service_label,r.tenant_directory,(SELECT count(*) FROM tenants WHERE runtime_id=r.id) tenant_count,r.auto_deploy_enabled,r.deployed_ref,o.id release_operation_id,o.status release_status,e.message release_message FROM runtimes r JOIN instances i ON i.id=r.instance_id LEFT JOIN LATERAL (SELECT id,status FROM operations WHERE runtime_id=r.id AND kind='runtime_release' ORDER BY created_at DESC LIMIT 1) o ON true LEFT JOIN LATERAL (SELECT string_agg(message,E'\\n' ORDER BY id) message FROM operation_events WHERE operation_id=o.id) e ON true ORDER BY i.name,r.name").fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT r.id,r.name,i.name instance_name,i.address instance_address,r.bind_address,r.service_label,r.tenant_directory,r.origin_hostname,r.router_enabled,r.blue_bind_address,r.green_bind_address,(SELECT count(*) FROM tenants WHERE runtime_id=r.id) tenant_count,r.auto_deploy_enabled,r.deployed_ref,o.id release_operation_id,o.status release_status,e.message release_message FROM runtimes r JOIN instances i ON i.id=r.instance_id LEFT JOIN LATERAL (SELECT id,status FROM operations WHERE runtime_id=r.id AND kind='runtime_release' ORDER BY created_at DESC LIMIT 1) o ON true LEFT JOIN LATERAL (SELECT string_agg(message,E'\\n' ORDER BY id) message FROM operation_events WHERE operation_id=o.id) e ON true ORDER BY i.name,r.name").fetch_all(&s.db).await?))
 }
 
 async fn set_automatic_release(
@@ -1630,8 +1726,8 @@ async fn queue_runtime_release(
     requested_by: Option<Uuid>,
     trigger: &str,
 ) -> Result<Uuid, ApiError> {
-    let row = sqlx::query_as::<_, (String, String, String, String, String)>(
-        "SELECT r.name,i.address,r.tenant_directory,r.service_label,r.bind_address FROM runtimes r JOIN instances i ON i.id=r.instance_id WHERE r.id=$1",
+    let row = sqlx::query_as::<_, (String, String, String, String, String, bool, String, String, String)>(
+        "SELECT r.name,i.address,r.tenant_directory,r.service_label,r.bind_address,r.router_enabled,r.blue_bind_address,r.green_bind_address,(SELECT domain FROM tenants WHERE runtime_id=r.id ORDER BY created_at LIMIT 1) FROM runtimes r JOIN instances i ON i.id=r.instance_id WHERE r.id=$1",
     )
     .bind(runtime_id)
     .fetch_optional(&state.db)
@@ -1641,6 +1737,10 @@ async fn queue_runtime_release(
         || !is_safe_remote_host(&row.1)
         || !is_safe_absolute_path(FsPath::new(&row.2))
         || !is_safe_launchd_label(&row.3)
+        || !is_safe_bind_address(&row.4)
+        || !is_safe_bind_address(&row.6)
+        || !is_safe_bind_address(&row.7)
+        || !is_safe_domain(&row.8)
     {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -1674,9 +1774,29 @@ async fn run_runtime_release(
     operation_id: Uuid,
     deployment_id: Uuid,
     runtime_id: Uuid,
-    runtime: (String, String, String, String, String),
+    runtime: (
+        String,
+        String,
+        String,
+        String,
+        String,
+        bool,
+        String,
+        String,
+        String,
+    ),
 ) {
-    let (_, host, tenant_directory, service_label, bind_address) = runtime;
+    let (
+        _,
+        host,
+        tenant_directory,
+        service_label,
+        bind_address,
+        router_enabled,
+        blue,
+        green,
+        health_host,
+    ) = runtime;
     release_event(
         &state.db,
         operation_id,
@@ -1707,6 +1827,10 @@ async fn run_runtime_release(
                 &tenant_directory,
                 &service_label,
                 &bind_address,
+                router_enabled,
+                &blue,
+                &green,
+                &health_host,
                 release,
             )
             .await
@@ -1834,7 +1958,26 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
         return Err("Central Eunha release is invalid.".into());
     }
     let artifact = root.join("releases").join(&reference);
-    if artifact.join("eunha").is_file() && artifact.join("frontend/dist/index.html").is_file() {
+    if artifact.join("eunha").is_file()
+        && artifact.join("eunha-runtime-router").is_file()
+        && artifact.join("frontend/dist/index.html").is_file()
+    {
+        tokio::fs::copy(
+            root.join("ops/eunha-runtime-router"),
+            artifact.join("eunha-runtime-router"),
+        )
+        .await
+        .map_err(|_| "Could not refresh the runtime router helper.".to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(
+                artifact.join("eunha-runtime-router"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .await
+            .map_err(|_| "Could not secure the runtime router helper.".to_string())?;
+        }
         release_event(
             db,
             operation_id,
@@ -1904,6 +2047,22 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
     tokio::fs::copy(source.join("target/release/eunha"), staging.join("eunha"))
         .await
         .map_err(|_| "Could not stage the central Eunha binary.".to_string())?;
+    tokio::fs::copy(
+        root.join("ops/eunha-runtime-router"),
+        staging.join("eunha-runtime-router"),
+    )
+    .await
+    .map_err(|_| "Could not stage the runtime router helper.".to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(
+            staging.join("eunha-runtime-router"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .await
+        .map_err(|_| "Could not secure the runtime router helper.".to_string())?;
+    }
     command_status(
         "cp",
         &[
@@ -1958,6 +2117,10 @@ async fn async_deploy_release(
     tenant_directory: &str,
     service_label: &str,
     bind_address: &str,
+    router_enabled: bool,
+    blue_bind_address: &str,
+    green_bind_address: &str,
+    health_host: &str,
     release: (String, PathBuf),
 ) -> Result<String, String> {
     let (reference, artifact) = release;
@@ -1967,6 +2130,8 @@ async fn async_deploy_release(
         .ok_or_else(|| "Runtime release target is invalid.".to_string())?;
     let releases = runtime_root.join("releases");
     let staging = releases.join(format!(".{reference}.staging"));
+    let stale_staging = releases.join(format!(".{reference}.stale-{}", Uuid::new_v4()));
+    let superseded_release = releases.join(format!(".{reference}.superseded-{}", Uuid::new_v4()));
     let release_path = releases.join(&reference);
     let artifact_text = artifact.to_string_lossy().to_string();
     let remote_staging = shell_quote(&staging.to_string_lossy());
@@ -1976,12 +2141,23 @@ async fn async_deploy_release(
         tokio::fs::create_dir_all(&releases)
             .await
             .map_err(|_| "Could not prepare the runtime release directory.".to_string())?;
+        if tokio::fs::try_exists(&staging).await.unwrap_or(false) {
+            tokio::fs::rename(&staging, &stale_staging)
+                .await
+                .map_err(|_| "Could not isolate stale release staging.".to_string())?;
+        }
     } else {
         command_status(
             "ssh",
             &[
                 host,
-                &format!("mkdir -p {}", shell_quote(&releases.to_string_lossy())),
+                &format!(
+                    "mkdir -p {}; if [ -e {} ]; then mv {} {}; fi",
+                    shell_quote(&releases.to_string_lossy()),
+                    shell_quote(&staging.to_string_lossy()),
+                    shell_quote(&staging.to_string_lossy()),
+                    shell_quote(&stale_staging.to_string_lossy()),
+                ),
             ],
             None,
         )
@@ -2021,15 +2197,30 @@ async fn async_deploy_release(
         "Applying migrations, switching the runtime, and waiting for health.",
     )
     .await;
+    let activation = if router_enabled {
+        format!(
+            "\"$rel/eunha-runtime-router\" switch \"$root\" {} {} {} {} {} \"$rel\" {}; ln -sfn \"$rel\" .current.new; mv -h .current.new current",
+            shell_quote(tenant_directory),
+            shell_quote(service_label),
+            shell_quote(bind_address),
+            shell_quote(blue_bind_address),
+            shell_quote(green_bind_address),
+            shell_quote(health_host),
+        )
+    } else {
+        format!(
+            "previous=$(readlink current 2>/dev/null || true); ln -sfn \"$rel\" .current.new; mv -h .current.new current; launchctl kickstart -k gui/$(id -u)/{}; for i in $(seq 1 45); do curl -sf -m 5 -o /dev/null -H 'Host: {}' http://{}/api/v2/instance && exit 0; sleep 1; done; if [ -n \"$previous\" ]; then ln -sfn \"$previous\" .current.new; mv -h .current.new current; launchctl kickstart -k gui/$(id -u)/{}; fi; exit 1",
+            service_label, health_host, bind_address, service_label
+        )
+    };
     let script = format!(
-        "set -eu; rel={}; stage={}; root={}; cd \"$root\"; \"$stage/eunha\" --tenants {} migrate; mv \"$stage\" \"$rel\"; previous=$(readlink current 2>/dev/null || true); ln -sfn \"$rel\" .current.new; mv -h .current.new current; launchctl kickstart -k gui/$(id -u)/{}; for i in $(seq 1 45); do curl -sf -m 5 -o /dev/null http://127.0.0.1:{}/api/v2/instance && exit 0; sleep 1; done; if [ -n \"$previous\" ]; then ln -sfn \"$previous\" .current.new; mv -h .current.new current; launchctl kickstart -k gui/$(id -u)/{}; fi; exit 1",
+        "set -eu; rel={}; stage={}; superseded={}; root={}; cd \"$root\"; \"$stage/eunha\" --tenants {} migrate; if [ -e \"$rel\" ]; then mv \"$rel\" \"$superseded\"; fi; mv \"$stage\" \"$rel\"; {}",
         shell_quote(&release_path.to_string_lossy()),
         remote_staging,
+        shell_quote(&superseded_release.to_string_lossy()),
         shell_quote(&runtime_root.to_string_lossy()),
         shell_quote(tenant_directory),
-        service_label,
-        bind_address.rsplit(':').next().unwrap_or(""),
-        service_label
+        activation,
     );
     if local_runtime {
         command_status("/bin/sh", &["-c", &script], None).await.map_err(|_| "Runtime migration, switch, or health check failed; the prior release was restored when available.".to_string())?;
@@ -2178,6 +2369,10 @@ fn is_safe_runtime_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
+fn is_safe_bind_address(address: &str) -> bool {
+    address.parse::<std::net::SocketAddr>().is_ok()
+}
+
 fn is_safe_remote_host(host: &str) -> bool {
     !host.is_empty()
         && host.bytes().all(|byte| {
@@ -2222,8 +2417,8 @@ async fn render_tenant(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (operator_id, _) = operator(&headers, &s.db).await?;
-    let row = sqlx::query_as::<_, (SqlJson<StoredTenant>, SqlJson<StoredConfig>, String, String, String, String, String, i64)>(
-        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,i.address,r.tenant_directory,r.service_label,r.bind_address,t.config_revision FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
+    let row = sqlx::query_as::<_, (SqlJson<StoredTenant>, SqlJson<StoredConfig>, String, String, String, String, String, bool, i64)>(
+        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,i.address,r.tenant_directory,r.service_label,r.bind_address,r.router_enabled,t.config_revision FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
     )
     .bind(id)
     .fetch_optional(&s.db)
@@ -2237,6 +2432,7 @@ async fn render_tenant(
         tenant_directory,
         service_label,
         bind_address,
+        router_enabled,
         revision,
     ) = row;
     let domain = tenant.domain.clone();
@@ -2272,6 +2468,9 @@ async fn render_tenant(
         typed_toml(tenant, config, bucket_name, bind_address.clone()).map_err(ApiError::from)?;
     let rendered_config = toml::to_string_pretty(&typed).map_err(ApiError::from)?;
     toml::from_str::<TenantToml>(&rendered_config).map_err(ApiError::from)?;
+    let service_label = active_runtime_label(&service_label, router_enabled, &tenant_directory)
+        .await
+        .map_err(ApiError::from)?;
 
     let directory = PathBuf::from(tenant_directory);
     if tokio::fs::metadata(&directory)

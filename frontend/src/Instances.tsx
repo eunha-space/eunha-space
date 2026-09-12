@@ -83,6 +83,8 @@ export function Instances({ runtimes, tenants }: { runtimes: Runtime[]; tenants:
                 <dl className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                   <Detail label="Service label" value={runtime.service_label} mono />
                   <Detail label="Tenant directory" value={runtime.tenant_directory} mono />
+                  <Detail label="Cloudflare origin" value={runtime.origin_hostname} mono />
+                  <Detail label="Router" value={runtime.router_enabled ? `${runtime.bind_address} → blue/green` : "legacy restart"} mono />
                   <Detail
                     label="Deployed release"
                     value={shortRef(runtime.deployed_ref)}

@@ -1,0 +1,116 @@
+#!/bin/bash
+set -euo pipefail
+
+MODE="${1:?bootstrap or switch}"
+ROOT="${2:?runtime root}"
+TENANTS="${3:?tenant directory}"
+BASE_LABEL="${4:?launchd label}"
+STABLE="${5:?stable bind address}"
+BLUE="${6:?blue bind address}"
+GREEN="${7:?green bind address}"
+RELEASE="${8:?release directory}"
+HEALTH_HOST="${9:?health-check hostname}"
+ROUTER_DIR="$ROOT/router"
+STATE="$ROUTER_DIR/active-slot"
+HAPROXY=/opt/homebrew/opt/haproxy/bin/haproxy
+UID_N="$(id -u)"
+
+case "$MODE" in bootstrap|switch) ;; *) exit 64 ;; esac
+test -x "$RELEASE/eunha"
+test -d "$TENANTS"
+test -x "$HAPROXY"
+mkdir -p "$ROUTER_DIR" "$ROOT/slots"
+
+write_slot_plist() {
+  local slot="$1" address="$2"
+  local label="$BASE_LABEL.$slot"
+  local plist="$HOME/Library/LaunchAgents/$label.plist"
+  /usr/bin/plutil -create xml1 "$plist"
+  /usr/bin/plutil -insert Label -string "$label" "$plist"
+  /usr/bin/plutil -insert ProgramArguments -json "[\"/bin/sh\",\"-c\",\"exec '$ROOT/slots/$slot/eunha' --tenants '$TENANTS' --bind-address '$address'\"]" "$plist"
+  /usr/bin/plutil -insert WorkingDirectory -string "$ROOT/slots/$slot" "$plist"
+  /usr/bin/plutil -insert RunAtLoad -bool true "$plist"
+  /usr/bin/plutil -insert KeepAlive -bool true "$plist"
+  /usr/bin/plutil -insert ProcessType -string Background "$plist"
+  /usr/bin/plutil -insert StandardOutPath -string "$HOME/Library/Logs/$label.out.log" "$plist"
+  /usr/bin/plutil -insert StandardErrorPath -string "$HOME/Library/Logs/$label.err.log" "$plist"
+}
+
+write_haproxy_config() {
+  local address="$1" temporary="$ROUTER_DIR/haproxy.cfg.new"
+  cat >"$temporary" <<EOF
+global
+    master-worker
+    pidfile $ROUTER_DIR/haproxy.pid
+    log stdout format raw local0
+
+defaults
+    mode http
+    timeout connect 5s
+    timeout client 1h
+    timeout server 1h
+    option http-keep-alive
+
+frontend eunha
+    bind $STABLE
+    default_backend eunha_active
+
+backend eunha_active
+    server active $address
+EOF
+  "$HAPROXY" -c -q -f "$temporary"
+  mv "$temporary" "$ROUTER_DIR/haproxy.cfg"
+}
+
+wait_ready() {
+  local address="$1"
+  for _ in $(seq 1 60); do
+    if /usr/bin/curl -sf -m 3 -o /dev/null -H "Host: $HEALTH_HOST" "http://$address/api/v2/instance"; then return 0; fi
+    sleep 1
+  done
+  return 1
+}
+
+start_slot() {
+  local slot="$1" address="$2"
+  local label="$BASE_LABEL.$slot"
+  ln -sfn "$RELEASE" "$ROOT/slots/$slot.new"
+  mv -h "$ROOT/slots/$slot.new" "$ROOT/slots/$slot"
+  write_slot_plist "$slot" "$address"
+  launchctl bootout "gui/$UID_N/$label" 2>/dev/null || true
+  launchctl bootstrap "gui/$UID_N" "$HOME/Library/LaunchAgents/$label.plist"
+  wait_ready "$address"
+}
+
+if [[ "$MODE" == bootstrap ]]; then
+  start_slot blue "$BLUE"
+  write_haproxy_config "$BLUE"
+  ROUTER_LABEL="$BASE_LABEL.router"
+  ROUTER_PLIST="$HOME/Library/LaunchAgents/$ROUTER_LABEL.plist"
+  /usr/bin/plutil -create xml1 "$ROUTER_PLIST"
+  /usr/bin/plutil -insert Label -string "$ROUTER_LABEL" "$ROUTER_PLIST"
+  /usr/bin/plutil -insert ProgramArguments -json "[\"$HAPROXY\",\"-W\",\"-db\",\"-f\",\"$ROUTER_DIR/haproxy.cfg\",\"-p\",\"$ROUTER_DIR/haproxy.pid\"]" "$ROUTER_PLIST"
+  /usr/bin/plutil -insert RunAtLoad -bool true "$ROUTER_PLIST"
+  /usr/bin/plutil -insert KeepAlive -bool true "$ROUTER_PLIST"
+  /usr/bin/plutil -insert ProcessType -string Background "$ROUTER_PLIST"
+  launchctl bootout "gui/$UID_N/$BASE_LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$UID_N" "$ROUTER_PLIST"
+  printf '%s\n' blue >"$STATE"
+  wait_ready "$STABLE"
+  exit 0
+fi
+
+ACTIVE="$(cat "$STATE")"
+if [[ "$ACTIVE" == blue ]]; then NEXT=green; NEXT_ADDR="$GREEN"; OLD_ADDR="$BLUE"; else NEXT=blue; NEXT_ADDR="$BLUE"; OLD_ADDR="$GREEN"; fi
+start_slot "$NEXT" "$NEXT_ADDR"
+write_haproxy_config "$NEXT_ADDR"
+kill -USR2 "$(cat "$ROUTER_DIR/haproxy.pid")"
+if ! wait_ready "$STABLE"; then
+  write_haproxy_config "$OLD_ADDR"
+  kill -USR2 "$(cat "$ROUTER_DIR/haproxy.pid")"
+  launchctl bootout "gui/$UID_N/$BASE_LABEL.$NEXT" 2>/dev/null || true
+  exit 1
+fi
+printf '%s\n' "$NEXT" >"$STATE"
+sleep "${EUNHA_DRAIN_SECONDS:-30}"
+launchctl bootout "gui/$UID_N/$BASE_LABEL.$ACTIVE" 2>/dev/null || true

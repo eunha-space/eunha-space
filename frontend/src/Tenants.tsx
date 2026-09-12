@@ -355,7 +355,7 @@ function DomainsDialog({ tenant, busy, act }: { tenant: Tenant; busy: string; ac
     <DialogContent>
       <DialogHeader><DialogTitle>Domains for {tenant.domain}</DialogTitle><DialogDescription>Manage tenant routing and Cloudflare certificates. Adopting an existing primary domain does not change its ActivityPub identity.</DialogDescription></DialogHeader>
       <div className="grid gap-3">{domains.map((domain) => <div key={domain.id} className="bg-muted/50 rounded-md p-3 text-sm">
-        <div className="flex items-center justify-between gap-2"><div className="min-w-0"><span className="block truncate font-medium">{domain.hostname}</span><span className="text-muted-foreground text-xs">{domain.kind === "legacy" ? "Existing domain" : domain.kind === "provided" ? "Eunha hostname" : "Cloudflare for SaaS"}</span></div><div className="flex shrink-0 gap-1"><Badge variant="outline">{domain.is_primary ? "primary" : domain.status}</Badge>{domain.kind === "custom" && <Badge variant="secondary">managed</Badge>}</div></div>
+        <div className="flex items-center justify-between gap-2"><div className="min-w-0"><span className="block truncate font-medium">{domain.hostname}</span><span className="text-muted-foreground text-xs">{domain.kind === "legacy" ? "Existing domain" : domain.kind === "provided" ? "Eunha hostname" : "Cloudflare for SaaS"}</span></div><div className="flex shrink-0 gap-1">{domain.is_primary && <Badge variant="outline">primary</Badge>}<Badge variant={domain.status === "active" ? "secondary" : "outline"}>{domain.status}</Badge>{domain.kind !== "legacy" && <Badge variant="secondary">managed</Badge>}</div></div>
         {domain.kind === "legacy" && domain.is_primary && <div className="mt-3 flex items-center justify-between gap-4 border-t pt-3"><p className="text-muted-foreground text-xs">Move TLS and routing to the shared Eunha tunnel without changing accounts or actor URLs.</p><ActionButton
           variant="outline"
           busy={busy === `adopt-domain-${domain.id}`}
@@ -367,6 +367,7 @@ function DomainsDialog({ tenant, busy, act }: { tenant: Tenant; busy: string; ac
           onClick={() => adopt(domain)}
         >Manage with Cloudflare</ActionButton></div>}
         {domain.kind === "custom" && domain.status !== "active" && <div className="text-muted-foreground mt-2 grid gap-1 font-mono text-xs"><span>CNAME {domain.hostname} → {domain.cname_target}</span>{domain.ownership_name && domain.ownership_value && <span>TXT {domain.ownership_name} → {domain.ownership_value}</span>}<span>Cloudflare: {domain.cloudflare_status ?? "queued"} · TLS: {domain.ssl_status ?? "queued"}</span></div>}
+        {domain.kind === "provided" && domain.status !== "active" && <div className="text-muted-foreground mt-2 font-mono text-xs">Cloudflare: {domain.cloudflare_status ?? "queued"} · TLS: {domain.ssl_status ?? "queued"}</div>}
         {domain.error && <p className="text-destructive mt-2">{domain.error}</p>}
       </div>)}</div>
       <form onSubmit={add} className="grid gap-3"><Label htmlFor={`custom-domain-${tenant.id}`}>Attach custom domain</Label><div className="flex gap-2"><Input id={`custom-domain-${tenant.id}`} value={hostname} onChange={(e) => setHostname(e.target.value)} placeholder="social.example.com" required /><Button type="submit">Attach</Button></div></form>

@@ -34,6 +34,10 @@ export type Runtime = {
   bind_address: string;
   service_label: string;
   tenant_directory: string;
+  origin_hostname: string;
+  router_enabled: boolean;
+  blue_bind_address: string;
+  green_bind_address: string;
   tenant_count: number;
   auto_deploy_enabled: boolean;
   deployed_ref: string | null;
