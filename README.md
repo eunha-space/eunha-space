@@ -28,6 +28,20 @@ reload, and health-check steps. Interrupted work resumes after restart. Failed
 work remains retained and can be retried from the tenant inventory; it is never
 implicitly deprovisioned or purged.
 
+`EUNHA_PROVIDED_DOMAIN_SUFFIXES` is a comma-separated, primary-first list of
+platform domains (default `eunha.space`). Provisioning `garden` with
+`eunha.space,eunha.site` reserves `garden.eunha.space` as primary and
+`garden.eunha.site` as an alias. Infrastructure labels are reserved in the
+`reserved_subdomains` table.
+
+Custom domains require `CLOUDFLARE_ZONE_ID` and `CLOUDFLARE_API_TOKEN`; the
+token needs SSL and Certificates Write and remains process-only. Customers are
+instructed to CNAME to `t.eunha.space`, configurable with
+`CLOUDFLARE_SAAS_CNAME_TARGET`. Cloudflare IDs, activation state, and public
+DNS validation instructions are stored, but the token is not. A first custom
+domain becomes canonical only before a local account exists. Later verified
+custom domains are aliases and do not mutate ActivityPub identity.
+
 Create the first operator without putting a password in shell history:
 
 ```sh

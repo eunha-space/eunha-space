@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { HardDrive, Inbox, Plus, RefreshCw } from "lucide-react";
-import { pendingRender, type Runtime, type Tenant } from "@/api";
+import { api, pendingRender, type Runtime, type Tenant, type TenantDomain } from "@/api";
 import { absoluteTime, relativeTime } from "@/format";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -259,6 +259,7 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                         Retry provisioning
                       </ActionButton>
                     )}
+                    <DomainsDialog tenant={tenant} act={act} />
                     <TenantConfigDialog tenantId={tenant.id} domain={tenant.domain} />
                     <ActionButton
                       icon={<RefreshCw />}
@@ -292,7 +293,7 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
 
 function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy: boolean; act: Props["act"] }) {
   const [open, setOpen] = useState(false);
-  const [domain, setDomain] = useState("");
+  const [subdomain, setSubdomain] = useState("");
   const [title, setTitle] = useState("");
   const [email, setEmail] = useState("");
   const [runtimeId, setRuntimeId] = useState("");
@@ -303,10 +304,10 @@ function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     const ok = await act("/tenants", "create-tenant", {
-      domain, title, contact_email: email || null, runtime_id: selectedRuntime,
+      subdomain, title, contact_email: email || null, runtime_id: selectedRuntime,
       registrations_open: registrationsOpen, approval_required: approvalRequired,
     });
-    if (ok) { setOpen(false); setDomain(""); setTitle(""); setEmail(""); }
+    if (ok) { setOpen(false); setSubdomain(""); setTitle(""); setEmail(""); }
   }
 
   return (
@@ -319,7 +320,7 @@ function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
             <DialogDescription>The control plane creates isolated PostgreSQL credentials and UUID-scoped Redis and media keys, then migrates and activates the tenant.</DialogDescription>
           </DialogHeader>
           <div className="grid gap-4">
-            <div className="grid gap-2"><Label htmlFor="tenant-domain">Domain</Label><Input id="tenant-domain" value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="community.example" required /></div>
+            <div className="grid gap-2"><Label htmlFor="tenant-subdomain">Eunha hostname</Label><div className="flex items-center"><Input id="tenant-subdomain" className="rounded-r-none" value={subdomain} onChange={(e) => setSubdomain(e.target.value.toLowerCase())} placeholder="community" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" required /><span className="border-input bg-muted text-muted-foreground flex h-9 items-center rounded-r-md border border-l-0 px-3 text-sm">.eunha.space</span></div></div>
             <div className="grid gap-2"><Label htmlFor="tenant-title">Name</Label><Input id="tenant-title" value={title} onChange={(e) => setTitle(e.target.value)} required /></div>
             <div className="grid gap-2"><Label htmlFor="tenant-email">Contact email</Label><Input id="tenant-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
             <div className="grid gap-2"><Label htmlFor="tenant-runtime">Runtime</Label><select id="tenant-runtime" className="border-input bg-background h-9 rounded-md border px-3 text-sm" value={selectedRuntime} onChange={(e) => setRuntimeId(e.target.value)} required>{runtimes.map((runtime) => <option key={runtime.id} value={runtime.id}>{runtime.instance_name} / {runtime.name}</option>)}</select></div>
@@ -331,4 +332,29 @@ function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
       </DialogContent>
     </Dialog>
   );
+}
+
+function DomainsDialog({ tenant, act }: { tenant: Tenant; act: Props["act"] }) {
+  const [open, setOpen] = useState(false);
+  const [hostname, setHostname] = useState("");
+  const [domains, setDomains] = useState<TenantDomain[]>([]);
+  async function refresh() { setDomains(await api<TenantDomain[]>(`/tenants/${tenant.id}/domains`)); }
+  async function add(event: React.FormEvent) {
+    event.preventDefault();
+    if (await act(`/tenants/${tenant.id}/domains`, `domain-${tenant.id}`, { hostname })) {
+      setHostname(""); await refresh();
+    }
+  }
+  return <Dialog open={open} onOpenChange={(next) => { setOpen(next); if (next) void refresh(); }}>
+    <DialogTrigger render={<Button variant="outline" />}>Domains</DialogTrigger>
+    <DialogContent>
+      <DialogHeader><DialogTitle>Domains for {tenant.domain}</DialogTitle><DialogDescription>A verified custom domain becomes the ActivityPub identity only while the tenant has no local accounts.</DialogDescription></DialogHeader>
+      <div className="grid gap-3">{domains.map((domain) => <div key={domain.id} className="bg-muted/50 rounded-md p-3 text-sm">
+        <div className="flex items-center justify-between gap-2"><span className="font-medium">{domain.hostname}</span><Badge variant="outline">{domain.is_primary ? "primary" : domain.status}</Badge></div>
+        {domain.kind === "custom" && domain.status !== "active" && <div className="text-muted-foreground mt-2 grid gap-1 font-mono text-xs"><span>CNAME {domain.hostname} → {domain.cname_target}</span>{domain.ownership_name && domain.ownership_value && <span>TXT {domain.ownership_name} → {domain.ownership_value}</span>}<span>Cloudflare: {domain.cloudflare_status ?? "queued"} · TLS: {domain.ssl_status ?? "queued"}</span></div>}
+        {domain.error && <p className="text-destructive mt-2">{domain.error}</p>}
+      </div>)}</div>
+      <form onSubmit={add} className="grid gap-3"><Label htmlFor={`custom-domain-${tenant.id}`}>Attach custom domain</Label><div className="flex gap-2"><Input id={`custom-domain-${tenant.id}`} value={hostname} onChange={(e) => setHostname(e.target.value)} placeholder="social.example.com" required /><Button type="submit">Attach</Button></div></form>
+    </DialogContent>
+  </Dialog>;
 }

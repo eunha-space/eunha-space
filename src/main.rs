@@ -54,6 +54,14 @@ struct AppState {
     db: PgPool,
     client: reqwest::Client,
     provision_database_url: String,
+    cloudflare: Option<CloudflareConfig>,
+    provided_domain_suffixes: Vec<String>,
+}
+#[derive(Clone)]
+struct CloudflareConfig {
+    zone_id: String,
+    api_token: String,
+    cname_target: String,
 }
 type Shared = Arc<AppState>;
 
@@ -136,7 +144,7 @@ struct AutomaticRelease {
 
 #[derive(Deserialize)]
 struct NewTenant {
-    domain: String,
+    subdomain: String,
     title: String,
     contact_email: Option<String>,
     runtime_id: Uuid,
@@ -144,6 +152,26 @@ struct NewTenant {
     registrations_open: bool,
     #[serde(default)]
     approval_required: bool,
+}
+
+#[derive(Deserialize)]
+struct NewDomain {
+    hostname: String,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct TenantDomain {
+    id: Uuid,
+    hostname: String,
+    kind: String,
+    status: String,
+    is_primary: bool,
+    cloudflare_status: Option<String>,
+    ssl_status: Option<String>,
+    cname_target: String,
+    ownership_name: Option<String>,
+    ownership_value: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -243,6 +271,8 @@ struct EncryptionToml {
 #[derive(Deserialize, Serialize)]
 struct InstanceToml {
     domain: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    aliases: Vec<String>,
     title: String,
     #[serde(default)]
     description: String,
@@ -363,6 +393,7 @@ struct StoredConfig {
 #[derive(Deserialize)]
 struct StoredTenant {
     domain: String,
+    aliases: Vec<String>,
     title: String,
     description: String,
     short_description: String,
@@ -439,6 +470,7 @@ fn typed_toml(
         },
         instance: InstanceToml {
             domain: tenant.domain,
+            aliases: tenant.aliases,
             title: tenant.title,
             description: tenant.description,
             short_description: tenant.short_description,
@@ -499,6 +531,24 @@ async fn main() -> Result<()> {
         db,
         provision_database_url: std::env::var("CONTROL_PROVISION_DATABASE_URL")
             .unwrap_or(database_url),
+        cloudflare: match (
+            std::env::var("CLOUDFLARE_ZONE_ID"),
+            std::env::var("CLOUDFLARE_API_TOKEN"),
+        ) {
+            (Ok(zone_id), Ok(api_token)) => Some(CloudflareConfig {
+                zone_id,
+                api_token,
+                cname_target: std::env::var("CLOUDFLARE_SAAS_CNAME_TARGET")
+                    .unwrap_or_else(|_| "t.eunha.space".into()),
+            }),
+            _ => None,
+        },
+        provided_domain_suffixes: std::env::var("EUNHA_PROVIDED_DOMAIN_SUFFIXES")
+            .unwrap_or_else(|_| "eunha.space".into())
+            .split(',')
+            .map(|suffix| suffix.trim().trim_start_matches('.').to_ascii_lowercase())
+            .filter(|suffix| is_valid_domain(suffix))
+            .collect(),
         client: reqwest::Client::builder()
             .timeout(Duration::from_secs(4))
             .build()?,
@@ -506,12 +556,17 @@ async fn main() -> Result<()> {
     tokio::spawn(health_reconciler(state.clone()));
     tokio::spawn(automatic_release_reconciler(state.clone()));
     tokio::spawn(provisioning_reconciler(state.clone()));
+    tokio::spawn(domain_reconciler(state.clone()));
     let api = Router::new()
         .route("/session", post(login).delete(logout))
         .route("/session/me", get(me))
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/tenants/{id}/check", post(check_tenant))
         .route("/tenants/{id}/retry", post(retry_provisioning))
+        .route(
+            "/tenants/{id}/domains",
+            get(tenant_domains).post(attach_domain),
+        )
         .route("/tenants/{id}/configuration", get(tenant_configuration))
         .route("/tenants/{id}/render", post(render_tenant))
         .route("/runtimes", get(runtimes))
@@ -677,26 +732,51 @@ async fn create_tenant(
     Json(mut body): Json<NewTenant>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let (operator_id, _) = operator(&headers, &s.db).await?;
-    body.domain = body
-        .domain
-        .trim()
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
+    body.subdomain = body.subdomain.trim().to_ascii_lowercase();
+    let suffix = s.provided_domain_suffixes.first().ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "No provided domain suffix is configured.".into(),
+        )
+    })?;
+    let domain = format!("{}.{}", body.subdomain, suffix);
+    let provided_domains: Vec<String> = s
+        .provided_domain_suffixes
+        .iter()
+        .map(|suffix| format!("{}.{}", body.subdomain, suffix))
+        .collect();
+    let aliases: Vec<String> = provided_domains.iter().skip(1).cloned().collect();
     body.title = body.title.trim().to_owned();
     body.contact_email = body
         .contact_email
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
-    if !is_safe_domain(&body.domain)
-        || body.domain.starts_with(['.', '-'])
-        || body.domain.ends_with('-')
-        || !body.domain.contains('.')
+    if body.subdomain.is_empty()
+        || body.subdomain.len() > 63
+        || body.subdomain.starts_with('-')
+        || body.subdomain.ends_with('-')
+        || !body
+            .subdomain
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         || body.title.is_empty()
         || body.title.len() > 200
     {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "Enter a valid domain and title.".into(),
+        ));
+    }
+    if sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM reserved_subdomains WHERE label=$1)",
+    )
+    .bind(&body.subdomain)
+    .fetch_one(&s.db)
+    .await?
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "That subdomain is reserved.".into(),
         ));
     }
 
@@ -727,8 +807,8 @@ async fn create_tenant(
     let redis_prefix = format!("t:{}:", tenant_id.simple());
 
     let mut tx = s.db.begin().await?;
-    sqlx::query("INSERT INTO tenants(id,domain,title,runtime_id,desired_state,observed_state,lifecycle_state,contact_email,registrations_open,approval_required,vapid_private_key,vapid_public_key) VALUES($1,$2,$3,$4,'running','unknown','provisioning',$5,$6,$7,$8,$9)")
-        .bind(tenant_id).bind(&body.domain).bind(&body.title).bind(body.runtime_id)
+    sqlx::query("INSERT INTO tenants(id,domain,aliases,title,runtime_id,desired_state,observed_state,lifecycle_state,contact_email,registrations_open,approval_required,vapid_private_key,vapid_public_key) VALUES($1,$2,$3,$4,$5,'running','unknown','provisioning',$6,$7,$8,$9,$10)")
+        .bind(tenant_id).bind(&domain).bind(&aliases).bind(&body.title).bind(body.runtime_id)
         .bind(&body.contact_email).bind(body.registrations_open).bind(body.approval_required)
         .bind(vapid_private).bind(vapid_public).execute(&mut *tx).await
         .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenants_domain_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
@@ -749,8 +829,12 @@ async fn create_tenant(
         .execute(&mut *tx).await?;
     sqlx::query("INSERT INTO r2_buckets(tenant_id,bucket_name,lifecycle_state) SELECT $1,bucket_name,'provisioning' FROM r2_buckets WHERE tenant_id=$2")
         .bind(tenant_id).bind(template).execute(&mut *tx).await?;
+    for (index, hostname) in provided_domains.iter().enumerate() {
+        sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary) VALUES($1,$2,$3,'provided','active',$4)")
+            .bind(Uuid::new_v4()).bind(tenant_id).bind(hostname).bind(index == 0).execute(&mut *tx).await?;
+    }
     sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) VALUES($1,$2,$3,'tenant_provision','running',$4,jsonb_build_object('domain',$5),now())")
-        .bind(operation_id).bind(tenant_id).bind(body.runtime_id).bind(operator_id).bind(&body.domain).execute(&mut *tx).await?;
+        .bind(operation_id).bind(tenant_id).bind(body.runtime_id).bind(operator_id).bind(&domain).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['database','migrate','render','reload','health'])")
         .bind(tenant_id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Tenant reserved; provisioning queued.')")
@@ -786,6 +870,267 @@ async fn retry_provisioning(
         .bind(operation_id).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(StatusCode::ACCEPTED)
+}
+
+async fn tenant_domains(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<TenantDomain>>, ApiError> {
+    operator(&headers, &s.db).await?;
+    Ok(Json(sqlx::query_as("SELECT id,hostname,kind,status,is_primary,cloudflare_status,ssl_status,cname_target,ownership_name,ownership_value,error FROM tenant_domains WHERE tenant_id=$1 ORDER BY is_primary DESC,created_at")
+        .bind(id).fetch_all(&s.db).await?))
+}
+
+async fn attach_domain(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(tenant_id): Path<Uuid>,
+    Json(mut body): Json<NewDomain>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let (operator_id, _) = operator(&headers, &s.db).await?;
+    if s.cloudflare.is_none() {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Cloudflare for SaaS is not configured.".into(),
+        ));
+    }
+    body.hostname = body
+        .hostname
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if !is_valid_domain(&body.hostname)
+        || body.hostname == "eunha.space"
+        || body.hostname.ends_with(".eunha.space")
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Enter an externally owned custom domain.".into(),
+        ));
+    }
+    let cloudflare = s.cloudflare.as_ref().expect("checked above");
+    let domain_id = Uuid::new_v4();
+    let operation_id = Uuid::new_v4();
+    let mut tx = s.db.begin().await?;
+    let changed = sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,cname_target) SELECT $1,id,$2,'custom','pending',$3 FROM tenants WHERE id=$4 AND lifecycle_state='ready' AND NOT EXISTS(SELECT 1 FROM tenant_domains WHERE tenant_id=$4 AND kind='custom' AND status='pending')")
+        .bind(domain_id).bind(&body.hostname).bind(&cloudflare.cname_target).bind(tenant_id).execute(&mut *tx).await
+        .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenant_domains_hostname_key") { ApiError(StatusCode::CONFLICT, "That hostname is already attached.".into()) } else { ApiError::from(error) })?.rows_affected();
+    if changed == 0 {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "The tenant must be ready and have no other pending custom domain.".into(),
+        ));
+    }
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) SELECT $1,t.id,t.runtime_id,'custom_domain_attach','running',$2,jsonb_build_object('hostname',$3),now() FROM tenants t WHERE t.id=$4")
+        .bind(operation_id).bind(operator_id).bind(&body.hostname).bind(tenant_id).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Custom hostname registration queued.')")
+        .bind(operation_id).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"id": domain_id, "operation_id": operation_id})),
+    ))
+}
+
+fn is_valid_domain(domain: &str) -> bool {
+    is_safe_domain(domain)
+        && domain.contains('.')
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+}
+
+async fn domain_reconciler(state: Shared) {
+    loop {
+        if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM tenant_domains WHERE kind='custom' AND status='pending' AND updated_at < now()-interval '15 seconds' ORDER BY created_at LIMIT 10")
+            .fetch_all(&state.db).await {
+            for id in ids {
+                if reconcile_domain(&state, id).await.is_err() { record_domain_error(&state.db, id).await; }
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(15)).await;
+    }
+}
+
+async fn record_domain_error(db: &PgPool, id: Uuid) {
+    let message = "Custom domain activation failed without changing the tenant identity.";
+    let failed = sqlx::query_scalar::<_, bool>("UPDATE tenant_domains SET attempts=attempts+1,status=CASE WHEN attempts+1 >= 5 THEN 'failed' ELSE status END,error=$1,updated_at=now() WHERE id=$2 RETURNING status='failed'")
+        .bind(message).bind(id).fetch_optional(db).await;
+    let is_failed = failed.ok().flatten().unwrap_or(false);
+    if !is_failed {
+        return;
+    }
+    let _ = sqlx::query("UPDATE operations SET status='failed',error=$1,finished_at=now() WHERE id=(SELECT o.id FROM operations o JOIN tenant_domains d ON d.tenant_id=o.tenant_id WHERE d.id=$2 AND o.kind='custom_domain_attach' AND o.status='running' ORDER BY o.created_at DESC LIMIT 1)")
+        .bind(message).bind(id).execute(db).await;
+}
+
+async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
+    let cloudflare = state
+        .cloudflare
+        .as_ref()
+        .context("Cloudflare is not configured")?;
+    let (tenant_id, hostname, cloudflare_id) = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
+        "SELECT tenant_id,hostname,cloudflare_id FROM tenant_domains WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&state.db)
+    .await?;
+    let endpoint = format!(
+        "https://api.cloudflare.com/client/v4/zones/{}/custom_hostnames",
+        cloudflare.zone_id
+    );
+    let response: serde_json::Value = if let Some(cloudflare_id) = &cloudflare_id {
+        state
+            .client
+            .get(format!("{endpoint}/{cloudflare_id}"))
+            .bearer_auth(&cloudflare.api_token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?
+    } else {
+        state
+            .client
+            .post(&endpoint)
+            .bearer_auth(&cloudflare.api_token)
+            .json(&serde_json::json!({
+                "hostname": hostname,
+                "custom_metadata": { "eunha_tenant_id": tenant_id.to_string() },
+                "ssl": { "method": "http", "type": "dv", "settings": { "min_tls_version": "1.2" } }
+            }))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?
+    };
+    anyhow::ensure!(
+        response.get("success").and_then(|v| v.as_bool()) == Some(true),
+        "Cloudflare rejected hostname"
+    );
+    let result = response
+        .get("result")
+        .context("Cloudflare response has no result")?;
+    let cf_id = result
+        .get("id")
+        .and_then(|v| v.as_str())
+        .context("Cloudflare response has no id")?;
+    let cf_status = result
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pending");
+    let ssl_status = result
+        .pointer("/ssl/status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pending");
+    let ownership_name = result
+        .pointer("/ownership_verification/name")
+        .and_then(|v| v.as_str());
+    let ownership_value = result
+        .pointer("/ownership_verification/value")
+        .and_then(|v| v.as_str());
+    sqlx::query("UPDATE tenant_domains SET cloudflare_id=$1,cloudflare_status=$2,ssl_status=$3,ownership_name=$4,ownership_value=$5,updated_at=now() WHERE id=$6")
+        .bind(cf_id).bind(cf_status).bind(ssl_status).bind(ownership_name).bind(ownership_value).bind(id).execute(&state.db).await?;
+    anyhow::ensure!(
+        !matches!(
+            cf_status,
+            "blocked" | "deleted" | "pending_blocked" | "test_blocked" | "test_failed"
+        ),
+        "Cloudflare hostname is terminal"
+    );
+    anyhow::ensure!(
+        !ssl_status.ends_with("_timed_out")
+            && !matches!(ssl_status, "expired" | "inactive" | "deleted"),
+        "Cloudflare certificate is terminal"
+    );
+    if cf_status != "active" || ssl_status != "active" {
+        state
+            .client
+            .patch(format!("{endpoint}/{cf_id}"))
+            .bearer_auth(&cloudflare.api_token)
+            .json(&serde_json::json!({
+                "ssl": {"method": "http", "type": "dv", "settings": {"min_tls_version": "1.2"}}
+            }))
+            .send()
+            .await?
+            .error_for_status()?;
+        return Ok(());
+    }
+
+    let primary_kind = sqlx::query_scalar::<_, String>(
+        "SELECT kind FROM tenant_domains WHERE tenant_id=$1 AND is_primary",
+    )
+    .bind(tenant_id)
+    .fetch_one(&state.db)
+    .await?;
+    if primary_kind == "custom" {
+        sqlx::query("UPDATE tenants SET aliases=CASE WHEN $1=ANY(aliases) THEN aliases ELSE array_append(aliases,$1) END,config_revision=config_revision+1,updated_at=now() WHERE id=$2")
+            .bind(&hostname).bind(tenant_id).execute(&state.db).await?;
+        render_provisioned_tenant(state, tenant_id).await?;
+        reload_provisioned_runtime(state, tenant_id).await?;
+        healthcheck_host(state, tenant_id, &hostname).await?;
+        finish_domain(&state.db, id).await?;
+        return Ok(());
+    }
+
+    let database_url = sqlx::query_scalar::<_, String>(
+        "SELECT database_url FROM tenant_configuration WHERE tenant_id=$1",
+    )
+    .bind(tenant_id)
+    .fetch_one(&state.db)
+    .await?;
+    let tenant_db = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await?;
+    let has_identity = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM public.accounts WHERE domain IS NULL)",
+    )
+    .fetch_one(&tenant_db)
+    .await?;
+    tenant_db.close().await;
+    anyhow::ensure!(!has_identity, "tenant already has local identities");
+
+    let mut tx = state.db.begin().await?;
+    sqlx::query("UPDATE tenant_domains SET is_primary=false,updated_at=now() WHERE tenant_id=$1 AND is_primary")
+        .bind(tenant_id).execute(&mut *tx).await?;
+    sqlx::query("UPDATE tenant_domains SET is_primary=true WHERE id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE tenants SET domain=$1,aliases=ARRAY(SELECT hostname FROM tenant_domains WHERE tenant_id=$2 AND id<>$3 AND (kind IN ('provided','legacy') OR status='active') ORDER BY created_at),config_revision=config_revision+1,updated_at=now() WHERE id=$2")
+        .bind(&hostname).bind(tenant_id).bind(id).execute(&mut *tx).await?;
+    tx.commit().await?;
+    render_provisioned_tenant(state, tenant_id).await?;
+    let (directory, aliases) = sqlx::query_as::<_, (String, Vec<String>)>("SELECT r.tenant_directory,t.aliases FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1")
+        .bind(tenant_id).fetch_one(&state.db).await?;
+    for alias in aliases {
+        let old_file = PathBuf::from(&directory).join(tenant_file_name(&alias));
+        if tokio::fs::try_exists(&old_file).await? {
+            tokio::fs::remove_file(old_file).await?;
+        }
+    }
+    reload_provisioned_runtime(state, tenant_id).await?;
+    healthcheck_provisioned_tenant(state, tenant_id).await?;
+    finish_domain(&state.db, id).await?;
+    Ok(())
+}
+
+async fn finish_domain(db: &PgPool, id: Uuid) -> Result<()> {
+    sqlx::query(
+        "UPDATE tenant_domains SET status='active',error=NULL,updated_at=now() WHERE id=$1",
+    )
+    .bind(id)
+    .execute(db)
+    .await?;
+    sqlx::query("UPDATE operations SET status='succeeded',finished_at=now() WHERE id=(SELECT o.id FROM operations o JOIN tenant_domains d ON d.tenant_id=o.tenant_id WHERE d.id=$1 AND o.kind='custom_domain_attach' AND o.status='running' ORDER BY o.created_at DESC LIMIT 1)")
+        .bind(id).execute(db).await?;
+    Ok(())
 }
 
 async fn provisioning_reconciler(state: Shared) {
@@ -1023,12 +1368,26 @@ async fn reload_provisioned_runtime(state: &Shared, tenant_id: Uuid) -> Result<(
 async fn healthcheck_provisioned_tenant(state: &Shared, tenant_id: Uuid) -> Result<()> {
     let (domain, bind_address) = sqlx::query_as::<_, (String, String)>("SELECT t.domain,r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1")
         .bind(tenant_id).fetch_one(&state.db).await?;
+    healthcheck_url(state, &bind_address, &domain).await
+}
+
+async fn healthcheck_host(state: &Shared, tenant_id: Uuid, domain: &str) -> Result<()> {
+    let bind_address = sqlx::query_scalar::<_, String>(
+        "SELECT r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
+    )
+    .bind(tenant_id)
+    .fetch_one(&state.db)
+    .await?;
+    healthcheck_url(state, &bind_address, domain).await
+}
+
+async fn healthcheck_url(state: &Shared, bind_address: &str, domain: &str) -> Result<()> {
     let url = format!("http://{bind_address}/api/v2/instance");
     for _ in 0..30 {
         if state
             .client
             .get(&url)
-            .header("Host", &domain)
+            .header("Host", domain)
             .send()
             .await
             .map(|response| response.status().is_success())

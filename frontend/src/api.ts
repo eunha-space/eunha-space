@@ -91,3 +91,17 @@ export type TenantConfiguration = {
   /** Rendered exactly as a reconciliation would write it, minus every secret. */
   toml: string;
 };
+
+export type TenantDomain = {
+  id: string;
+  hostname: string;
+  kind: "provided" | "custom" | "legacy";
+  status: "active" | "pending" | "failed" | "removing";
+  is_primary: boolean;
+  cloudflare_status: string | null;
+  ssl_status: string | null;
+  cname_target: string;
+  ownership_name: string | null;
+  ownership_value: string | null;
+  error: string | null;
+};
