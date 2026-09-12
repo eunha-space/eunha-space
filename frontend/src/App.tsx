@@ -152,7 +152,7 @@ export function App() {
   ];
 
   return (
-    <TooltipProvider delayDuration={200}>
+    <TooltipProvider delay={200}>
       <div className="min-h-screen md:grid md:grid-cols-[15rem_1fr]">
         <aside className="bg-sidebar border-border flex items-center gap-3 border-b p-3 md:fixed md:h-screen md:w-60 md:flex-col md:items-stretch md:gap-0 md:border-r md:border-b-0 md:p-5">
           <div className="flex items-center gap-3">

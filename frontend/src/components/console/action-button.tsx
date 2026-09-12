@@ -1,4 +1,4 @@
-import type { ComponentProps, ReactNode } from "react";
+import { useState, type ComponentProps, type ReactNode } from "react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -48,6 +48,8 @@ export function ActionButton({
   className,
   children,
 }: Props) {
+  const [open, setOpen] = useState(false);
+
   const button = (
     <Button
       variant={variant}
@@ -62,25 +64,22 @@ export function ActionButton({
   );
 
   // A disabled button emits no pointer events, so the tooltip needs a live wrapper.
-  const withReason =
-    disabled && !busy && disabledReason ? (
+  if (disabled && !busy && disabledReason) {
+    return (
       <Tooltip>
-        <TooltipTrigger asChild>
-          <span tabIndex={0} className="inline-flex cursor-not-allowed">
-            {button}
-          </span>
+        <TooltipTrigger render={<span tabIndex={0} className="inline-flex cursor-not-allowed" />}>
+          {button}
         </TooltipTrigger>
         <TooltipContent>{disabledReason}</TooltipContent>
       </Tooltip>
-    ) : (
-      button
     );
+  }
 
-  if (!confirm || disabled || busy) return withReason;
+  if (!confirm || disabled || busy) return button;
 
   return (
-    <AlertDialog>
-      <AlertDialogTrigger asChild>{button}</AlertDialogTrigger>
+    <AlertDialog open={open} onOpenChange={setOpen}>
+      <AlertDialogTrigger render={button} />
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>{confirm.title}</AlertDialogTitle>
@@ -88,7 +87,15 @@ export function ActionButton({
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
-          <AlertDialogAction onClick={onClick}>{confirm.action}</AlertDialogAction>
+          {/* Base UI's action button is a plain button, so closing is explicit. */}
+          <AlertDialogAction
+            onClick={() => {
+              setOpen(false);
+              onClick();
+            }}
+          >
+            {confirm.action}
+          </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

@@ -43,13 +43,13 @@ export function ChipFilter({
 }) {
   return (
     <ToggleGroup
-      type="single"
       variant="outline"
       size="sm"
-      value={value}
+      // Base UI models the pressed state as an array even in single-select mode,
+      // and clears it when the active item is pressed again; keep the filter.
+      value={[value]}
       aria-label={label}
-      // Radix clears the value when the active item is pressed again; keep the current filter.
-      onValueChange={(next) => onChange(next || value)}
+      onValueChange={(next) => onChange(next[0] ?? value)}
       className="flex-wrap"
     >
       {choices.map((choice) => (
