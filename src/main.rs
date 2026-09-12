@@ -627,7 +627,7 @@ async fn runtimes(
     headers: HeaderMap,
 ) -> Result<Json<Vec<RuntimeSummary>>, ApiError> {
     operator(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT r.id,r.name,r.bind_address,r.auto_deploy_enabled,r.deployed_ref,o.id release_operation_id,o.status release_status,e.message release_message FROM runtimes r LEFT JOIN LATERAL (SELECT id,status FROM operations WHERE runtime_id=r.id AND kind='runtime_release' ORDER BY created_at DESC LIMIT 1) o ON true LEFT JOIN LATERAL (SELECT message FROM operation_events WHERE operation_id=o.id ORDER BY id DESC LIMIT 1) e ON true ORDER BY r.name").fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT r.id,r.name,r.bind_address,r.auto_deploy_enabled,r.deployed_ref,o.id release_operation_id,o.status release_status,e.message release_message FROM runtimes r LEFT JOIN LATERAL (SELECT id,status FROM operations WHERE runtime_id=r.id AND kind='runtime_release' ORDER BY created_at DESC LIMIT 1) o ON true LEFT JOIN LATERAL (SELECT string_agg(message,E'\\n' ORDER BY id) message FROM operation_events WHERE operation_id=o.id) e ON true ORDER BY r.name").fetch_all(&s.db).await?))
 }
 
 async fn set_automatic_release(
@@ -695,20 +695,32 @@ async fn queue_runtime_release(
             "Another runtime release is already in progress.".into(),
         ));
     };
-    tokio::spawn(run_runtime_release(state, operation_id, runtime_id, row));
+    let deployment_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO runtime_deployments(id,runtime_id,operation_id,trigger,status,started_at) VALUES($1,$2,$3,$4,'queued',now())")
+        .bind(deployment_id).bind(runtime_id).bind(operation_id).bind(trigger).execute(&state.db).await?;
+    tokio::spawn(run_runtime_release(state, operation_id, deployment_id, runtime_id, row));
     Ok(operation_id)
 }
 
 async fn run_runtime_release(
     state: Shared,
     operation_id: Uuid,
+    deployment_id: Uuid,
     runtime_id: Uuid,
     runtime: (String, String, String, String, String),
 ) {
     let (_, host, tenant_directory, service_label, bind_address) = runtime;
     release_event(&state.db, operation_id, "Release queued; validating the central source checkout.").await;
+    let _ = sqlx::query("UPDATE runtime_deployments SET status='building' WHERE id=$1").bind(deployment_id).execute(&state.db).await;
     let result = match build_release(&state.db, operation_id).await {
-        Ok(release) => async_deploy_release(&state.db, operation_id, &host, &tenant_directory, &service_label, &bind_address, release).await,
+        Ok(release) => {
+            let release_id = Uuid::new_v4();
+            let artifact_path = release.1.to_string_lossy().to_string();
+            let release_id: Uuid = sqlx::query_scalar("INSERT INTO eunha_releases(id,git_sha,artifact_path,build_status,built_at) VALUES($1,$2,$3,'ready',now()) ON CONFLICT(git_sha) DO UPDATE SET artifact_path=excluded.artifact_path,build_status='ready',built_at=now() RETURNING id")
+                .bind(release_id).bind(&release.0).bind(artifact_path).fetch_one(&state.db).await.unwrap_or(release_id);
+            let _ = sqlx::query("UPDATE runtime_deployments SET release_id=$1,status='transferring' WHERE id=$2").bind(release_id).bind(deployment_id).execute(&state.db).await;
+            async_deploy_release(&state.db, operation_id, &host, &tenant_directory, &service_label, &bind_address, release).await
+        },
         Err(message) => Err(message),
     };
     match result {
@@ -722,9 +734,10 @@ async fn run_runtime_release(
             .bind(operation_id)
             .execute(&state.db)
             .await;
+            let _ = sqlx::query("UPDATE runtime_deployments SET status='healthy',finished_at=now() WHERE id=$1").bind(deployment_id).execute(&state.db).await;
             release_event(&state.db, operation_id, "Release completed successfully.").await;
         }
-        Err(message) => { release_event(&state.db, operation_id, "Release failed; the previous release was retained or restored.").await; let _ = fail_release(&state.db, operation_id, &message).await; }
+        Err(message) => { release_event(&state.db, operation_id, "Release failed; the previous release was retained or restored.").await; let _ = sqlx::query("UPDATE runtime_deployments SET status='failed',error=$1,finished_at=now() WHERE id=$2").bind(&message).bind(deployment_id).execute(&state.db).await; let _ = fail_release(&state.db, operation_id, &message).await; }
     }
 }
 
@@ -815,13 +828,26 @@ async fn async_deploy_release(db: &PgPool, operation_id: Uuid, host: &str, tenan
     let release_path = releases.join(&reference);
     let artifact_text = artifact.to_string_lossy().to_string();
     let remote_staging = shell_quote(&staging.to_string_lossy());
+    let local_runtime = matches!(host, "localhost" | "127.0.0.1" | "::1");
     release_event(db, operation_id, "Preparing the runtime release directory.").await;
-    command_status("ssh", &[host, &format!("mkdir -p {}", shell_quote(&releases.to_string_lossy()))], None).await.map_err(|_| "Could not prepare the runtime release directory.".to_string())?;
+    if local_runtime {
+        tokio::fs::create_dir_all(&releases).await.map_err(|_| "Could not prepare the runtime release directory.".to_string())?;
+    } else {
+        command_status("ssh", &[host, &format!("mkdir -p {}", shell_quote(&releases.to_string_lossy()))], None).await.map_err(|_| "Could not prepare the runtime release directory.".to_string())?;
+    }
     release_event(db, operation_id, "Transferring the immutable release bundle to the runtime.").await;
-    command_status("scp", &["-r", &artifact_text, &format!("{}:{}", host, remote_staging)], None).await.map_err(|_| "Could not transfer the runtime release bundle.".to_string())?;
+    if local_runtime {
+        command_status("cp", &["-R", &artifact_text, &staging.to_string_lossy()], None).await.map_err(|_| "Could not transfer the runtime release bundle.".to_string())?;
+    } else {
+        command_status("scp", &["-r", &artifact_text, &format!("{}:{}", host, remote_staging)], None).await.map_err(|_| "Could not transfer the runtime release bundle.".to_string())?;
+    }
     release_event(db, operation_id, "Applying migrations, switching the runtime, and waiting for health.").await;
     let script = format!("set -eu; rel={}; stage={}; root={}; cd \"$root\"; \"$stage/eunha\" --tenants {} migrate; mv \"$stage\" \"$rel\"; previous=$(readlink current 2>/dev/null || true); ln -sfn \"$rel\" .current.new; mv -h .current.new current; launchctl kickstart -k gui/$(id -u)/{}; for i in $(seq 1 45); do curl -sf -m 5 -o /dev/null http://127.0.0.1:{}/api/v2/instance && exit 0; sleep 1; done; if [ -n \"$previous\" ]; then ln -sfn \"$previous\" .current.new; mv -h .current.new current; launchctl kickstart -k gui/$(id -u)/{}; fi; exit 1", shell_quote(&release_path.to_string_lossy()), remote_staging, shell_quote(&runtime_root.to_string_lossy()), shell_quote(tenant_directory), service_label, bind_address.rsplit(':').next().unwrap_or(""), service_label);
-    command_status("ssh", &[host, &script], None).await.map_err(|_| "Runtime migration, switch, or health check failed; the prior release was restored when available.".to_string())?;
+    if local_runtime {
+        command_status("/bin/sh", &["-c", &script], None).await.map_err(|_| "Runtime migration, switch, or health check failed; the prior release was restored when available.".to_string())?;
+    } else {
+        command_status("ssh", &[host, &script], None).await.map_err(|_| "Runtime migration, switch, or health check failed; the prior release was restored when available.".to_string())?;
+    }
     Ok(reference)
 }
 
