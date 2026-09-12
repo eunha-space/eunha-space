@@ -494,11 +494,18 @@ async fn main() -> Result<()> {
         )
         .route("/operations/{id}/events", get(operation_events))
         .route("/operations", get(operations));
-    let frontend = ServeDir::new("frontend/dist")
-        .not_found_service(ServeFile::new("frontend/dist/index.html"));
+    // The console owns /admin/<section>; each of those paths has to serve the
+    // shell with a 200 so a deep link or a refresh lands on the right section.
+    // ServeDir::not_found_service would serve the shell but force a 404, and a
+    // blanket fallback would answer for genuinely missing assets too, so the
+    // console routes are explicit and everything else still 404s.
+    let index = ServeFile::new("frontend/dist/index.html");
     let app = Router::new()
         .nest("/api", api)
-        .fallback_service(frontend)
+        .route_service("/", index.clone())
+        .route_service("/admin", index.clone())
+        .route_service("/admin/{*section}", index)
+        .fallback_service(ServeDir::new("frontend/dist"))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
     let bind = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:60001".into());
