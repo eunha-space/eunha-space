@@ -95,7 +95,11 @@ struct OperationSummary {
 struct RuntimeSummary {
     id: Uuid,
     name: String,
+    host: String,
     bind_address: String,
+    service_label: String,
+    tenant_directory: String,
+    tenant_count: i64,
     auto_deploy_enabled: bool,
     deployed_ref: Option<String>,
     release_operation_id: Option<Uuid>,
@@ -480,6 +484,7 @@ async fn main() -> Result<()> {
         .route("/session/me", get(me))
         .route("/tenants", get(tenants))
         .route("/tenants/{id}/check", post(check_tenant))
+        .route("/tenants/{id}/configuration", get(tenant_configuration))
         .route("/tenants/{id}/render", post(render_tenant))
         .route("/runtimes", get(runtimes))
         .route("/runtimes/{id}/release", post(release_runtime))
@@ -612,6 +617,98 @@ async fn operations(
     Ok(Json(sqlx::query_as("SELECT o.id,t.domain,r.name runtime_name,o.kind,o.status,o.error,o.created_at FROM operations o LEFT JOIN tenants t ON t.id=o.tenant_id LEFT JOIN runtimes r ON r.id=o.runtime_id ORDER BY o.created_at DESC LIMIT 50").fetch_all(&s.db).await?))
 }
 
+/// Secrets are replaced before a configuration ever leaves the control plane.
+const REDACTED: &str = "<redacted>";
+
+/// Keeps the shape an operator needs to recognise a connection while masking
+/// the password: `postgresql://eunha:<redacted>@127.0.0.1/eunha_seoul_earth`.
+fn redact_connection_url(value: &str) -> String {
+    let Some((scheme, rest)) = value.split_once("://") else {
+        return REDACTED.to_owned();
+    };
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, Some(path)),
+        None => (rest, None),
+    };
+    let Some((userinfo, host)) = authority.split_once('@') else {
+        return value.to_owned();
+    };
+    let userinfo = match userinfo.split_once(':') {
+        Some((user, _)) => format!("{user}:{REDACTED}"),
+        None => userinfo.to_owned(),
+    };
+    match path {
+        Some(path) => format!("{scheme}://{userinfo}@{host}/{path}"),
+        None => format!("{scheme}://{userinfo}@{host}"),
+    }
+}
+
+fn redact_tenant_toml(config: &mut TenantToml) {
+    config.database_url = redact_connection_url(&config.database_url);
+    config.redis_url = redact_connection_url(&config.redis_url);
+    config.redis_coordination_url = config
+        .redis_coordination_url
+        .as_deref()
+        .map(redact_connection_url);
+    config.media_storage.access_key_id = REDACTED.to_owned();
+    config.media_storage.secret_access_key = REDACTED.to_owned();
+    config.resend.api_key = REDACTED.to_owned();
+    if let Some(smtp) = config.smtp.as_mut() {
+        smtp.password = REDACTED.to_owned();
+    }
+    if let Some(encryption) = config.active_record_encryption.as_mut() {
+        encryption.primary_key = REDACTED.to_owned();
+        encryption.key_derivation_salt = REDACTED.to_owned();
+    }
+    // The public half of the VAPID pair stays readable; the private half never leaves.
+    config.instance.vapid_private_key = REDACTED.to_owned();
+}
+
+#[derive(Serialize)]
+struct TenantConfiguration {
+    domain: String,
+    file_name: String,
+    config_revision: i64,
+    rendered_revision: Option<i64>,
+    toml: String,
+}
+
+/// Renders exactly what a reconciliation would write, minus every secret, so
+/// operators can read a tenant's effective configuration from the console.
+async fn tenant_configuration(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<TenantConfiguration>, ApiError> {
+    operator(&headers, &s.db).await?;
+    let row = sqlx::query_as::<_, (SqlJson<StoredTenant>, SqlJson<StoredConfig>, String, String, i64, Option<i64>)>(
+        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,r.bind_address,t.config_revision,t.rendered_revision FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
+    )
+    .bind(id)
+    .fetch_optional(&s.db)
+    .await?
+    .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Tenant not found".into()))?;
+    let (
+        SqlJson(tenant),
+        SqlJson(config),
+        bucket_name,
+        bind_address,
+        config_revision,
+        rendered_revision,
+    ) = row;
+    let domain = tenant.domain.clone();
+    let mut typed = typed_toml(tenant, config, bucket_name, bind_address).map_err(ApiError::from)?;
+    redact_tenant_toml(&mut typed);
+    let rendered = toml::to_string_pretty(&typed).map_err(ApiError::from)?;
+    Ok(Json(TenantConfiguration {
+        file_name: tenant_file_name(&domain),
+        domain,
+        config_revision,
+        rendered_revision,
+        toml: rendered,
+    }))
+}
+
 async fn operation_events(
     State(s): State<Shared>,
     headers: HeaderMap,
@@ -627,7 +724,7 @@ async fn runtimes(
     headers: HeaderMap,
 ) -> Result<Json<Vec<RuntimeSummary>>, ApiError> {
     operator(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT r.id,r.name,r.bind_address,r.auto_deploy_enabled,r.deployed_ref,o.id release_operation_id,o.status release_status,e.message release_message FROM runtimes r LEFT JOIN LATERAL (SELECT id,status FROM operations WHERE runtime_id=r.id AND kind='runtime_release' ORDER BY created_at DESC LIMIT 1) o ON true LEFT JOIN LATERAL (SELECT string_agg(message,E'\\n' ORDER BY id) message FROM operation_events WHERE operation_id=o.id) e ON true ORDER BY r.name").fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT r.id,r.name,r.host,r.bind_address,r.service_label,r.tenant_directory,(SELECT count(*) FROM tenants WHERE runtime_id=r.id) tenant_count,r.auto_deploy_enabled,r.deployed_ref,o.id release_operation_id,o.status release_status,e.message release_message FROM runtimes r LEFT JOIN LATERAL (SELECT id,status FROM operations WHERE runtime_id=r.id AND kind='runtime_release' ORDER BY created_at DESC LIMIT 1) o ON true LEFT JOIN LATERAL (SELECT string_agg(message,E'\\n' ORDER BY id) message FROM operation_events WHERE operation_id=o.id) e ON true ORDER BY r.name").fetch_all(&s.db).await?))
 }
 
 async fn set_automatic_release(
