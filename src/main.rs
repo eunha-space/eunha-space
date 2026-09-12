@@ -724,7 +724,7 @@ async fn runtimes(
     headers: HeaderMap,
 ) -> Result<Json<Vec<RuntimeSummary>>, ApiError> {
     operator(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT r.id,r.name,r.host,r.bind_address,r.service_label,r.tenant_directory,(SELECT count(*) FROM tenants WHERE runtime_id=r.id) tenant_count,r.auto_deploy_enabled,r.deployed_ref,o.id release_operation_id,o.status release_status,e.message release_message FROM runtimes r LEFT JOIN LATERAL (SELECT id,status FROM operations WHERE runtime_id=r.id AND kind='runtime_release' ORDER BY created_at DESC LIMIT 1) o ON true LEFT JOIN LATERAL (SELECT string_agg(message,E'\\n' ORDER BY id) message FROM operation_events WHERE operation_id=o.id) e ON true ORDER BY r.name").fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT r.id,r.name,h.address host,r.bind_address,r.service_label,r.tenant_directory,(SELECT count(*) FROM tenants WHERE runtime_id=r.id) tenant_count,r.auto_deploy_enabled,r.deployed_ref,o.id release_operation_id,o.status release_status,e.message release_message FROM runtimes r JOIN hosts h ON h.id=r.host_id LEFT JOIN LATERAL (SELECT id,status FROM operations WHERE runtime_id=r.id AND kind='runtime_release' ORDER BY created_at DESC LIMIT 1) o ON true LEFT JOIN LATERAL (SELECT string_agg(message,E'\\n' ORDER BY id) message FROM operation_events WHERE operation_id=o.id) e ON true ORDER BY r.name").fetch_all(&s.db).await?))
 }
 
 async fn set_automatic_release(
@@ -770,7 +770,7 @@ async fn queue_runtime_release(
     trigger: &str,
 ) -> Result<Uuid, ApiError> {
     let row = sqlx::query_as::<_, (String, String, String, String, String)>(
-        "SELECT name,host,tenant_directory,service_label,bind_address FROM runtimes WHERE id=$1",
+        "SELECT r.name,h.address,r.tenant_directory,r.service_label,r.bind_address FROM runtimes r JOIN hosts h ON h.id=r.host_id WHERE r.id=$1",
     )
     .bind(runtime_id)
     .fetch_optional(&state.db)
@@ -1128,7 +1128,7 @@ async fn render_tenant(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (operator_id, _) = operator(&headers, &s.db).await?;
     let row = sqlx::query_as::<_, (SqlJson<StoredTenant>, SqlJson<StoredConfig>, String, String, String, String, String, i64)>(
-        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,r.host,r.tenant_directory,r.service_label,r.bind_address,t.config_revision FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
+        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,h.address,r.tenant_directory,r.service_label,r.bind_address,t.config_revision FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN hosts h ON h.id=r.host_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
     )
     .bind(id)
     .fetch_optional(&s.db)

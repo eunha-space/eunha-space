@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, CircleAlert, LogOut, RefreshCw, Server, X } from "lucide-react";
+import { Activity, CircleAlert, HardDrive, LogOut, RefreshCw, Rocket, Server, X } from "lucide-react";
 import { ApiError, api, errorMessage, type Operation, type Runtime, type Tenant } from "@/api";
 import { relativeTime } from "@/format";
 import { Instances } from "@/Instances";
 import { Login } from "@/Login";
 import { Operations } from "@/Operations";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Releases } from "@/Releases";
+import { Servers } from "@/Servers";
+import { Alert, AlertAction, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -19,7 +21,7 @@ type Session =
   | { state: "signed-in"; username: string }
   | { state: "error"; message: string };
 
-type View = "instances" | "operations";
+type View = "instances" | "servers" | "releases" | "operations";
 
 const POLL_INTERVAL = 3000;
 
@@ -148,8 +150,11 @@ export function App() {
 
   const sections = [
     { id: "instances" as const, label: "Instances", icon: Server },
+    { id: "servers" as const, label: "Servers", icon: HardDrive },
+    { id: "releases" as const, label: "Releases", icon: Rocket },
     { id: "operations" as const, label: "Operations", icon: Activity },
   ];
+  const heading = sections.find((section) => section.id === view)?.label ?? "Instances";
 
   return (
     <TooltipProvider delay={200}>
@@ -168,16 +173,19 @@ export function App() {
                 key={section.id}
                 variant="ghost"
                 aria-current={view === section.id ? "page" : undefined}
+                aria-label={section.label}
+                title={section.label}
                 onClick={() => setView(section.id)}
                 className={cn(
-                  "justify-start",
+                  // The mobile bar is icon-only; four labelled items do not fit.
+                  "justify-start max-md:size-8 max-md:justify-center max-md:p-0",
                   view === section.id
                     ? "bg-sidebar-accent text-sidebar-accent-foreground font-semibold"
                     : "text-muted-foreground",
                 )}
               >
                 <section.icon />
-                {section.label}
+                <span className="max-md:hidden">{section.label}</span>
               </Button>
             ))}
           </nav>
@@ -185,9 +193,18 @@ export function App() {
             <span className="text-muted-foreground hidden truncate text-sm md:inline">
               {session.username}
             </span>
-            <Button variant="outline" size="icon" onClick={() => void signOut()} aria-label="Sign out" title="Sign out">
-              <LogOut />
-            </Button>
+            <div className="flex items-center gap-1">
+              <ThemeToggle />
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => void signOut()}
+                aria-label="Sign out"
+                title="Sign out"
+              >
+                <LogOut />
+              </Button>
+            </div>
           </div>
         </aside>
 
@@ -198,9 +215,7 @@ export function App() {
           <header className="mb-6 flex flex-wrap items-center justify-between gap-4">
             <div>
               <p className="text-primary mb-1 text-xs font-extrabold tracking-[0.18em]">RUNTIME FLEET</p>
-              <h1 className="text-3xl font-semibold tracking-tight">
-                {view === "instances" ? "Instances" : "Operations"}
-              </h1>
+              <h1 className="text-3xl font-semibold tracking-tight">{heading}</h1>
             </div>
             <div className="flex items-center gap-2">
               <p className="text-muted-foreground flex items-center gap-1.5 text-sm whitespace-nowrap">
@@ -217,30 +232,32 @@ export function App() {
               >
                 <RefreshCw className={refreshing ? "animate-spin" : undefined} />
               </Button>
-              <ThemeToggle />
             </div>
           </header>
 
           {error && (
-            <Alert variant="destructive" role="alert" className="mb-4">
+            <Alert variant="destructive" className="mb-4">
               <CircleAlert />
-              <AlertDescription className="flex-1">{error}</AlertDescription>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => setError("")}
-                aria-label="Dismiss this message"
-              >
-                <X />
-              </Button>
+              <AlertDescription>{error}</AlertDescription>
+              <AlertAction>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => setError("")}
+                  aria-label="Dismiss this message"
+                >
+                  <X />
+                </Button>
+              </AlertAction>
             </Alert>
           )}
 
-          {view === "instances" ? (
+          {view === "instances" && (
             <Instances tenants={tenants} runtimes={runtimes} busy={busy} act={act} />
-          ) : (
-            <Operations operations={operations} />
           )}
+          {view === "servers" && <Servers runtimes={runtimes} tenants={tenants} />}
+          {view === "releases" && <Releases runtimes={runtimes} busy={busy} act={act} />}
+          {view === "operations" && <Operations operations={operations} />}
 
         </main>
       </div>

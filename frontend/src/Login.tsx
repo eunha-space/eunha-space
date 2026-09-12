@@ -64,7 +64,7 @@ export function Login({ done }: { done: () => void }) {
               />
             </div>
             {error && (
-              <Alert variant="destructive" role="alert">
+              <Alert variant="destructive">
                 <CircleAlert />
                 <AlertDescription>{error}</AlertDescription>
               </Alert>

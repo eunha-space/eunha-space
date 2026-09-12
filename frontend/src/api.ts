@@ -26,7 +26,12 @@ export type Operation = {
 export type Runtime = {
   id: string;
   name: string;
+  /** The machine the runtime runs on, normalised into the hosts table. */
+  host: string;
   bind_address: string;
+  service_label: string;
+  tenant_directory: string;
+  tenant_count: number;
   auto_deploy_enabled: boolean;
   deployed_ref: string | null;
   release_operation_id: string | null;
@@ -74,3 +79,12 @@ export function isSettled(status: string | null): boolean {
 export function pendingRender(tenant: Tenant): boolean {
   return tenant.rendered_revision !== tenant.config_revision;
 }
+
+export type TenantConfiguration = {
+  domain: string;
+  file_name: string;
+  config_revision: number;
+  rendered_revision: number | null;
+  /** Rendered exactly as a reconciliation would write it, minus every secret. */
+  toml: string;
+};
