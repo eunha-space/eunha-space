@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, CircleAlert, Database, LogOut, RefreshCw, Server, X } from "lucide-react";
+import { Activity, CircleAlert, LogOut, RefreshCw, Server, X } from "lucide-react";
 import { ApiError, api, errorMessage, type Operation, type Runtime, type Tenant } from "@/api";
 import { relativeTime } from "@/format";
 import { Instances } from "@/Instances";
@@ -7,7 +7,6 @@ import { Login } from "@/Login";
 import { Operations } from "@/Operations";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Mark, ThemeToggle } from "@/components/console/brand";
@@ -243,11 +242,6 @@ export function App() {
             <Operations operations={operations} />
           )}
 
-          <Separator className="mt-8" />
-          <footer className="text-muted-foreground flex items-center gap-2 py-4 text-xs">
-            <Database className="size-3.5" />
-            Control-plane PostgreSQL is authoritative · secret values never leave the API
-          </footer>
         </main>
       </div>
     </TooltipProvider>
