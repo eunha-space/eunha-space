@@ -643,6 +643,7 @@ async fn main() -> Result<()> {
             .build()?,
     });
     tokio::spawn(health_reconciler(state.clone()));
+    tokio::spawn(release_recovery_reconciler(state.clone()));
     tokio::spawn(automatic_release_reconciler(state.clone()));
     tokio::spawn(provisioning_reconciler(state.clone()));
     tokio::spawn(domain_reconciler(state.clone()));
@@ -2855,6 +2856,7 @@ async fn run_runtime_release(
         green,
         health_host,
     ) = runtime;
+    let heartbeat = tokio::spawn(release_heartbeat(state.db.clone(), operation_id));
     release_event(
         &state.db,
         operation_id,
@@ -2929,6 +2931,65 @@ async fn run_runtime_release(
             .await;
             let _ = sqlx::query("UPDATE runtime_deployments SET status='failed',error=$1,finished_at=now() WHERE id=$2").bind(&message).bind(deployment_id).execute(&state.db).await;
             let _ = fail_release(&state.db, operation_id, &message).await;
+        }
+    }
+    heartbeat.abort();
+}
+
+/// How often a running release proves its process is still working on it, and
+/// how long a silence means that process is gone.
+const RELEASE_HEARTBEAT_SECONDS: u64 = 15;
+const RELEASE_ABANDONED_AFTER: &str = "2 minutes";
+
+async fn release_heartbeat(db: PgPool, operation_id: Uuid) {
+    loop {
+        let _ = sqlx::query(
+            "UPDATE operations SET heartbeat_at=now() WHERE id=$1 AND status='running'",
+        )
+        .bind(operation_id)
+        .execute(&db)
+        .await;
+        tokio::time::sleep(Duration::from_secs(RELEASE_HEARTBEAT_SECONDS)).await;
+    }
+}
+
+/// Fail releases whose process stopped working on them, which otherwise hold
+/// the fleet's release lock forever. What to tell the operator depends on how
+/// far the release got: before transfer the runtime was never touched.
+async fn fail_abandoned_releases(db: &PgPool) {
+    let abandoned = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<String>)>(&format!(
+        "SELECT o.id,d.id,d.status FROM operations o LEFT JOIN runtime_deployments d ON d.operation_id=o.id WHERE o.kind='runtime_release' AND o.status IN ('pending','running') AND COALESCE(o.heartbeat_at,o.started_at,o.created_at) < now()-interval '{RELEASE_ABANDONED_AFTER}'"
+    ))
+    .fetch_all(db)
+    .await;
+    let Ok(abandoned) = abandoned else {
+        return;
+    };
+    for (operation_id, deployment_id, stage) in abandoned {
+        let message = match stage.as_deref() {
+            None | Some("queued" | "building") => {
+                "Release was interrupted while building, most likely by a control-plane restart. The runtime was not changed; retrying is safe."
+            }
+            Some(_) => {
+                "Release was interrupted during rollout, most likely by a control-plane restart. Check the runtime's active slot and health before retrying."
+            }
+        };
+        let failed = sqlx::query(
+            "UPDATE operations SET status='failed',error=$1,finished_at=now() WHERE id=$2 AND status IN ('pending','running')",
+        )
+        .bind(message)
+        .bind(operation_id)
+        .execute(db)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .unwrap_or(false);
+        if !failed {
+            continue;
+        }
+        release_event(db, operation_id, &format!("Release failed: {message}")).await;
+        if let Some(deployment_id) = deployment_id {
+            let _ = sqlx::query("UPDATE runtime_deployments SET status='failed',error=$1,finished_at=now() WHERE id=$2 AND status NOT IN ('healthy','rolled_back','failed')")
+                .bind(message).bind(deployment_id).execute(db).await;
         }
     }
 }
@@ -3396,6 +3457,13 @@ fn describe_router_failure(message: &str) -> String {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\\"'\\\"'"))
+}
+
+async fn release_recovery_reconciler(state: Shared) {
+    loop {
+        fail_abandoned_releases(&state.db).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
 }
 
 async fn automatic_release_reconciler(state: Shared) {
