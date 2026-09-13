@@ -289,14 +289,14 @@ export function CustomerApp() {
   const instanceId = location.pathname.match(/^\/instances\/([^/]+)$/)?.[1];
   if (instanceId) {
     return (
-      <main className="mx-auto min-h-screen max-w-4xl p-4 md:py-10">
+      <main className="mx-auto min-h-screen max-w-2xl p-4 md:py-10">
         <CustomerHeader customer={customer} onSignOut={signOut} />
         <CustomerInstanceDetail id={instanceId} />
       </main>
     );
   }
   return (
-    <main className="mx-auto min-h-screen max-w-4xl p-4 md:py-10">
+    <main className="mx-auto min-h-screen max-w-2xl p-4 md:py-10">
       <CustomerHeader customer={customer} onSignOut={signOut} />
       {error && (
         <Alert variant="destructive" className="mb-4">
@@ -329,11 +329,7 @@ export function CustomerApp() {
         </Card>
       )}
       {customer.has_password && (
-        <div
-          className={`grid gap-6 ${
-            reachedInstanceLimit ? "" : "md:grid-cols-2"
-          }`}
-        >
+        <div className="grid gap-6">
           {!reachedInstanceLimit && <Card>
             <CardHeader>
               <CardTitle>{t("Create an instance")}</CardTitle>

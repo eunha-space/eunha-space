@@ -135,7 +135,7 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
         </a>
       </div>
 
-      <div className="grid gap-6 md:grid-cols-2">
+      <div className="grid gap-6">
         {!offline && (
           <>
             {detail.tenant.owner_username && (
@@ -271,7 +271,7 @@ function AdminAccount(
   );
 
   return (
-    <Card className="md:col-span-2">
+    <Card>
       <CardHeader>
         <CardTitle>{t("Admin account")}</CardTitle>
         <CardDescription>
@@ -433,7 +433,7 @@ function DeleteInstance(
   }
 
   return (
-    <Card className="md:col-span-2">
+    <Card>
       <CardHeader>
         <CardTitle>{retained ? t("Deleted instance") : t("Delete instance")}</CardTitle>
         <CardDescription>{description}</CardDescription>
