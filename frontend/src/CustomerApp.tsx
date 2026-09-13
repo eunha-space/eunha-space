@@ -28,7 +28,7 @@ import { CustomerInstanceDetail } from "@/CustomerInstanceDetail";
 
 type Customer = {
   email: string;
-  instance_limit: number;
+  instance_limit: number | null;
   has_password: boolean;
 };
 
@@ -178,7 +178,7 @@ export function CustomerApp() {
     setTenants([]);
   }
   const activeInstances = tenants.filter(countsTowardInstanceLimit).length;
-  const reachedInstanceLimit = customer != null &&
+  const reachedInstanceLimit = customer?.instance_limit != null &&
     activeInstances >= customer.instance_limit;
   if (!sessionLoaded) {
     return (
@@ -338,7 +338,9 @@ export function CustomerApp() {
             <CardHeader>
               <CardTitle>{t("Create an instance")}</CardTitle>
               <CardDescription>
-                {i18n.locale === "ko"
+                {customer.instance_limit == null
+                  ? t("No instance limit.")
+                  : i18n.locale === "ko"
                   ? `${customer.instance_limit}개 중 ${activeInstances}개 사용 중입니다.`
                   : `${activeInstances} of ${customer.instance_limit} used.`}
               </CardDescription>

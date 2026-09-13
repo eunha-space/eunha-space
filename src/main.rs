@@ -1084,14 +1084,14 @@ async fn customer_me(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (id, email) = customer(&headers, &s.db).await?;
-    let has_password = sqlx::query_scalar::<_, bool>(
-        "SELECT password_hash IS NOT NULL FROM customers WHERE id=$1",
+    let (has_password, instance_limit) = sqlx::query_as::<_, (bool, Option<i64>)>(
+        "SELECT password_hash IS NOT NULL,instance_limit FROM customers WHERE id=$1",
     )
     .bind(id)
     .fetch_one(&s.db)
     .await?;
     Ok(Json(
-        serde_json::json!({"email":email,"instance_limit":CUSTOMER_INSTANCE_LIMIT,"has_password":has_password}),
+        serde_json::json!({"email":email,"instance_limit":instance_limit,"has_password":has_password}),
     ))
 }
 async fn customer_tenants(
@@ -1361,10 +1361,12 @@ async fn create_tenant_inner(
             .bind(customer_id)
             .execute(&mut *tx)
             .await?;
-        if customer_instance_count(&mut tx, customer_id).await? >= CUSTOMER_INSTANCE_LIMIT {
+        let instance_limit = customer_instance_limit(&mut tx, customer_id).await?;
+        let instance_count = customer_instance_count(&mut tx, customer_id).await?;
+        if instance_limit.is_some_and(|limit| instance_count >= limit) {
             return Err(ApiError(
                 StatusCode::CONFLICT,
-                "Each customer may create up to two instances.".into(),
+                "You have reached your instance limit.".into(),
             ));
         }
     }
@@ -1967,8 +1969,6 @@ async fn finish_domain(db: &PgPool, id: Uuid) -> Result<()> {
     Ok(())
 }
 
-const CUSTOMER_INSTANCE_LIMIT: i64 = 2;
-
 /// How long a deleted instance's data is kept, so it can be restored, before it
 /// is purged.
 const RETENTION_BEFORE_PURGE: &str = "7 days";
@@ -2059,6 +2059,17 @@ async fn customer_instance_count(
     .await
 }
 
+/// A null limit grants the customer unlimited instances.
+async fn customer_instance_limit(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    customer_id: Uuid,
+) -> Result<Option<i64>, sqlx::Error> {
+    sqlx::query_scalar("SELECT instance_limit FROM customers WHERE id=$1")
+        .bind(customer_id)
+        .fetch_one(&mut **tx)
+        .await
+}
+
 /// Delete an instance: take it offline at once, keeping its data until
 /// `RETENTION_BEFORE_PURGE` has passed, when it is purged unless restored first.
 async fn customer_delete_instance(
@@ -2132,7 +2143,9 @@ async fn customer_restore(
             "Only a deleted instance can be restored.".into(),
         ));
     }
-    if customer_instance_count(&mut tx, customer_id).await? >= CUSTOMER_INSTANCE_LIMIT {
+    let instance_limit = customer_instance_limit(&mut tx, customer_id).await?;
+    let instance_count = customer_instance_count(&mut tx, customer_id).await?;
+    if instance_limit.is_some_and(|limit| instance_count >= limit) {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "Delete another instance before restoring this one.".into(),

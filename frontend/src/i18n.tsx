@@ -112,6 +112,7 @@ const ko: Record<string, string> = {
   "Eunha hostname": "호스트명",
   Name: "이름",
   "Instance name": "인스턴스 이름",
+  "No instance limit.": "인스턴스 수 제한이 없습니다.",
   Address: "주소",
   "eunha space address": "은하 도메인",
   "My own domain": "내 도메인",
