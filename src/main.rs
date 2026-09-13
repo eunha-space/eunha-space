@@ -1027,15 +1027,44 @@ async fn domain_reconciler(state: Shared) {
         if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT d.id FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id JOIN runtimes r ON r.id=t.runtime_id WHERE d.kind IN ('provided','custom') AND ((d.status='pending' AND d.updated_at < now()-interval '15 seconds') OR d.routed_origin_hostname IS DISTINCT FROM r.origin_hostname) ORDER BY d.created_at LIMIT 10")
             .fetch_all(&state.db).await {
             for id in ids {
-                if reconcile_domain(&state, id).await.is_err() { record_domain_error(&state.db, id).await; }
+                if let Err(error) = reconcile_domain(&state, id).await {
+                    let message = domain_reconcile_error_message(&error);
+                    record_domain_error(&state.db, id, &message).await;
+                }
             }
         }
         tokio::time::sleep(Duration::from_secs(15)).await;
     }
 }
 
-async fn record_domain_error(db: &PgPool, id: Uuid) {
-    let message = "Hostname routing could not be reconciled; existing routing remains unchanged.";
+#[derive(Debug)]
+struct DomainDnsTargetError {
+    cname_target: String,
+}
+
+impl std::fmt::Display for DomainDnsTargetError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "hostname does not point to {}",
+            self.cname_target
+        )
+    }
+}
+
+impl std::error::Error for DomainDnsTargetError {}
+
+fn domain_reconcile_error_message(error: &anyhow::Error) -> String {
+    if let Some(error) = error.downcast_ref::<DomainDnsTargetError>() {
+        return format!(
+            "Cloudflare cannot validate this hostname because its DNS does not point to {}. Update the CNAME record; existing routing remains unchanged.",
+            error.cname_target
+        );
+    }
+    "Hostname routing could not be reconciled; existing routing remains unchanged.".into()
+}
+
+async fn record_domain_error(db: &PgPool, id: Uuid, message: &str) {
     let failed = sqlx::query_scalar::<_, bool>("UPDATE tenant_domains SET attempts=attempts+1,status=CASE WHEN status='pending' AND attempts+1 >= 5 THEN 'failed' ELSE status END,error=$1,updated_at=now() WHERE id=$2 RETURNING status='failed'")
         .bind(message).bind(id).fetch_optional(db).await;
     let is_failed = failed.ok().flatten().unwrap_or(false);
@@ -1122,8 +1151,24 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
     let ownership_value = result
         .pointer("/ownership_verification/value")
         .and_then(|v| v.as_str());
+    let cname_mismatch = result
+        .get("verification_errors")
+        .and_then(|value| value.as_array())
+        .is_some_and(|errors| {
+            errors.iter().any(|error| {
+                error
+                    .as_str()
+                    .is_some_and(|message| message.contains("does not CNAME to this zone"))
+            })
+        });
     sqlx::query("UPDATE tenant_domains SET cloudflare_id=$1,cloudflare_status=$2,ssl_status=$3,ownership_name=$4,ownership_value=$5,routed_origin_hostname=$6,updated_at=now() WHERE id=$7")
         .bind(cf_id).bind(cf_status).bind(ssl_status).bind(ownership_name).bind(ownership_value).bind(&origin_hostname).bind(id).execute(&state.db).await?;
+    if cname_mismatch {
+        return Err(DomainDnsTargetError {
+            cname_target: cloudflare.cname_target.clone(),
+        }
+        .into());
+    }
     anyhow::ensure!(
         !matches!(
             cf_status,
@@ -2708,7 +2753,10 @@ async fn render_tenant(
 
 #[cfg(test)]
 mod tests {
-    use super::{REDACTED, redact_connection_url, tenant_redis_key_prefix};
+    use super::{
+        DomainDnsTargetError, REDACTED, domain_reconcile_error_message, redact_connection_url,
+        tenant_redis_key_prefix,
+    };
     use uuid::Uuid;
 
     #[test]
@@ -2720,6 +2768,25 @@ mod tests {
             prefix
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        );
+    }
+
+    #[test]
+    fn explains_a_cloudflare_cname_mismatch_without_exposing_provider_details() {
+        let error = anyhow::Error::new(DomainDnsTargetError {
+            cname_target: "customers.eunha.space".into(),
+        });
+        assert_eq!(
+            domain_reconcile_error_message(&error),
+            "Cloudflare cannot validate this hostname because its DNS does not point to customers.eunha.space. Update the CNAME record; existing routing remains unchanged."
+        );
+    }
+
+    #[test]
+    fn keeps_unclassified_reconciliation_failures_generic() {
+        assert_eq!(
+            domain_reconcile_error_message(&anyhow::anyhow!("request included sensitive context")),
+            "Hostname routing could not be reconciled; existing routing remains unchanged."
         );
     }
 
