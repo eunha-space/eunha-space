@@ -146,7 +146,7 @@ export function CustomerApp() {
                     <AlertDescription>{error}</AlertDescription>
                   </Alert>
                 )}
-                <Button disabled={busy}>
+                <Button type="submit" disabled={busy}>
                   {busy
                     ? "Please wait…"
                     : signup
@@ -248,6 +248,7 @@ export function CustomerApp() {
                 </span>
               </div>
               <Button
+                type="submit"
                 disabled={busy || tenants.length >= customer.instance_limit}
               >
                 {busy ? "Creating…" : "Create instance"}
