@@ -85,17 +85,18 @@ to the customer once with `Cache-Control: no-store`, and records an
 account out of every session and app. Like other runtime commands, these must
 run on the machine whose `CONTROL_RUNTIME_HOST` matches the runtime.
 
-Customers delete an instance in two stages. **Delete instance** schedules
-deprovisioning seven days out while the instance keeps running; until then the
-customer can cancel, or choose **Delete now**. Deprovisioning removes the
-tenant's runtime file, reloads the runtime, and confirms the domain is no longer
-served, retrying failed steps each minute up to ten times. The instance then
-becomes `retained`: its database, media, configuration and Cloudflare hostnames
-are kept, nothing is announced to other servers, and it no longer counts
-against the customer's two-instance limit. The customer can restore it while
-they have a free slot, which re-runs migration, rendering, reload and health
-checks. Only an operator purge destroys retained data, and nothing purges
-automatically. Retained tenants are ignored by domain reconciliation, health
+**Delete instance** takes an instance offline at once, whether it is ready,
+failed or still setting up. Deprovisioning removes the tenant's runtime file,
+reloads the runtime, and confirms the domain is no longer served, retrying failed
+steps each minute up to ten times. The instance then becomes `retained`. Its
+database, media, configuration and Cloudflare hostnames are kept, nothing is
+announced to other servers, and it no longer counts against the customer's
+two-instance limit. The deletion schedules a purge seven days later
+(`purge_scheduled_for`). Until then the customer can restore the instance while
+they have a free slot, which cancels the purge and re-runs migration, rendering,
+reload and health checks. They can also choose **Delete permanently now**,
+confirmed by typing the instance's address. When the seven days pass, the purge
+runs by itself. Retained tenants are ignored by domain reconciliation, health
 checks, operator renders and runtime-release health checks.
 
 Operators can **Restore** a retained tenant without checking the customer's

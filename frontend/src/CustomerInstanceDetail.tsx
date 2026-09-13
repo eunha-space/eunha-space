@@ -33,6 +33,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -383,62 +384,69 @@ function DeleteInstance(
   const t = (message: string) => i18n._(message);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [confirming, setConfirming] = useState<"schedule" | "now" | null>(null);
+  const [confirming, setConfirming] = useState<"delete" | "purge" | null>(null);
+  const [confirmation, setConfirmation] = useState("");
+  const address = instanceAddress(tenant);
 
-  async function act(path: string, method: "POST" | "DELETE") {
+  async function act(path: string, body?: object) {
     setConfirming(null);
     setBusy(true);
     setError("");
     try {
-      await api(`/customer/tenants/${tenant.id}${path}`, { method });
+      await api(`/customer/tenants/${tenant.id}${path}`, {
+        method: "POST",
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (path === "/purge") {
+        // A purged instance is gone from the customer's list.
+        location.assign("/");
+        return;
+      }
       onChanged();
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
       setBusy(false);
+      setConfirmation("");
     }
   }
 
   const state = tenant.lifecycle_state;
-  const scheduled = tenant.deletion_scheduled_for;
+  const retained = state === "retained";
   let description: string;
-  if (state === "retained" && tenant.abandoned_custom_domain) {
+  if (retained && tenant.abandoned_custom_domain) {
     description = `${tenant.abandoned_custom_domain} · ${
       t(
-        "This instance was deleted because its custom domain wasn't connected within 7 days, so it was never set up. Restoring it tries to connect the domain for another 7 days.",
+        "This instance was deleted because its custom domain wasn't connected within 7 days, so it was never set up. Restore it to try the domain again.",
       )
     }`;
-  } else if (state === "retained") {
+  } else if (retained) {
     description = t(
-      "This instance is offline. Its data is kept, so you can restore it.",
+      "This instance is offline. Its data is kept until the date below, then permanently deleted unless you restore it.",
     );
   } else if (state === "deprovisioning") {
-    description = t("Taking this instance offline. Its data is kept.");
-  } else if (scheduled) {
-    description = t(
-      "This instance keeps running until its scheduled deletion. Cancel any time before then, or delete it now.",
-    );
+    description = t("Taking this instance offline. Its data is kept for 7 days.");
   } else {
     description = t(
-      "Deleting schedules this instance to go offline in 7 days. Its data is kept, so you can restore it later.",
+      "Deleting takes this instance offline right away. Its data is kept for 7 days so you can restore it, then permanently deleted.",
     );
   }
 
   return (
     <Card className="md:col-span-2">
       <CardHeader>
-        <CardTitle>
-          {state === "retained" ? t("Restore instance") : t("Delete instance")}
-        </CardTitle>
+        <CardTitle>{retained ? t("Deleted instance") : t("Delete instance")}</CardTitle>
         <CardDescription>{description}</CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
-        {scheduled && state !== "retained" && state !== "deprovisioning" && (
+        {(retained || state === "deprovisioning") && tenant.purge_scheduled_for && (
           <div className="grid gap-1">
             <span className="text-muted-foreground text-xs">
-              {t("Scheduled deletion")}
+              {t("Permanently deleted on")}
             </span>
-            <span className="text-sm font-medium">{absoluteTime(scheduled)}</span>
+            <span className="text-sm font-medium">
+              {absoluteTime(tenant.purge_scheduled_for)}
+            </span>
           </div>
         )}
         {error && (
@@ -448,75 +456,86 @@ function DeleteInstance(
           </Alert>
         )}
         <div className="flex flex-wrap gap-2">
-          {state === "retained" && (
-            <Button disabled={busy} onClick={() => void act("/restore", "POST")}>
-              {busy ? <Spinner label={t("In progress")} /> : <RotateCcw />}
-              {t("Restore instance")}
-            </Button>
+          {retained && (
+            <>
+              <Button disabled={busy} onClick={() => void act("/restore")}>
+                {busy ? <Spinner label={t("In progress")} /> : <RotateCcw />}
+                {t("Restore instance")}
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={busy}
+                onClick={() => setConfirming("purge")}
+              >
+                <Trash2 /> {t("Delete permanently now")}
+              </Button>
+            </>
           )}
           {state === "deprovisioning" && (
             <Spinner label={t("In progress")} className="text-pending size-5" />
           )}
-          {(state === "ready" || state === "failed") && !scheduled && (
+          {(state === "ready" || state === "failed" || state === "provisioning") && (
             <Button
               variant="destructive"
               disabled={busy}
-              onClick={() => setConfirming("schedule")}
+              onClick={() => setConfirming("delete")}
             >
               <Trash2 /> {t("Delete instance")}
             </Button>
           )}
-          {(state === "ready" || state === "failed") && scheduled && (
-            <>
-              <Button
-                variant="outline"
-                disabled={busy}
-                onClick={() => void act("/deletion", "DELETE")}
-              >
-                <RotateCcw /> {t("Cancel deletion")}
-              </Button>
-              <Button
-                variant="destructive"
-                disabled={busy}
-                onClick={() => setConfirming("now")}
-              >
-                <Trash2 /> {t("Delete now")}
-              </Button>
-            </>
-          )}
         </div>
         <AlertDialog
           open={confirming !== null}
-          onOpenChange={(open) => !open && setConfirming(null)}
+          onOpenChange={(open) => {
+            if (!open) {
+              setConfirming(null);
+              setConfirmation("");
+            }
+          }}
         >
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>
-                {confirming === "now"
-                  ? t("Delete this instance now?")
-                  : t("Schedule this instance for deletion?")}
+                {confirming === "purge"
+                  ? t("Delete this instance permanently?")
+                  : t("Delete this instance?")}
               </AlertDialogTitle>
               <AlertDialogDescription>
-                {confirming === "now"
+                {confirming === "purge"
                   ? t(
-                    "It goes offline right away instead of at its scheduled time. Its data is kept, so you can restore it later.",
+                    "Its accounts, posts, media and settings are destroyed now and can't be restored.",
                   )
                   : t(
-                    "It keeps running for 7 days, then goes offline. You can cancel until then.",
+                    "It goes offline right away. Its data is permanently deleted after 7 days unless you restore it.",
                   )}
               </AlertDialogDescription>
             </AlertDialogHeader>
+            {confirming === "purge" && (
+              <div className="grid gap-2">
+                <span className="text-muted-foreground text-xs">
+                  {t("Type the instance's address to confirm")} · {address}
+                </span>
+                <Input
+                  autoComplete="off"
+                  value={confirmation}
+                  onChange={(event) => setConfirmation(event.target.value)}
+                />
+              </div>
+            )}
             <AlertDialogFooter>
               <AlertDialogCancel>{t("Cancel")}</AlertDialogCancel>
               <AlertDialogAction
                 variant="destructive"
+                disabled={confirming === "purge" &&
+                  confirmation.trim().toLowerCase() !== address.toLowerCase()}
                 onClick={() =>
-                  void act(
-                    confirming === "now" ? "/deletion/now" : "/deletion",
-                    "POST",
-                  )}
+                  void (confirming === "purge"
+                    ? act("/purge", { confirm_domain: confirmation })
+                    : act("/deletion"))}
               >
-                {confirming === "now" ? t("Delete now") : t("Delete instance")}
+                {confirming === "purge"
+                  ? t("Delete permanently")
+                  : t("Delete instance")}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

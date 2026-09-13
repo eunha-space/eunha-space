@@ -9,5 +9,7 @@ themes. Use shadcn/ui components when adding standard UI primitives.
 
 Provisioning and deprovisioning must be durable, auditable operations. A
 deprovision never immediately destroys a database, media, configuration, or
-backup; destructive purge is a separate explicitly confirmed operation.
+backup; destructive purge is a separate explicitly confirmed operation. A
+customer's confirmed deletion schedules that purge seven days later, and
+restoring the instance before then cancels it.
 

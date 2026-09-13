@@ -75,28 +75,27 @@ const ko: Record<string, string> = {
   "A new password is generated, and the admin account is signed out everywhere it is signed in.":
     "새 비밀번호가 만들어지고, 관리자 계정은 로그인된 모든 곳에서 로그아웃됩니다.",
   Cancel: "취소",
-  "Deletion scheduled": "삭제 예정",
   Deleting: "삭제 중",
   Deleted: "삭제됨",
   "Delete instance": "인스턴스 삭제",
   "Restore instance": "인스턴스 복원",
-  "Cancel deletion": "삭제 취소",
-  "Delete now": "지금 삭제",
-  "Scheduled deletion": "삭제 예정 시각",
-  "This instance is offline. Its data is kept, so you can restore it.":
-    "이 인스턴스는 오프라인 상태입니다. 데이터가 보관되어 있어 복원할 수 있습니다.",
-  "Taking this instance offline. Its data is kept.":
-    "인스턴스를 오프라인으로 전환하는 중입니다. 데이터는 보관됩니다.",
-  "This instance keeps running until its scheduled deletion. Cancel any time before then, or delete it now.":
-    "예정된 삭제 시각까지 인스턴스는 계속 운영됩니다. 그 전에 언제든 취소하거나 지금 삭제할 수 있습니다.",
-  "Deleting schedules this instance to go offline in 7 days. Its data is kept, so you can restore it later.":
-    "삭제하면 7일 후 인스턴스가 오프라인으로 전환됩니다. 데이터는 보관되어 나중에 복원할 수 있습니다.",
-  "Delete this instance now?": "지금 이 인스턴스를 삭제할까요?",
-  "Schedule this instance for deletion?": "이 인스턴스의 삭제를 예약할까요?",
-  "It goes offline right away instead of at its scheduled time. Its data is kept, so you can restore it later.":
-    "예정된 시각을 기다리지 않고 바로 오프라인으로 전환됩니다. 데이터는 보관되어 나중에 복원할 수 있습니다.",
-  "It keeps running for 7 days, then goes offline. You can cancel until then.":
-    "7일 동안 계속 운영된 후 오프라인으로 전환됩니다. 그 전까지 취소할 수 있습니다.",
+  "Deleted instance": "삭제된 인스턴스",
+  "Permanently deleted on": "영구 삭제 예정일",
+  "Delete permanently now": "지금 영구 삭제",
+  "Delete permanently": "영구 삭제",
+  "This instance is offline. Its data is kept until the date below, then permanently deleted unless you restore it.":
+    "이 인스턴스는 오프라인 상태입니다. 데이터는 아래 날짜까지 보관되며, 그 전에 복원하지 않으면 영구 삭제됩니다.",
+  "Taking this instance offline. Its data is kept for 7 days.":
+    "인스턴스를 오프라인으로 전환하는 중입니다. 데이터는 7일 동안 보관됩니다.",
+  "Deleting takes this instance offline right away. Its data is kept for 7 days so you can restore it, then permanently deleted.":
+    "삭제하면 인스턴스가 즉시 오프라인으로 전환됩니다. 데이터는 7일 동안 보관되어 복원할 수 있으며, 이후 영구 삭제됩니다.",
+  "Delete this instance?": "이 인스턴스를 삭제할까요?",
+  "It goes offline right away. Its data is permanently deleted after 7 days unless you restore it.":
+    "즉시 오프라인으로 전환됩니다. 7일 안에 복원하지 않으면 데이터가 영구 삭제됩니다.",
+  "Delete this instance permanently?": "이 인스턴스를 영구 삭제할까요?",
+  "Its accounts, posts, media and settings are destroyed now and can't be restored.":
+    "계정, 게시물, 미디어, 설정이 지금 삭제되며 복원할 수 없습니다.",
+  "Type the instance's address to confirm": "확인하려면 인스턴스 주소를 입력하세요",
   "New password": "새 비밀번호",
   Copy: "복사",
   Copied: "복사됨",
@@ -113,7 +112,7 @@ const ko: Record<string, string> = {
   "Eunha hostname": "호스트명",
   Name: "이름",
   Address: "주소",
-  "eunha space address": "eunha space 주소",
+  "eunha space address": "은하 도메인",
   "My own domain": "내 도메인",
   "Custom domain": "커스텀 도메인",
   "Before creating, add a CNAME record pointing it to customers.eunha.space. A custom domain can only be chosen now; it cannot be added or changed later.":
@@ -128,8 +127,8 @@ const ko: Record<string, string> = {
     "이 도메인이 기한 안에 연결되지 않아 해제하고 있습니다.",
   "If it isn't connected by then, this instance is deleted":
     "이때까지 연결되지 않으면 인스턴스가 삭제됩니다",
-  "This instance was deleted because its custom domain wasn't connected within 7 days, so it was never set up. Restoring it tries to connect the domain for another 7 days.":
-    "커스텀 도메인이 7일 안에 연결되지 않아 인스턴스가 설정되지 않은 채 삭제되었습니다. 복원하면 7일 동안 다시 도메인 연결을 시도합니다.",
+  "This instance was deleted because its custom domain wasn't connected within 7 days, so it was never set up. Restore it to try the domain again.":
+    "커스텀 도메인이 7일 안에 연결되지 않아 인스턴스가 설정되지 않은 채 삭제되었습니다. 복원하면 다시 도메인 연결을 시도합니다.",
   "Its DNS doesn't point to customers.eunha.space yet. We'll keep checking.":
     "아직 DNS가 customers.eunha.space를 가리키지 않습니다. 계속 확인하겠습니다.",
   "We couldn't finish checking this domain yet. We'll keep trying.":

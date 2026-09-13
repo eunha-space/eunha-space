@@ -207,6 +207,11 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                           {tenant.lifecycle_state}
                         </Badge>
                       )}
+                      {tenant.purge_scheduled_for && (
+                        <Badge variant="outline" className="text-destructive" title={absoluteTime(tenant.purge_scheduled_for)}>
+                          purges {relativeTime(tenant.purge_scheduled_for)}
+                        </Badge>
+                      )}
                       {/* A deleted tenant's lifecycle badge already says it is going or has gone offline. */}
                       {tenant.desired_state !== "running" &&
                         !isOffline(tenant) && (
@@ -406,7 +411,7 @@ function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
             <DialogDescription>The control plane creates isolated PostgreSQL credentials and UUID-scoped Redis and media keys, then migrates and activates the tenant.</DialogDescription>
           </DialogHeader>
           <div className="grid gap-4">
-            <div className="grid gap-2"><Label htmlFor="tenant-subdomain">Eunha hostname</Label><div className="flex items-center"><Input id="tenant-subdomain" className="rounded-r-none" value={subdomain} onChange={(e) => setSubdomain(e.target.value.toLowerCase())} placeholder="community" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" required /><span className="border-input bg-muted text-muted-foreground flex h-9 items-center rounded-r-md border border-l-0 px-3 text-sm">.eunha.space</span></div></div>
+            <div className="grid gap-2"><Label htmlFor="tenant-subdomain">Eunha hostname</Label><div className="flex items-center"><Input id="tenant-subdomain" className="rounded-r-none" value={subdomain} onChange={(e) => setSubdomain(e.target.value.toLowerCase())} placeholder="example" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" required /><span className="border-input bg-muted text-muted-foreground flex h-9 items-center rounded-r-md border border-l-0 px-3 text-sm">.eunha.space</span></div></div>
             <div className="grid gap-2"><Label htmlFor="tenant-title">Name</Label><Input id="tenant-title" value={title} onChange={(e) => setTitle(e.target.value)} required /></div>
             <div className="grid gap-2"><Label htmlFor="tenant-email">Contact email</Label><Input id="tenant-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
             <div className="grid gap-2"><Label htmlFor="tenant-runtime">Runtime</Label><select id="tenant-runtime" className="border-input bg-background h-9 rounded-md border px-3 text-sm" value={selectedRuntime} onChange={(e) => setRuntimeId(e.target.value)} required>{runtimes.map((runtime) => <option key={runtime.id} value={runtime.id}>{runtime.instance_name} / {runtime.name}</option>)}</select></div>

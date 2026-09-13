@@ -366,7 +366,7 @@ export function CustomerApp() {
                     <Label htmlFor="subdomain">{t("Eunha hostname")}</Label>
                     <Input
                       id="subdomain"
-                      placeholder="community"
+                      placeholder="example"
                       pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
                       value={subdomain}
                       onChange={(e) =>
@@ -374,7 +374,7 @@ export function CustomerApp() {
                       required
                     />
                     <span className="text-muted-foreground text-xs">
-                      {subdomain || "community"}.eunha.space
+                      {subdomain || "example"}.eunha.space
                     </span>
                   </div>
                 )}

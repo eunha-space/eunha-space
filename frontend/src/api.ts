@@ -19,8 +19,8 @@ export type Tenant = {
   runtime_name: string;
   bind_address: string;
   updated_at: string;
-  /** When a customer's deletion takes the instance offline, if one is scheduled. */
-  deletion_scheduled_for: string | null;
+  /** When a deleted instance's retained data is purged, unless it is restored first. */
+  purge_scheduled_for: string | null;
   /** A custom domain released because it never validated; `domain` is then a placeholder. */
   abandoned_custom_domain: string | null;
 };
@@ -46,9 +46,8 @@ export function countsTowardInstanceLimit(tenant: Pick<Tenant, "lifecycle_state"
 
 /** The customer-facing name of an instance's state, as an untranslated message. */
 export function instanceStatus(
-  tenant: Pick<Tenant, "lifecycle_state" | "deletion_scheduled_for">,
+  tenant: Pick<Tenant, "lifecycle_state">,
 ): string {
-  if (tenant.deletion_scheduled_for) return "Deletion scheduled";
   switch (tenant.lifecycle_state) {
     case "ready":
       return "Ready";
@@ -102,7 +101,7 @@ export type CustomerTenantDetail = {
     | "lifecycle_state"
     | "observed_state"
     | "updated_at"
-    | "deletion_scheduled_for"
+    | "purge_scheduled_for"
     | "abandoned_custom_domain"
   > & {
     /** The instance's Owner account; null for instances created without one. */
