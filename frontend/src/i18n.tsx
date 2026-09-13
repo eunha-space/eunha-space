@@ -111,6 +111,7 @@ const ko: Record<string, string> = {
   Value: "값",
   "Eunha hostname": "호스트명",
   Name: "이름",
+  "Instance name": "인스턴스 이름",
   Address: "주소",
   "eunha space address": "은하 도메인",
   "My own domain": "내 도메인",

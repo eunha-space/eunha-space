@@ -178,6 +178,8 @@ export function CustomerApp() {
     setTenants([]);
   }
   const activeInstances = tenants.filter(countsTowardInstanceLimit).length;
+  const reachedInstanceLimit = customer != null &&
+    activeInstances >= customer.instance_limit;
   if (!sessionLoaded) {
     return (
       <main className="grid min-h-screen place-items-center p-4">
@@ -327,8 +329,12 @@ export function CustomerApp() {
         </Card>
       )}
       {customer.has_password && (
-        <div className="grid gap-6 md:grid-cols-2">
-          <Card>
+        <div
+          className={`grid gap-6 ${
+            reachedInstanceLimit ? "" : "md:grid-cols-2"
+          }`}
+        >
+          {!reachedInstanceLimit && <Card>
             <CardHeader>
               <CardTitle>{t("Create an instance")}</CardTitle>
               <CardDescription>
@@ -414,7 +420,7 @@ export function CustomerApp() {
                 </div>
                 )}
                 <div className="grid gap-2">
-                  <Label htmlFor="title">{t("Name")}</Label>
+                  <Label htmlFor="title">{t("Instance name")}</Label>
                   <Input
                     id="title"
                     value={title}
@@ -443,13 +449,13 @@ export function CustomerApp() {
 
                 <Button
                   type="submit"
-                  disabled={busy || activeInstances >= customer.instance_limit}
+                  disabled={busy}
                 >
                   {busy ? t("Creating…") : t("Create instance")}
                 </Button>
               </form>
             </CardContent>
-          </Card>
+          </Card>}
           <Card>
             <CardHeader>
               <CardTitle>{t("Your instances")}</CardTitle>
