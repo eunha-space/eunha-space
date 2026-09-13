@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { Copy, Terminal } from "lucide-react";
 import { api, errorMessage, type OperationEvent } from "@/api";
 import { clockTime } from "@/format";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
 import { EmptyState } from "./status";
 
@@ -15,7 +14,6 @@ export function OperationLog({ operationId, live }: { operationId: string; live:
   const [events, setEvents] = useState<OperationEvent[] | null>(null);
   const [error, setError] = useState("");
   const [copied, setCopied] = useState(false);
-  const tail = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -38,12 +36,6 @@ export function OperationLog({ operationId, live }: { operationId: string; live:
       clearInterval(timer);
     };
   }, [operationId, live]);
-
-  useEffect(() => {
-    if (!live || !tail.current) return;
-    const viewport = tail.current.querySelector<HTMLElement>('[data-slot="scroll-area-viewport"]');
-    if (viewport) viewport.scrollTop = viewport.scrollHeight;
-  }, [events, live]);
 
   async function copy() {
     const text = (events || []).map((e) => `${clockTime(e.created_at)}  ${e.message}`).join("\n");
@@ -87,18 +79,16 @@ export function OperationLog({ operationId, live }: { operationId: string; live:
           {copied ? "Copied" : "Copy"}
         </Button>
       </div>
-      <ScrollArea ref={tail} className="max-h-80">
-        <ol className="grid gap-2 pr-3 font-mono text-[0.82rem] leading-relaxed">
-          {events.map((event) => (
-            <li key={event.id} className="flex gap-3">
-              <time dateTime={event.created_at} className="text-primary shrink-0">
-                {clockTime(event.created_at)}
-              </time>
-              <span className="break-words">{event.message}</span>
-            </li>
-          ))}
-        </ol>
-      </ScrollArea>
+      <ol className="grid gap-2 font-mono text-[0.82rem] leading-relaxed">
+        {events.map((event) => (
+          <li key={event.id} className="flex gap-3">
+            <time dateTime={event.created_at} className="text-primary shrink-0">
+              {clockTime(event.created_at)}
+            </time>
+            <span className="break-words">{event.message}</span>
+          </li>
+        ))}
+      </ol>
     </div>
   );
 }
