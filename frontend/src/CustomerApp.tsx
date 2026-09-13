@@ -296,7 +296,7 @@ export function CustomerApp() {
             <CardHeader>
               <CardTitle>{t("Create an instance")}</CardTitle>
               <CardDescription>
-                {t("{used} of {limit} used. Runtime placement is automatic.", {
+                {t("{used} of {limit} used.", {
                   used: tenants.length,
                   limit: customer.instance_limit,
                 })}

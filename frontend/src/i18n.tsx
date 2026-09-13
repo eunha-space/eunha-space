@@ -30,8 +30,7 @@ const ko: Record<string, string> = {
   "Create an instance": "인스턴스 만들기",
   "Create instance": "인스턴스 만들기",
   "Creating…": "생성 중…",
-  "{used} of {limit} used. Runtime placement is automatic.":
-    "{limit}개 중 {used}개 사용 중입니다. 런타임 배치는 자동입니다.",
+  "{used} of {limit} used.": "{limit}개 중 {used}개 사용 중입니다.",
   "Your instances": "내 인스턴스",
   "No instances yet.": "아직 인스턴스가 없습니다.",
   "Eunha hostname": "Eunha 호스트명",
@@ -41,7 +40,6 @@ const ko: Record<string, string> = {
     "생성 후 customers.eunha.space를 가리키도록 설정하세요.",
   "Provisioning continues safely in the background.":
     "프로비저닝은 백그라운드에서 안전하게 계속됩니다.",
-  "Runtime placement is automatic.": "런타임 배치는 자동입니다.",
   "Use a password with at least 14 characters.":
     "14자 이상의 비밀번호를 사용하세요.",
   "Control plane": "제어판",
