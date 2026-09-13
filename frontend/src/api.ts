@@ -4,7 +4,13 @@ export type Tenant = {
   id: string;
   domain: string;
   title: string;
-  lifecycle_state: "provisioning" | "ready" | "failed" | "deprovisioning" | "retained" | "purged";
+  lifecycle_state:
+    | "provisioning"
+    | "ready"
+    | "failed"
+    | "deprovisioning"
+    | "retained"
+    | "purged";
   desired_state: string;
   observed_state: TenantState;
   config_revision: number;
@@ -12,6 +18,37 @@ export type Tenant = {
   runtime_name: string;
   bind_address: string;
   updated_at: string;
+};
+
+export type CustomerDomainSetup = {
+  hostname: string;
+  kind: "provided" | "custom";
+  status: "active" | "pending" | "failed" | "removing";
+  is_primary: boolean;
+  cname_target: string;
+  ownership_name: string | null;
+  ownership_value: string | null;
+  ssl_status: string | null;
+};
+
+export type CustomerProvisioningStep = {
+  step: "database" | "migrate" | "render" | "reload" | "health" | "routing";
+  status: "pending" | "running" | "succeeded" | "failed";
+  updated_at: string;
+};
+
+export type CustomerTenantDetail = {
+  tenant: Pick<
+    Tenant,
+    | "id"
+    | "domain"
+    | "title"
+    | "lifecycle_state"
+    | "observed_state"
+    | "updated_at"
+  >;
+  domains: CustomerDomainSetup[];
+  provisioning_steps: CustomerProvisioningStep[];
 };
 
 export type Operation = {
@@ -69,7 +106,10 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}) as { error?: string });
-    throw new ApiError(body.error || `Request failed (${response.status})`, response.status);
+    throw new ApiError(
+      body.error || `Request failed (${response.status})`,
+      response.status,
+    );
   }
   return response.status === 204 ? (undefined as T) : response.json();
 }

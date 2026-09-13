@@ -206,6 +206,44 @@ struct TenantDomain {
     error: Option<String>,
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+struct CustomerDomainSetup {
+    hostname: String,
+    kind: String,
+    status: String,
+    is_primary: bool,
+    cname_target: String,
+    ownership_name: Option<String>,
+    ownership_value: Option<String>,
+    ssl_status: Option<String>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct CustomerProvisioningStep {
+    step: String,
+    status: String,
+    #[serde(with = "time::serde::rfc3339")]
+    updated_at: OffsetDateTime,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+struct CustomerTenantInfo {
+    id: Uuid,
+    domain: String,
+    title: String,
+    lifecycle_state: String,
+    observed_state: String,
+    #[serde(with = "time::serde::rfc3339")]
+    updated_at: OffsetDateTime,
+}
+
+#[derive(Serialize)]
+struct CustomerTenantDetail {
+    tenant: CustomerTenantInfo,
+    domains: Vec<CustomerDomainSetup>,
+    provisioning_steps: Vec<CustomerProvisioningStep>,
+}
+
 #[derive(Deserialize, Serialize)]
 struct TenantToml {
     database_url: String,
@@ -613,6 +651,7 @@ async fn main() -> Result<()> {
             "/customer/tenants",
             get(customer_tenants).post(customer_create_tenant),
         )
+        .route("/customer/tenants/{id}", get(customer_tenant_detail))
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/tenants/{id}/check", post(check_tenant))
         .route("/tenants/{id}/retry", post(retry_provisioning))
@@ -648,6 +687,10 @@ async fn main() -> Result<()> {
         .route_service("/signup", index.clone())
         .route_service("/verify", index.clone())
         .route_service("/account", index)
+        .route_service(
+            "/instances/{id}",
+            ServeFile::new("frontend/dist/index.html"),
+        )
         .fallback_service(ServeDir::new("frontend/dist"))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -996,6 +1039,33 @@ async fn customer_tenants(
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     let (id, _) = customer(&headers, &s.db).await?;
     Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.customer_id=$1 ORDER BY t.created_at").bind(id).fetch_all(&s.db).await?))
+}
+
+async fn customer_tenant_detail(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<CustomerTenantDetail>, ApiError> {
+    let (customer_id, _) = customer(&headers, &s.db).await?;
+    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at FROM tenants t WHERE t.id=$1 AND t.customer_id=$2")
+        .bind(id)
+        .bind(customer_id)
+        .fetch_optional(&s.db)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Instance not found".into()))?;
+    let domains = sqlx::query_as("SELECT hostname,kind,status,is_primary,cname_target,ownership_name,ownership_value,ssl_status FROM tenant_domains WHERE tenant_id=$1 AND kind IN ('provided','custom') ORDER BY is_primary DESC,created_at")
+        .bind(id)
+        .fetch_all(&s.db)
+        .await?;
+    let provisioning_steps = sqlx::query_as("SELECT step,status,updated_at FROM provisioning_steps WHERE tenant_id=$1 ORDER BY array_position(ARRAY['database','migrate','render','reload','health','routing'],step)")
+        .bind(id)
+        .fetch_all(&s.db)
+        .await?;
+    Ok(Json(CustomerTenantDetail {
+        tenant,
+        domains,
+        provisioning_steps,
+    }))
 }
 async fn tenants(
     State(s): State<Shared>,

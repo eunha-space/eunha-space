@@ -16,6 +16,7 @@ import { Mark, ThemeToggle } from "@/components/console/brand";
 import { Spinner } from "@/components/console/status";
 import { useLingui } from "@lingui/react";
 import { LanguageToggle } from "@/i18n";
+import { CustomerInstanceDetail } from "@/CustomerInstanceDetail";
 
 type Customer = {
   email: string;
@@ -141,6 +142,11 @@ export function CustomerApp() {
       setBusy(false);
     }
   }
+  async function signOut() {
+    await api("/customer/session", { method: "DELETE" });
+    setCustomer(null);
+    setTenants([]);
+  }
   if (!sessionLoaded) {
     return (
       <main className="grid min-h-screen place-items-center p-4">
@@ -247,32 +253,18 @@ export function CustomerApp() {
       </main>
     );
   }
+  const instanceId = location.pathname.match(/^\/instances\/([^/]+)$/)?.[1];
+  if (instanceId) {
+    return (
+      <main className="mx-auto min-h-screen max-w-4xl p-4 md:py-10">
+        <CustomerHeader customer={customer} onSignOut={signOut} />
+        <CustomerInstanceDetail id={instanceId} />
+      </main>
+    );
+  }
   return (
     <main className="mx-auto min-h-screen max-w-4xl p-4 md:py-10">
-      <header className="mb-8 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <Mark />
-          <div>
-            <strong>eunha space</strong>
-            <p className="text-muted-foreground text-sm">{customer.email}</p>
-          </div>
-        </div>
-        <div className="flex gap-2">
-          <LanguageToggle />
-          <ThemeToggle />
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={async () => {
-              await api("/customer/session", { method: "DELETE" });
-              setCustomer(null);
-              setTenants([]);
-            }}
-          >
-            <LogOut />
-          </Button>
-        </div>
-      </header>
+      <CustomerHeader customer={customer} onSignOut={signOut} />
       {error && (
         <Alert variant="destructive" className="mb-4">
           <CircleAlert />
@@ -375,17 +367,47 @@ export function CustomerApp() {
                   </p>
                 )
                 : tenants.map((t) => (
-                  <div key={t.id} className="bg-muted/50 rounded-md p-3">
+                  <a
+                    key={t.id}
+                    href={`/instances/${t.id}`}
+                    className="bg-muted/50 hover:bg-muted rounded-md p-3 transition-colors"
+                  >
                     <strong>{t.title}</strong>
                     <p className="text-muted-foreground text-sm">
                       {t.domain} · {t.lifecycle_state}
                     </p>
-                  </div>
+                  </a>
                 ))}
             </CardContent>
           </Card>
         </div>
       )}
     </main>
+  );
+}
+
+function CustomerHeader(
+  { customer, onSignOut }: {
+    customer: Customer;
+    onSignOut: () => Promise<void>;
+  },
+) {
+  return (
+    <header className="mb-8 flex items-center justify-between">
+      <div className="flex items-center gap-3">
+        <Mark />
+        <div>
+          <strong>eunha space</strong>
+          <p className="text-muted-foreground text-sm">{customer.email}</p>
+        </div>
+      </div>
+      <div className="flex gap-2">
+        <LanguageToggle />
+        <ThemeToggle />
+        <Button variant="outline" size="icon" onClick={() => void onSignOut()}>
+          <LogOut />
+        </Button>
+      </div>
+    </header>
   );
 }
