@@ -28,6 +28,21 @@ reload, and health-check steps. Interrupted work resumes after restart. Failed
 work remains retained and can be retried from the tenant inventory; it is never
 implicitly deprovisioned or purged.
 
+## Customer self-service
+
+The public portal at `/` lets customers register, verify their email, and
+provision up to two instances. `/admin` remains operator-only. Verification
+mail uses Resend's HTTPS API and requires process-only configuration:
+
+```sh
+EUNHA_SPACE_RESEND_API_KEY=...
+EUNHA_SPACE_EMAIL_FROM='eunha space <noreply@eunha.space>'
+EUNHA_SPACE_PUBLIC_URL=https://eunha.space
+```
+
+Customers may attach one custom hostname while creating an instance. Runtime
+placement is automatic and favors the least-loaded eligible runtime.
+
 `EUNHA_PROVIDED_DOMAIN_SUFFIXES` is a comma-separated, primary-first list of
 platform domains (default `eunha.space`). Provisioning `garden` with
 `eunha.space,eunha.site` reserves `garden.eunha.space` as primary and

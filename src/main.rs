@@ -8,7 +8,7 @@ use argon2::{
 };
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -56,6 +56,13 @@ struct AppState {
     provision_database_url: String,
     cloudflare: Option<CloudflareConfig>,
     provided_domain_suffixes: Vec<String>,
+    customer_email: Option<CustomerEmailConfig>,
+}
+#[derive(Clone)]
+struct CustomerEmailConfig {
+    api_key: String,
+    from: String,
+    public_url: String,
 }
 #[derive(Clone)]
 struct CloudflareConfig {
@@ -139,6 +146,22 @@ struct OperationEvent {
 struct Login {
     username: String,
     password: String,
+}
+
+#[derive(Deserialize)]
+struct CustomerCredentials {
+    email: String,
+    password: String,
+}
+#[derive(Deserialize)]
+struct VerificationQuery {
+    token: String,
+}
+#[derive(Deserialize)]
+struct CustomerTenantRequest {
+    subdomain: String,
+    title: String,
+    custom_domain: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -553,6 +576,15 @@ async fn main() -> Result<()> {
             .map(|suffix| suffix.trim().trim_start_matches('.').to_ascii_lowercase())
             .filter(|suffix| is_valid_domain(suffix))
             .collect(),
+        customer_email: std::env::var("EUNHA_SPACE_RESEND_API_KEY")
+            .ok()
+            .map(|api_key| CustomerEmailConfig {
+                api_key,
+                from: std::env::var("EUNHA_SPACE_EMAIL_FROM")
+                    .unwrap_or_else(|_| "eunha space <noreply@eunha.space>".into()),
+                public_url: std::env::var("EUNHA_SPACE_PUBLIC_URL")
+                    .unwrap_or_else(|_| "https://eunha.space".into()),
+            }),
         client: reqwest::Client::builder()
             .timeout(Duration::from_secs(4))
             .build()?,
@@ -564,6 +596,17 @@ async fn main() -> Result<()> {
     let api = Router::new()
         .route("/session", post(login).delete(logout))
         .route("/session/me", get(me))
+        .route("/customer/register", post(customer_register))
+        .route("/customer/verify", get(customer_verify))
+        .route(
+            "/customer/session",
+            post(customer_login).delete(customer_logout),
+        )
+        .route("/customer/session/me", get(customer_me))
+        .route(
+            "/customer/tenants",
+            get(customer_tenants).post(customer_create_tenant),
+        )
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/tenants/{id}/check", post(check_tenant))
         .route("/tenants/{id}/retry", post(retry_provisioning))
@@ -595,7 +638,10 @@ async fn main() -> Result<()> {
         .nest("/api", api)
         .route_service("/", index.clone())
         .route_service("/admin", index.clone())
-        .route_service("/admin/{*section}", index)
+        .route_service("/admin/{*section}", index.clone())
+        .route_service("/signup", index.clone())
+        .route_service("/verify", index.clone())
+        .route_service("/account", index)
         .fallback_service(ServeDir::new("frontend/dist"))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -700,6 +746,189 @@ async fn me(
     let (_, username) = operator(&headers, &s.db).await?;
     Ok(Json(serde_json::json!({"username": username})))
 }
+
+fn customer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .map(str::trim)
+        .find_map(|value| value.strip_prefix("eunha_space_customer_session="))
+}
+
+async fn customer(headers: &HeaderMap, db: &PgPool) -> Result<(Uuid, String), ApiError> {
+    let token = customer_token(headers)
+        .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "Sign in required".into()))?;
+    sqlx::query_as("SELECT c.id,c.email FROM customer_sessions s JOIN customers c ON c.id=s.customer_id WHERE s.token_hash=$1 AND s.expires_at>now() AND c.email_verified_at IS NOT NULL")
+        .bind(token_hash(token)).fetch_optional(db).await?.ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "Session expired".into()))
+}
+
+async fn customer_register(
+    State(s): State<Shared>,
+    Json(mut body): Json<CustomerCredentials>,
+) -> Result<StatusCode, ApiError> {
+    body.email = body.email.trim().to_ascii_lowercase();
+    if !body.email.contains('@') || body.email.len() > 254 || body.password.len() < 14 {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Enter a valid email and a password of at least 14 characters.".into(),
+        ));
+    }
+    let mail = s.customer_email.as_ref().ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Customer email verification is not configured.".into(),
+        )
+    })?;
+    let salt = SaltString::generate(&mut OsRng);
+    let password_hash = Argon2::default()
+        .hash_password(body.password.as_bytes(), &salt)
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not secure the account.".into(),
+            )
+        })?
+        .to_string();
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO customers(id,email,password_hash) VALUES($1,$2,$3)")
+        .bind(id)
+        .bind(&body.email)
+        .bind(password_hash)
+        .execute(&s.db)
+        .await
+        .map_err(|error| {
+            if error.as_database_error().and_then(|e| e.constraint()) == Some("customers_email_key")
+            {
+                ApiError(
+                    StatusCode::CONFLICT,
+                    "An account with that email already exists.".into(),
+                )
+            } else {
+                ApiError::from(error)
+            }
+        })?;
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    sqlx::query("INSERT INTO customer_email_verifications(token_hash,customer_id,expires_at) VALUES($1,$2,now()+interval '30 minutes')").bind(token_hash(&token)).bind(id).execute(&s.db).await?;
+    let verify_url = format!(
+        "{}/verify?token={}",
+        mail.public_url.trim_end_matches('/'),
+        token
+    );
+    let response = s.client.post("https://api.resend.com/emails").bearer_auth(&mail.api_key).json(&serde_json::json!({"from":mail.from,"to":[body.email],"subject":"Verify your eunha.space email","text":format!("Verify your email to create your Eunha instance:\n\n{verify_url}\n\nThis link expires in 30 minutes.")})).send().await;
+    if !matches!(response, Ok(response) if response.status().is_success()) {
+        sqlx::query("DELETE FROM customers WHERE id=$1")
+            .bind(id)
+            .execute(&s.db)
+            .await?;
+        return Err(ApiError(
+            StatusCode::BAD_GATEWAY,
+            "Could not send the verification email.".into(),
+        ));
+    }
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn customer_verify(
+    State(s): State<Shared>,
+    Query(query): Query<VerificationQuery>,
+) -> Result<StatusCode, ApiError> {
+    let changed = sqlx::query("UPDATE customers c SET email_verified_at=COALESCE(email_verified_at,now()) FROM customer_email_verifications v WHERE v.customer_id=c.id AND v.token_hash=$1 AND v.expires_at>now()")
+        .bind(token_hash(&query.token)).execute(&s.db).await?.rows_affected();
+    if changed == 0 {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "That verification link is invalid or expired.".into(),
+        ));
+    }
+    sqlx::query("DELETE FROM customer_email_verifications WHERE token_hash=$1")
+        .bind(token_hash(&query.token))
+        .execute(&s.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn customer_login(
+    State(s): State<Shared>,
+    Json(mut body): Json<CustomerCredentials>,
+) -> Result<Response, ApiError> {
+    body.email = body.email.trim().to_ascii_lowercase();
+    let row = sqlx::query_as::<_, (Uuid, String, bool)>(
+        "SELECT id,password_hash,email_verified_at IS NOT NULL FROM customers WHERE email=$1",
+    )
+    .bind(&body.email)
+    .fetch_optional(&s.db)
+    .await?;
+    let Some((id, hash, verified)) = row else {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Invalid credentials".into(),
+        ));
+    };
+    let parsed = PasswordHash::new(&hash).map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Stored credential is invalid".into(),
+        )
+    })?;
+    if Argon2::default()
+        .verify_password(body.password.as_bytes(), &parsed)
+        .is_err()
+    {
+        return Err(ApiError(
+            StatusCode::UNAUTHORIZED,
+            "Invalid credentials".into(),
+        ));
+    }
+    if !verified {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "Verify your email before signing in.".into(),
+        ));
+    }
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    sqlx::query("INSERT INTO customer_sessions(token_hash,customer_id,expires_at) VALUES($1,$2,now()+interval '30 days')").bind(token_hash(&token)).bind(id).execute(&s.db).await?;
+    Ok(([(header::SET_COOKIE,format!("eunha_space_customer_session={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000"))],Json(serde_json::json!({"email":body.email}))).into_response())
+}
+
+async fn customer_logout(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    if let Some(token) = customer_token(&headers) {
+        sqlx::query("DELETE FROM customer_sessions WHERE token_hash=$1")
+            .bind(token_hash(token))
+            .execute(&s.db)
+            .await?;
+    }
+    Ok((
+        [(
+            header::SET_COOKIE,
+            "eunha_space_customer_session=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+        )],
+        StatusCode::NO_CONTENT,
+    )
+        .into_response())
+}
+async fn customer_me(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (_, email) = customer(&headers, &s.db).await?;
+    Ok(Json(serde_json::json!({"email":email,"instance_limit":2})))
+}
+async fn customer_tenants(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<TenantSummary>>, ApiError> {
+    let (id, _) = customer(&headers, &s.db).await?;
+    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.customer_id=$1 ORDER BY t.created_at").bind(id).fetch_all(&s.db).await?))
+}
 async fn tenants(
     State(s): State<Shared>,
     headers: HeaderMap,
@@ -741,9 +970,43 @@ fn generate_vapid_keypair() -> Result<(String, String)> {
 async fn create_tenant(
     State(s): State<Shared>,
     headers: HeaderMap,
-    Json(mut body): Json<NewTenant>,
+    Json(body): Json<NewTenant>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let (operator_id, _) = operator(&headers, &s.db).await?;
+    create_tenant_inner(&s, body, Some(operator_id), None, None).await
+}
+
+async fn customer_create_tenant(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<CustomerTenantRequest>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let (customer_id, email) = customer(&headers, &s.db).await?;
+    let runtime_id=sqlx::query_scalar::<_,Uuid>("SELECT r.id FROM runtimes r WHERE EXISTS(SELECT 1 FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.runtime_id=r.id AND t.lifecycle_state='ready') ORDER BY (SELECT count(*) FROM tenants t WHERE t.runtime_id=r.id AND t.lifecycle_state <> 'purged'),r.created_at LIMIT 1").fetch_optional(&s.db).await?.ok_or_else(||ApiError(StatusCode::SERVICE_UNAVAILABLE,"No runtime is currently available.".into()))?;
+    create_tenant_inner(
+        &s,
+        NewTenant {
+            subdomain: body.subdomain,
+            title: body.title,
+            contact_email: Some(email),
+            runtime_id,
+            registrations_open: true,
+            approval_required: false,
+        },
+        None,
+        Some(customer_id),
+        body.custom_domain,
+    )
+    .await
+}
+
+async fn create_tenant_inner(
+    s: &Shared,
+    mut body: NewTenant,
+    operator_id: Option<Uuid>,
+    customer_id: Option<Uuid>,
+    custom_domain: Option<String>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     body.subdomain = body.subdomain.trim().to_ascii_lowercase();
     let suffix = s.provided_domain_suffixes.first().ok_or_else(|| {
         ApiError(
@@ -845,11 +1108,41 @@ async fn create_tenant(
     // alphabet.
     let redis_prefix = tenant_redis_key_prefix(tenant_id);
 
+    let custom_domain = custom_domain
+        .map(|value| value.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    if custom_domain
+        .as_deref()
+        .is_some_and(|value| !is_valid_domain(value) || value.ends_with(".eunha.space"))
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Enter a valid externally owned custom domain.".into(),
+        ));
+    }
     let mut tx = s.db.begin().await?;
-    sqlx::query("INSERT INTO tenants(id,domain,aliases,title,runtime_id,desired_state,observed_state,lifecycle_state,contact_email,registrations_open,approval_required,vapid_private_key,vapid_public_key) VALUES($1,$2,$3,$4,$5,'running','unknown','provisioning',$6,$7,$8,$9,$10)")
+    if let Some(customer_id) = customer_id {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))")
+            .bind(customer_id)
+            .execute(&mut *tx)
+            .await?;
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM tenants WHERE customer_id=$1 AND lifecycle_state <> 'purged'",
+        )
+        .bind(customer_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if count >= 2 {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "Each customer may create up to two instances.".into(),
+            ));
+        }
+    }
+    sqlx::query("INSERT INTO tenants(id,domain,aliases,title,runtime_id,desired_state,observed_state,lifecycle_state,contact_email,registrations_open,approval_required,vapid_private_key,vapid_public_key,customer_id) VALUES($1,$2,$3,$4,$5,'running','unknown','provisioning',$6,$7,$8,$9,$10,$11)")
         .bind(tenant_id).bind(&domain).bind(&aliases).bind(&body.title).bind(body.runtime_id)
         .bind(&body.contact_email).bind(body.registrations_open).bind(body.approval_required)
-        .bind(vapid_private).bind(vapid_public).execute(&mut *tx).await
+        .bind(vapid_private).bind(vapid_public).bind(customer_id).execute(&mut *tx).await
         .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenants_domain_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
     sqlx::query(r#"INSERT INTO tenant_configuration(
         tenant_id,database_url,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,
@@ -872,8 +1165,11 @@ async fn create_tenant(
         sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary,cname_target) VALUES($1,$2,$3,'provided','pending',$4,$5)")
             .bind(Uuid::new_v4()).bind(tenant_id).bind(hostname).bind(index == 0).bind(&cname_target).execute(&mut *tx).await?;
     }
-    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) VALUES($1,$2,$3,'tenant_provision','running',$4,jsonb_build_object('domain',$5),now())")
-        .bind(operation_id).bind(tenant_id).bind(body.runtime_id).bind(operator_id).bind(&domain).execute(&mut *tx).await?;
+    if let Some(hostname) = custom_domain {
+        sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary,cname_target) VALUES($1,$2,$3,'custom','pending',false,$4)").bind(Uuid::new_v4()).bind(tenant_id).bind(hostname).bind(&cname_target).execute(&mut *tx).await?;
+    }
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,requested_by_customer,detail,started_at) VALUES($1,$2,$3,'tenant_provision','running',$4,$5,jsonb_build_object('domain',$6),now())")
+        .bind(operation_id).bind(tenant_id).bind(body.runtime_id).bind(operator_id).bind(customer_id).bind(&domain).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['database','migrate','render','reload','health','routing'])")
         .bind(tenant_id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Tenant reserved; provisioning queued.')")
