@@ -44,15 +44,23 @@ Customers may choose one custom hostname, and only while creating an instance.
 Neither customers nor operators can attach a domain to an existing instance,
 because an instance's accounts fix its ActivityPub identity to its primary
 domain. The create form asks for the CNAME to `customers.eunha.space` before
-creation and checks it through DNS-over-HTTPS, warning without blocking. Setup
-then waits for the domain before creating the owner, so the domain becomes the
-instance's identity. A domain whose DNS is not ready is re-checked with backoff,
-from 30 seconds up to 15 minutes, for 24 hours. When that window closes, when
-Cloudflare reports the hostname or its certificate as terminal, or when the
-customer chooses **Continue without custom domain**, the domain is removed from
-Cloudflare and released. Setup then finishes on the provided hostname, and the
-instance page names the domain that was dropped. Runtime placement is automatic
-and favors the least-loaded eligible runtime.
+creation and checks it through DNS-over-HTTPS, warning without blocking.
+
+An instance created with a custom domain is not set up at all until that domain
+validates: no database, runtime file or owner exists, and only its hostnames are
+registered with Cloudflare. The domain is checked with backoff, from 30 seconds
+up to 15 minutes, for seven days. Cloudflare is asked to validate again even
+after it reports the hostname or certificate as failed, since the customer may
+still fix what stopped it. Nothing about a waiting instance counts toward a
+provided hostname's failure limit. When the domain validates it becomes the
+primary domain, and provisioning runs under it from the start. If it has not
+validated after seven days, the domain is removed from Cloudflare and released,
+and the never-set-up instance is deleted in the ordinary way: it becomes
+retained and frees its slot. Restoring such an instance tries the same domain
+again for another seven days, unless another instance has claimed it meanwhile.
+It is never set up under its provided hostname instead. Runtime placement is
+automatic and favors the least-loaded eligible runtime.
+
 Signup requires only an email address. The verification link signs the customer
 in and requires password setup; later sessions can use either that password or
 a fresh email sign-in link.
@@ -62,10 +70,9 @@ The customer picks an admin username when creating the instance, and the final
 `owner` provisioning step runs the runtime's
 `eunha accounts create <username> --role=Owner --confirmed --approve` with the
 customer's email. Instances start with registrations closed, as Mastodon's do,
-so nobody can sign up first. The step waits for a custom domain requested at
-creation to connect or fail, because local accounts fix the instance's
-ActivityPub identity to its primary domain. Runtimes must run an Eunha release
-that includes the `accounts` commands.
+so nobody can sign up first. With a custom domain, the owner is created only
+after setup has waited for that domain, so the account's identity is on it.
+Runtimes must run an Eunha release that includes the `accounts` commands.
 
 The account's password is never stored. The instance page's **Create password**
 and **Reset password** action runs
@@ -128,10 +135,12 @@ process-only. Each hostname is registered with its tenant runtime's
 customers are instructed to CNAME to `customers.eunha.space`, configurable with
 `CLOUDFLARE_SAAS_CNAME_TARGET`. Cloudflare IDs, activation state, and public
 DNS validation instructions are stored, but the token is not. A custom domain
-becomes canonical only before a local account exists. One that finishes
-verifying after an account exists, which only a race with **Continue without
-custom domain** can cause, becomes an alias and does not change the ActivityPub
-identity.
+becomes canonical only before a local account exists; one that verifies later
+becomes an alias and does not change the ActivityPub identity. An alias is
+health-checked by confirming that it reaches the tenant, which reports its
+primary domain. Set `CLOUDFLARE_API_BASE` to point the custom-hostname API at a
+local stand-in for testing; it defaults to `https://api.cloudflare.com/client/v4`.
+Retrying failed provisioning also re-checks provided hostnames that failed.
 
 Create the first operator without putting a password in shell history:
 

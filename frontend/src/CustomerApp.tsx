@@ -398,7 +398,7 @@ export function CustomerApp() {
                     dnsCheck.points_to_target === false && (
                     <span className="text-pending text-xs">
                       {t(
-                        "We can't see that CNAME record yet. You can still create the instance; setup waits up to 24 hours for it.",
+                        "We can't see that CNAME record yet. You can still create the instance; setup keeps trying for 7 days, then deletes the instance.",
                       )}
                     </span>
                   )}

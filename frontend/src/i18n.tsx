@@ -115,25 +115,22 @@ const ko: Record<string, string> = {
   "Custom domain (optional)": "커스텀 도메인 (선택)",
   "Before creating, add a CNAME record pointing it to customers.eunha.space. A custom domain can only be chosen now; it cannot be added or changed later.":
     "생성하기 전에 customers.eunha.space를 가리키는 CNAME 레코드를 추가하세요. 커스텀 도메인은 지금만 선택할 수 있으며 나중에 추가하거나 변경할 수 없습니다.",
-  "We can't see that CNAME record yet. You can still create the instance; setup waits up to 24 hours for it.":
-    "아직 CNAME 레코드가 확인되지 않습니다. 인스턴스는 만들 수 있으며, 설정은 최대 24시간 동안 기다립니다.",
+  "We can't see that CNAME record yet. You can still create the instance; setup keeps trying for 7 days, then deletes the instance.":
+    "아직 CNAME 레코드가 확인되지 않습니다. 인스턴스는 만들 수 있으며, 설정은 7일 동안 계속 시도한 뒤 인스턴스를 삭제합니다.",
   "The CNAME record is in place.": "CNAME 레코드가 확인되었습니다.",
   "Custom domains can only be added when creating an instance.":
     "커스텀 도메인은 인스턴스를 만들 때만 추가할 수 있습니다.",
-  "This domain wasn't connected, so this instance uses its eunha space address.":
-    "이 도메인이 연결되지 않아 인스턴스는 eunha space 주소를 사용합니다.",
   Removing: "제거 중",
-  "Setup is continuing without this domain.":
-    "이 도메인 없이 설정을 계속하고 있습니다.",
-  "Setup waits for this domain until": "이 도메인을 기다리는 기한",
+  "This domain wasn't connected in time and is being released.":
+    "이 도메인이 기한 안에 연결되지 않아 해제하고 있습니다.",
+  "If it isn't connected by then, this instance is deleted":
+    "이때까지 연결되지 않으면 인스턴스가 삭제됩니다",
+  "This instance was deleted because its custom domain wasn't connected within 7 days, so it was never set up. Restoring it tries to connect the domain for another 7 days.":
+    "커스텀 도메인이 7일 안에 연결되지 않아 인스턴스가 설정되지 않은 채 삭제되었습니다. 복원하면 7일 동안 다시 도메인 연결을 시도합니다.",
   "Its DNS doesn't point to customers.eunha.space yet. We'll keep checking.":
     "아직 DNS가 customers.eunha.space를 가리키지 않습니다. 계속 확인하겠습니다.",
   "We couldn't finish checking this domain yet. We'll keep trying.":
     "아직 이 도메인 확인을 마치지 못했습니다. 계속 시도하겠습니다.",
-  "Continue without custom domain": "커스텀 도메인 없이 계속",
-  "Continue without your custom domain?": "커스텀 도메인 없이 계속할까요?",
-  "Setup finishes on the instance's eunha space address, which becomes its permanent address. A custom domain can't be added later.":
-    "인스턴스는 eunha space 주소로 설정을 마치며, 이 주소가 영구 주소가 됩니다. 커스텀 도메인은 나중에 추가할 수 없습니다.",
   "Use a password with at least 14 characters.":
     "14자 이상의 비밀번호를 사용하세요.",
   "Control plane": "제어판",

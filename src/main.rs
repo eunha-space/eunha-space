@@ -69,6 +69,19 @@ struct CloudflareConfig {
     zone_id: String,
     api_token: String,
     cname_target: String,
+    /// `https://api.cloudflare.com/client/v4` unless `CLOUDFLARE_API_BASE`
+    /// points at a stand-in, which is how the hostname lifecycle is tested.
+    api_base: String,
+}
+
+impl CloudflareConfig {
+    fn custom_hostnames_url(&self) -> String {
+        format!(
+            "{}/zones/{}/custom_hostnames",
+            self.api_base.trim_end_matches('/'),
+            self.zone_id
+        )
+    }
 }
 type Shared = Arc<AppState>;
 
@@ -633,6 +646,8 @@ async fn main() -> Result<()> {
                 api_token,
                 cname_target: std::env::var("CLOUDFLARE_SAAS_CNAME_TARGET")
                     .unwrap_or_else(|_| "customers.eunha.space".into()),
+                api_base: std::env::var("CLOUDFLARE_API_BASE")
+                    .unwrap_or_else(|_| "https://api.cloudflare.com/client/v4".into()),
             }),
             _ => None,
         },
@@ -690,10 +705,6 @@ async fn main() -> Result<()> {
             post(customer_delete_now),
         )
         .route("/customer/tenants/{id}/restore", post(customer_restore))
-        .route(
-            "/customer/tenants/{id}/custom-domain/skip",
-            post(customer_skip_custom_domain),
-        )
         .route("/customer/dns-check", get(customer_dns_check))
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/tenants/{id}/check", post(check_tenant))
@@ -1399,6 +1410,9 @@ async fn retry_provisioning(
     }
     sqlx::query("UPDATE provisioning_steps SET status='pending',error=NULL,started_at=NULL,finished_at=NULL,updated_at=now() WHERE tenant_id=$1 AND status='failed'")
         .bind(id).execute(&mut *tx).await?;
+    // A provided hostname that failed would fail routing again; check it anew.
+    sqlx::query("UPDATE tenant_domains SET status='pending',attempts=0,error=NULL,next_check_at=NULL,updated_at=now()-interval '1 minute' WHERE tenant_id=$1 AND kind='provided' AND status='failed'")
+        .bind(id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,started_at) SELECT $1,t.id,t.runtime_id,'tenant_provision','running',$2,now() FROM tenants t WHERE t.id=$3")
         .bind(operation_id).bind(operator_id).bind(id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Provisioning retry queued.')")
@@ -1467,21 +1481,16 @@ fn is_valid_domain(domain: &str) -> bool {
         })
 }
 
-/// How long setup waits for a custom domain's DNS before it drops the domain and
-/// continues on the provided hostname. Custom domains can only be chosen when an
-/// instance is created, so this is the customer's one chance to connect one.
-const CUSTOM_DOMAIN_SETUP_WINDOW: &str = "24 hours";
+/// How long setup keeps trying to connect a custom domain. Custom domains can
+/// only be chosen when an instance is created, and the domain is what the
+/// instance was asked to be, so when the window closes the domain is released
+/// and the unfinished instance is deleted rather than quietly finished elsewhere.
+const CUSTOM_DOMAIN_SETUP_WINDOW: &str = "7 days";
 
 async fn domain_reconciler(state: Shared) {
     loop {
-        // A custom domain that never connected is dropped, so its hostname is
-        // not held forever by someone who may not control it.
-        let _ = sqlx::query(&format!(
-            "UPDATE tenant_domains SET status='removing',error='DNS was not set up within {CUSTOM_DOMAIN_SETUP_WINDOW}.',updated_at=now() WHERE kind='custom' AND status='pending' AND NOT is_primary AND created_at < now()-interval '{CUSTOM_DOMAIN_SETUP_WINDOW}'"
-        ))
-        .execute(&state.db)
-        .await;
-        if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT d.id FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id WHERE d.status='removing' AND d.kind='custom' AND t.lifecycle_state IN ('provisioning','ready','failed') ORDER BY d.updated_at LIMIT 10")
+        expire_custom_domains(&state).await;
+        if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT d.id FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id WHERE d.status='removing' AND d.kind='custom' AND t.lifecycle_state IN ('provisioning','ready','failed','deprovisioning','retained') ORDER BY d.updated_at LIMIT 10")
             .fetch_all(&state.db).await
         {
             for id in ids {
@@ -1494,10 +1503,12 @@ async fn domain_reconciler(state: Shared) {
                 if let Err(error) = reconcile_domain(&state, id).await {
                     let message = domain_reconcile_error_message(&error);
                     if error.downcast_ref::<DomainTerminalError>().is_some() {
-                        // Cloudflare has given up. A custom domain still waiting
-                        // is dropped so setup can continue without it.
-                        let _ = sqlx::query("UPDATE tenant_domains SET status=CASE WHEN kind='custom' AND NOT is_primary AND status='pending' THEN 'removing' ELSE 'failed' END,error=$1,updated_at=now() WHERE id=$2")
+                        // Cloudflare has given up on a provided hostname, which
+                        // provisioning must surface. A custom domain keeps being
+                        // retried until its setup window closes.
+                        let _ = sqlx::query("UPDATE tenant_domains SET status='failed',error=$1,updated_at=now() WHERE id=$2 AND kind<>'custom'")
                             .bind(&message).bind(id).execute(&state.db).await;
+                        record_domain_error(&state.db, id, &message).await;
                     } else {
                         record_domain_error(&state.db, id, &message).await;
                     }
@@ -1508,8 +1519,54 @@ async fn domain_reconciler(state: Shared) {
     }
 }
 
+/// Release custom domains whose setup window closed without connecting, and
+/// delete the instances still waiting for them. The deletion is the ordinary
+/// one: the instance goes offline and is retained, freeing the customer's slot,
+/// and only an operator's purge destroys its data.
+async fn expire_custom_domains(state: &Shared) {
+    let Ok(expired) = sqlx::query_as::<_, (Uuid, Uuid, String)>(&format!(
+        "SELECT d.id,d.tenant_id,d.hostname FROM tenant_domains d WHERE d.kind='custom' AND d.status='pending' AND NOT d.is_primary AND d.created_at < now()-interval '{CUSTOM_DOMAIN_SETUP_WINDOW}' ORDER BY d.created_at LIMIT 10"
+    ))
+    .fetch_all(&state.db)
+    .await
+    else {
+        return;
+    };
+    for (domain_id, tenant_id, hostname) in expired {
+        let Ok(mut tx) = state.db.begin().await else {
+            continue;
+        };
+        let expired = async {
+            let lifecycle = sqlx::query_scalar::<_, String>(
+                "SELECT lifecycle_state FROM tenants WHERE id=$1 FOR UPDATE",
+            )
+            .bind(tenant_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            let released = sqlx::query(&format!("UPDATE tenant_domains SET status='removing',error='It was not connected within {CUSTOM_DOMAIN_SETUP_WINDOW}.',updated_at=now() WHERE id=$1 AND status='pending'"))
+                .bind(domain_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+            if released == 1 && lifecycle == "provisioning" {
+                let message = format!("Setup stopped: {hostname} was not connected within {CUSTOM_DOMAIN_SETUP_WINDOW}, so the instance is being deleted.");
+                sqlx::query("INSERT INTO operation_events(operation_id,message) SELECT id,$2 FROM operations WHERE tenant_id=$1 AND kind='tenant_provision' AND status='running'")
+                    .bind(tenant_id).bind(&message).execute(&mut *tx).await?;
+                sqlx::query("UPDATE operations SET status='failed',error=$2,finished_at=now() WHERE tenant_id=$1 AND kind='tenant_provision' AND status='running'")
+                    .bind(tenant_id).bind(&message).execute(&mut *tx).await?;
+                begin_deprovisioning(&mut tx, tenant_id, None).await?;
+            }
+            Ok::<_, sqlx::Error>(())
+        }
+        .await;
+        if expired.is_ok() {
+            let _ = tx.commit().await;
+        }
+    }
+}
+
 /// Cloudflare has given up on a hostname or its certificate; checking again
-/// will not change that.
+/// will not change that on its own.
 #[derive(Debug)]
 struct DomainTerminalError(&'static str);
 
@@ -1548,8 +1605,8 @@ async fn drop_custom_domain(state: &Shared, id: Uuid) -> Result<()> {
         let response = state
             .client
             .delete(format!(
-                "https://api.cloudflare.com/client/v4/zones/{}/custom_hostnames/{cloudflare_id}",
-                cloudflare.zone_id
+                "{}/{cloudflare_id}",
+                cloudflare.custom_hostnames_url()
             ))
             .bearer_auth(&cloudflare.api_token)
             .send()
@@ -1571,7 +1628,7 @@ async fn drop_custom_domain(state: &Shared, id: Uuid) -> Result<()> {
     if deleted == 0 {
         return Ok(());
     }
-    sqlx::query("UPDATE tenants SET abandoned_custom_domain=$1,aliases=array_remove(aliases,$1),updated_at=now() WHERE id=$2")
+    sqlx::query("UPDATE tenants SET abandoned_custom_domain=$1,aliases=array_remove(aliases,$1) WHERE id=$2")
         .bind(&hostname).bind(tenant_id).execute(&mut *tx).await?;
     if let Some(operation_id) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM operations WHERE tenant_id=$1 AND kind='tenant_provision' AND status='running' ORDER BY created_at DESC LIMIT 1")
         .bind(tenant_id).fetch_optional(&mut *tx).await?
@@ -1616,11 +1673,13 @@ fn domain_reconcile_error_message(error: &anyhow::Error) -> String {
     "Hostname routing could not be reconciled; existing routing remains unchanged.".into()
 }
 
-/// Record a failed check. A provided hostname fails after five, so a broken
-/// provisioning surfaces quickly. A custom domain instead waits for its owner's
-/// DNS, checking less often as time passes, until its setup window closes.
+/// Record a failed check. A provided hostname of a served tenant fails after
+/// five, so a broken provisioning surfaces quickly. A custom domain instead
+/// waits for its owner's DNS, checking less often as time passes, until its
+/// setup window closes; and nothing about a tenant that is still waiting for its
+/// custom domain counts toward failure, since that wait can last days.
 async fn record_domain_error(db: &PgPool, id: Uuid, message: &str) {
-    let failed = sqlx::query_scalar::<_, bool>("UPDATE tenant_domains SET attempts=attempts+1,status=CASE WHEN kind<>'custom' AND status='pending' AND attempts+1 >= 5 THEN 'failed' ELSE status END,next_check_at=CASE WHEN kind='custom' THEN now()+make_interval(secs => LEAST(900, 30*power(2, LEAST(attempts, 5)))) ELSE NULL END,error=$1,updated_at=now() WHERE id=$2 RETURNING status='failed'")
+    let failed = sqlx::query_scalar::<_, bool>("UPDATE tenant_domains d SET attempts=CASE WHEN w.unserved AND d.kind<>'custom' THEN d.attempts ELSE d.attempts+1 END,status=CASE WHEN d.kind<>'custom' AND d.status='pending' AND NOT w.unserved AND d.attempts+1 >= 5 THEN 'failed' ELSE d.status END,next_check_at=CASE WHEN d.kind='custom' THEN now()+make_interval(secs => LEAST(900, 30*power(2, LEAST(d.attempts, 5)))) WHEN w.unserved THEN now()+CASE WHEN now()-d.created_at < interval '10 minutes' THEN interval '30 seconds' WHEN now()-d.created_at < interval '1 hour' THEN interval '2 minutes' ELSE interval '15 minutes' END ELSE NULL END,error=$1,updated_at=now() FROM (SELECT EXISTS(SELECT 1 FROM provisioning_steps p JOIN tenant_domains x ON x.tenant_id=p.tenant_id WHERE x.id=$2 AND p.step='health' AND p.status<>'succeeded') AS unserved) w WHERE d.id=$2 RETURNING d.status='failed'")
         .bind(message).bind(id).fetch_optional(db).await;
     let is_failed = failed.ok().flatten().unwrap_or(false);
     if !is_failed {
@@ -1641,10 +1700,7 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
     .bind(id)
     .fetch_one(&state.db)
     .await?;
-    let endpoint = format!(
-        "https://api.cloudflare.com/client/v4/zones/{}/custom_hostnames",
-        cloudflare.zone_id
-    );
+    let endpoint = cloudflare.custom_hostnames_url();
     let origin_changed = routed_origin_hostname.as_deref() != Some(origin_hostname.as_str());
     let response: serde_json::Value = if let Some(cloudflare_id) = &cloudflare_id {
         let request = if origin_changed {
@@ -1724,19 +1780,34 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
         }
         .into());
     }
-    if matches!(
+    let terminal = if matches!(
         cf_status,
         "blocked" | "deleted" | "pending_blocked" | "test_blocked" | "test_failed"
     ) {
-        return Err(DomainTerminalError("Cloudflare will not serve this hostname.").into());
-    }
-    if ssl_status.ends_with("_timed_out")
+        Some("Cloudflare will not serve this hostname.")
+    } else if ssl_status.ends_with("_timed_out")
         || matches!(ssl_status, "expired" | "inactive" | "deleted")
     {
-        return Err(DomainTerminalError(
-            "Cloudflare could not issue a certificate for this hostname.",
-        )
-        .into());
+        Some("Cloudflare could not issue a certificate for this hostname.")
+    } else {
+        None
+    };
+    if let Some(terminal) = terminal {
+        // A custom domain's owner may yet fix what stopped validation, such as a
+        // CAA record, so ask Cloudflare to validate it again on each check.
+        if kind == "custom" {
+            let _ = state
+                .client
+                .patch(format!("{endpoint}/{cf_id}"))
+                .bearer_auth(&cloudflare.api_token)
+                .json(&serde_json::json!({
+                    "custom_origin_server": origin_hostname,
+                    "ssl": {"method": "http", "type": "dv", "settings": {"min_tls_version": "1.2"}}
+                }))
+                .send()
+                .await;
+        }
+        return Err(DomainTerminalError(terminal).into());
     }
     if cf_status != "active" || ssl_status != "active" {
         state
@@ -1750,8 +1821,18 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
             .send()
             .await?
             .error_for_status()?;
+        schedule_next_domain_check(&state.db, id).await?;
         return Ok(());
     }
+    // Provisioning has not served the tenant yet, which for an instance with a
+    // custom domain means waiting for that domain. A hostname cannot be health
+    // checked before then; check again later instead of counting a failure.
+    let unserved = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM provisioning_steps WHERE tenant_id=$1 AND step='health' AND status<>'succeeded')",
+    )
+    .bind(tenant_id)
+    .fetch_one(&state.db)
+    .await?;
 
     let (primary_id, primary_kind) = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id,kind FROM tenant_domains WHERE tenant_id=$1 AND is_primary",
@@ -1762,6 +1843,10 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
     // An imported tenant can adopt its existing primary hostname into
     // Cloudflare for SaaS. Its ActivityPub identity and runtime configuration
     // are already correct, so activation only completes the durable operation.
+    if unserved && kind == "provided" {
+        schedule_next_domain_check(&state.db, id).await?;
+        return Ok(());
+    }
     if primary_id == id {
         healthcheck_provisioned_tenant(state, tenant_id).await?;
         finish_domain(&state.db, id).await?;
@@ -1774,6 +1859,9 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
     }
     let has_identity = if primary_kind == "custom" {
         true
+    } else if unserved {
+        // Not even its database has been used yet.
+        false
     } else {
         let database_url = sqlx::query_scalar::<_, String>(
             "SELECT database_url FROM tenant_configuration WHERE tenant_id=$1",
@@ -1815,6 +1903,12 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
     sqlx::query("UPDATE tenants SET domain=$1,aliases=ARRAY(SELECT hostname FROM tenant_domains WHERE tenant_id=$2 AND id<>$3 AND (kind IN ('provided','legacy') OR status='active') ORDER BY created_at),config_revision=config_revision+1,updated_at=now() WHERE id=$2")
         .bind(&hostname).bind(tenant_id).bind(id).execute(&mut *tx).await?;
     tx.commit().await?;
+    if unserved {
+        // Provisioning renders, starts and checks the tenant under this domain
+        // from the beginning; there is nothing running to move over.
+        finish_domain(&state.db, id).await?;
+        return Ok(());
+    }
     render_provisioned_tenant(state, tenant_id).await?;
     let (directory, aliases) = sqlx::query_as::<_, (String, Vec<String>)>("SELECT r.tenant_directory,t.aliases FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1")
         .bind(tenant_id).fetch_one(&state.db).await?;
@@ -1827,6 +1921,17 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
     reload_provisioned_runtime(state, tenant_id).await?;
     healthcheck_provisioned_tenant(state, tenant_id).await?;
     finish_domain(&state.db, id).await?;
+    Ok(())
+}
+
+/// Check a hostname that is still settling less often the longer it has been:
+/// every 30 seconds for its first ten minutes, every two minutes for its first
+/// hour, then every fifteen minutes.
+async fn schedule_next_domain_check(db: &PgPool, id: Uuid) -> Result<()> {
+    sqlx::query("UPDATE tenant_domains SET next_check_at=now()+CASE WHEN now()-created_at < interval '10 minutes' THEN interval '30 seconds' WHEN now()-created_at < interval '1 hour' THEN interval '2 minutes' ELSE interval '15 minutes' END WHERE id=$1")
+        .bind(id)
+        .execute(db)
+        .await?;
     Ok(())
 }
 
@@ -1847,25 +1952,6 @@ const CUSTOMER_INSTANCE_LIMIT: i64 = 2;
 /// How long a customer's deleted instance keeps running before it is
 /// deprovisioned, unless they cancel or bring it forward.
 const DELETION_GRACE: &str = "7 days";
-
-/// Stop waiting for a creation-time custom domain and let setup finish on the
-/// provided hostname. The domain cannot be added back later.
-async fn customer_skip_custom_domain(
-    State(s): State<Shared>,
-    headers: HeaderMap,
-    Path(id): Path<Uuid>,
-) -> Result<StatusCode, ApiError> {
-    let (customer_id, _) = customer(&headers, &s.db).await?;
-    let changed = sqlx::query("UPDATE tenant_domains d SET status='removing',error='Setup continued without this domain.',updated_at=now() FROM tenants t WHERE d.tenant_id=t.id AND t.id=$1 AND t.customer_id=$2 AND t.lifecycle_state='provisioning' AND d.kind='custom' AND d.status='pending' AND NOT d.is_primary")
-        .bind(id).bind(customer_id).execute(&s.db).await?.rows_affected();
-    if changed == 0 {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "There is no custom domain waiting for DNS.".into(),
-        ));
-    }
-    Ok(StatusCode::NO_CONTENT)
-}
 
 #[derive(Deserialize)]
 struct DnsCheckQuery {
@@ -2103,7 +2189,29 @@ async fn queue_restore(
     tenant_id: Uuid,
     operator_id: Option<Uuid>,
     customer_id: Option<Uuid>,
-) -> Result<(), sqlx::Error> {
+) -> Result<(), ApiError> {
+    // An instance deleted because its custom domain never validated was never
+    // set up. Restoring it tries that domain again, with a new window, rather
+    // than setting it up under its provided hostname.
+    let retried = sqlx::query_scalar::<_, String>(
+        "SELECT abandoned_custom_domain FROM tenants t WHERE id=$1 AND abandoned_custom_domain IS NOT NULL AND NOT EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded')",
+    )
+    .bind(tenant_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(hostname) = retried {
+        sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary,cname_target) SELECT $1,$2,$3,'custom','pending',false,cname_target FROM tenant_domains WHERE tenant_id=$2 AND kind='provided' ORDER BY created_at LIMIT 1")
+            .bind(Uuid::new_v4()).bind(tenant_id).bind(&hostname).execute(&mut **tx).await
+            .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenant_domains_hostname_key") {
+                ApiError(StatusCode::CONFLICT, "Its custom domain is now used by another instance, so it cannot be restored.".into())
+            } else {
+                ApiError::from(error)
+            })?;
+        sqlx::query("UPDATE tenants SET abandoned_custom_domain=NULL WHERE id=$1")
+            .bind(tenant_id)
+            .execute(&mut **tx)
+            .await?;
+    }
     sqlx::query("UPDATE tenants SET lifecycle_state='provisioning',desired_state='running',observed_state='unknown',observed_at=NULL,observation_error=NULL,deletion_scheduled_for=NULL,updated_at=now() WHERE id=$1")
         .bind(tenant_id).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['migrate','render','reload','health']) ON CONFLICT (tenant_id,step) DO UPDATE SET status='pending',error=NULL,started_at=NULL,finished_at=NULL,updated_at=now()")
@@ -2413,8 +2521,8 @@ async fn purge_cloudflare_hostnames(state: &Shared, tenant_id: Uuid) -> Result<O
             let response = state
                 .client
                 .delete(format!(
-                    "https://api.cloudflare.com/client/v4/zones/{}/custom_hostnames/{cloudflare_id}",
-                    cloudflare.zone_id
+                    "{}/{cloudflare_id}",
+                    cloudflare.custom_hostnames_url()
                 ))
                 .bearer_auth(&cloudflare.api_token)
                 .send()
@@ -2801,8 +2909,8 @@ async fn provision_tenant(state: &Shared, tenant_id: Uuid) {
             _ => return,
         }
         let ready = match step {
+            "database" => custom_domain_validated(&state.db, tenant_id).await,
             "routing" => tenant_routing_ready(&state.db, tenant_id).await,
-            "owner" => tenant_identity_settled(&state.db, tenant_id).await,
             _ => Ok(true),
         };
         match ready {
@@ -2870,13 +2978,13 @@ async fn tenant_routing_ready(db: &PgPool, tenant_id: Uuid) -> Result<bool> {
     Ok(statuses.iter().all(|status| status == "active"))
 }
 
-/// Whether the owner can be created: a custom domain requested with the
-/// instance becomes its ActivityPub identity only while no local account
-/// exists, so the owner waits until that domain connects or fails. Tenants with
-/// no owner left to create never wait.
-async fn tenant_identity_settled(db: &PgPool, tenant_id: Uuid) -> Result<bool> {
+/// Whether an instance created with a custom domain may be set up. Nothing is
+/// provisioned — no database, no runtime file, no owner — until the domain has
+/// validated and become the primary domain, so an instance whose domain never
+/// validates leaves nothing behind.
+async fn custom_domain_validated(db: &PgPool, tenant_id: Uuid) -> Result<bool> {
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT NOT EXISTS(SELECT 1 FROM provisioning_steps WHERE tenant_id=$1 AND step='owner' AND status<>'succeeded') OR NOT EXISTS(SELECT 1 FROM tenant_domains WHERE tenant_id=$1 AND kind='custom' AND status='pending')",
+        "SELECT NOT EXISTS(SELECT 1 FROM tenant_domains WHERE tenant_id=$1 AND kind='custom' AND status IN ('pending','removing') AND NOT is_primary)",
     )
     .bind(tenant_id)
     .fetch_one(db)
@@ -3217,23 +3325,30 @@ async fn active_runtime_label(
 async fn healthcheck_provisioned_tenant(state: &Shared, tenant_id: Uuid) -> Result<()> {
     let (domain, bind_address) = sqlx::query_as::<_, (String, String)>("SELECT t.domain,r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1")
         .bind(tenant_id).fetch_one(&state.db).await?;
-    healthcheck_url(state, &bind_address, &domain).await
+    healthcheck_url(state, &bind_address, &domain, &domain).await
 }
 
-async fn healthcheck_host(state: &Shared, tenant_id: Uuid, domain: &str) -> Result<()> {
-    let bind_address = sqlx::query_scalar::<_, String>(
-        "SELECT r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
+/// Check that `host`, which may be an alias, reaches this tenant. An alias is
+/// answered by the tenant under its primary domain, which is what it reports.
+async fn healthcheck_host(state: &Shared, tenant_id: Uuid, host: &str) -> Result<()> {
+    let (domain, bind_address) = sqlx::query_as::<_, (String, String)>(
+        "SELECT t.domain,r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
     )
     .bind(tenant_id)
     .fetch_one(&state.db)
     .await?;
-    healthcheck_url(state, &bind_address, domain).await
+    healthcheck_url(state, &bind_address, host, &domain).await
 }
 
-async fn healthcheck_url(state: &Shared, bind_address: &str, domain: &str) -> Result<()> {
+async fn healthcheck_url(
+    state: &Shared,
+    bind_address: &str,
+    host: &str,
+    domain: &str,
+) -> Result<()> {
     let url = format!("http://{bind_address}/api/v2/instance");
     for _ in 0..30 {
-        if let Ok(response) = state.client.get(&url).header("Host", domain).send().await
+        if let Ok(response) = state.client.get(&url).header("Host", host).send().await
             && response.status().is_success()
             && response
                 .json::<serde_json::Value>()

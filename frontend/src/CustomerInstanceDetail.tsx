@@ -149,11 +149,7 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
                 )}
               />
             )}
-            <CustomDomainSetup
-              tenant={detail.tenant}
-              domains={customDomains}
-              onChanged={() => setRevision((value) => value + 1)}
-            />
+            <CustomDomainSetup tenant={detail.tenant} domains={customDomains} />
 
             <Card>
               <CardHeader>
@@ -405,7 +401,13 @@ function DeleteInstance(
   const state = tenant.lifecycle_state;
   const scheduled = tenant.deletion_scheduled_for;
   let description: string;
-  if (state === "retained") {
+  if (state === "retained" && tenant.abandoned_custom_domain) {
+    description = `${tenant.abandoned_custom_domain} · ${
+      t(
+        "This instance was deleted because its custom domain wasn't connected within 7 days, so it was never set up. Restoring it tries to connect the domain for another 7 days.",
+      )
+    }`;
+  } else if (state === "retained") {
     description = t(
       "This instance is offline. Its data is kept, so you can restore it.",
     );
@@ -524,34 +526,13 @@ function DeleteInstance(
 }
 
 function CustomDomainSetup(
-  { tenant, domains, onChanged }: {
+  { tenant, domains }: {
     tenant: CustomerTenantDetail["tenant"];
     domains: CustomerDomainSetup[];
-    onChanged: () => void;
   },
 ) {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
-  const [confirming, setConfirming] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  async function skip() {
-    setConfirming(false);
-    setBusy(true);
-    setError("");
-    try {
-      await api(`/customer/tenants/${tenant.id}/custom-domain/skip`, {
-        method: "POST",
-      });
-      onChanged();
-    } catch (failure) {
-      setError(errorMessage(failure));
-    } finally {
-      setBusy(false);
-    }
-  }
-
   return (
     <Card>
       <CardHeader>
@@ -563,11 +544,7 @@ function CustomDomainSetup(
       <CardContent className="grid gap-5">
         {domains.length === 0 && (
           <p className="text-muted-foreground text-sm">
-            {tenant.abandoned_custom_domain
-              ? `${tenant.abandoned_custom_domain} · ${
-                t("This domain wasn't connected, so this instance uses its eunha space address.")
-              }`
-              : t("No custom domain was added for this instance.")}
+            {t("No custom domain was added for this instance.")}
           </p>
         )}
         {domains.map((domain) => (
@@ -589,7 +566,7 @@ function CustomDomainSetup(
             )}
             {domain.status === "removing" && (
               <p className="text-muted-foreground text-sm">
-                {t("Setup is continuing without this domain.")}
+                {t("This domain wasn't connected in time and is being released.")}
               </p>
             )}
             {domain.status === "pending" && (
@@ -624,52 +601,17 @@ function CustomDomainSetup(
                 {domain.setup_deadline && (
                   <div className="grid gap-1">
                     <span className="text-muted-foreground text-xs">
-                      {t("Setup waits for this domain until")}
+                      {t("If it isn't connected by then, this instance is deleted")}
                     </span>
                     <span className="text-sm font-medium">
                       {absoluteTime(domain.setup_deadline)}
                     </span>
                   </div>
                 )}
-                {domain.setup_deadline && tenant.lifecycle_state === "provisioning" && (
-                  <div>
-                    <Button
-                      variant="outline"
-                      disabled={busy}
-                      onClick={() => setConfirming(true)}
-                    >
-                      {t("Continue without custom domain")}
-                    </Button>
-                  </div>
-                )}
               </>
             )}
           </section>
         ))}
-        {error && (
-          <Alert variant="destructive">
-            <CircleAlert />
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
-        <AlertDialog open={confirming} onOpenChange={setConfirming}>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>{t("Continue without your custom domain?")}</AlertDialogTitle>
-              <AlertDialogDescription>
-                {t(
-                  "Setup finishes on the instance's eunha space address, which becomes its permanent address. A custom domain can't be added later.",
-                )}
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <AlertDialogCancel>{t("Cancel")}</AlertDialogCancel>
-              <AlertDialogAction onClick={() => void skip()}>
-                {t("Continue without custom domain")}
-              </AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
       </CardContent>
     </Card>
   );
