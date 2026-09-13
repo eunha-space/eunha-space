@@ -1823,6 +1823,7 @@ async fn run_runtime_release(
             async_deploy_release(
                 &state.db,
                 operation_id,
+                deployment_id,
                 &host,
                 &tenant_directory,
                 &service_label,
@@ -1865,7 +1866,7 @@ async fn run_runtime_release(
             release_event(
                 &state.db,
                 operation_id,
-                "Release failed; the previous release was retained or restored.",
+                &format!("Release failed: {message}"),
             )
             .await;
             let _ = sqlx::query("UPDATE runtime_deployments SET status='failed',error=$1,finished_at=now() WHERE id=$2").bind(&message).bind(deployment_id).execute(&state.db).await;
@@ -1936,6 +1937,7 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
     )
     .await;
     command_status(
+        "Git fetch",
         "git",
         &["-C", &source_text, "fetch", "--prune", "--tags", "origin"],
         None,
@@ -1957,6 +1959,12 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
     if !is_git_sha(&reference) {
         return Err("Central Eunha release is invalid.".into());
     }
+    release_event(
+        db,
+        operation_id,
+        &format!("Resolved origin/main to release {}.", &reference[..12]),
+    )
+    .await;
     let artifact = root.join("releases").join(&reference);
     if artifact.join("eunha").is_file()
         && artifact.join("eunha-runtime-router").is_file()
@@ -1993,6 +2001,7 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
     )
     .await;
     command_status(
+        "Git checkout",
         "git",
         &[
             "-C",
@@ -2006,6 +2015,7 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
     )
     .await?;
     command_status(
+        "Frontend dependency installation",
         "mise",
         &[
             "exec",
@@ -2020,12 +2030,14 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
     )
     .await?;
     command_status(
+        "Frontend build",
         "mise",
         &["exec", "--", "pnpm", "--dir", "frontend", "run", "build"],
         Some(&source),
     )
     .await?;
     command_status(
+        "Eunha release build",
         "mise",
         &[
             "exec",
@@ -2064,6 +2076,7 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
         .map_err(|_| "Could not secure the runtime router helper.".to_string())?;
     }
     command_status(
+        "Frontend artifact staging",
         "cp",
         &[
             "-R",
@@ -2079,7 +2092,12 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
     Ok((reference, artifact))
 }
 
-async fn command_status(program: &str, args: &[&str], cwd: Option<&FsPath>) -> Result<(), String> {
+async fn command_status(
+    label: &str,
+    program: &str,
+    args: &[&str],
+    cwd: Option<&FsPath>,
+) -> Result<(), String> {
     let executable = match program {
         "mise" => "/opt/homebrew/bin/mise",
         "git" => "/usr/bin/git",
@@ -2106,13 +2124,18 @@ async fn command_status(program: &str, args: &[&str], cwd: Option<&FsPath>) -> R
     }
     match command.status().await {
         Ok(status) if status.success() => Ok(()),
-        _ => Err("Central release build failed.".into()),
+        Ok(status) => Err(match status.code() {
+            Some(code) => format!("{label} exited with status {code}."),
+            None => format!("{label} was terminated by a signal."),
+        }),
+        Err(_) => Err(format!("{label} could not be started.")),
     }
 }
 
 async fn async_deploy_release(
     db: &PgPool,
     operation_id: Uuid,
+    deployment_id: Uuid,
     host: &str,
     tenant_directory: &str,
     service_label: &str,
@@ -2148,6 +2171,7 @@ async fn async_deploy_release(
         }
     } else {
         command_status(
+            "Runtime directory preparation",
             "ssh",
             &[
                 host,
@@ -2172,6 +2196,7 @@ async fn async_deploy_release(
     .await;
     if local_runtime {
         command_status(
+            "Local release transfer",
             "cp",
             &["-R", &artifact_text, &staging.to_string_lossy()],
             None,
@@ -2180,6 +2205,7 @@ async fn async_deploy_release(
         .map_err(|_| "Could not transfer the runtime release bundle.".to_string())?;
     } else {
         command_status(
+            "Remote release transfer",
             "scp",
             &[
                 "-r",
@@ -2191,13 +2217,41 @@ async fn async_deploy_release(
         .await
         .map_err(|_| "Could not transfer the runtime release bundle.".to_string())?;
     }
-    release_event(
-        db,
-        operation_id,
-        "Applying migrations, switching the runtime, and waiting for health.",
-    )
-    .await;
+    release_event(db, operation_id, "Release bundle transfer completed.").await;
+    let _ = sqlx::query("UPDATE runtime_deployments SET status='migrating' WHERE id=$1")
+        .bind(deployment_id)
+        .execute(db)
+        .await;
+    release_event(db, operation_id, "Applying tenant database migrations.").await;
+    let migration = format!(
+        "set -eu; {}/eunha --tenants {} migrate",
+        remote_staging,
+        shell_quote(tenant_directory),
+    );
+    run_runtime_command(host, local_runtime, "Tenant database migration", &migration).await?;
+    release_event(db, operation_id, "Tenant database migrations completed.").await;
+
+    release_event(db, operation_id, "Publishing the immutable release bundle.").await;
+    let publish = format!(
+        "set -eu; rel={}; stage={}; superseded={}; if [ -e \"$rel\" ]; then mv \"$rel\" \"$superseded\"; fi; mv \"$stage\" \"$rel\"",
+        shell_quote(&release_path.to_string_lossy()),
+        remote_staging,
+        shell_quote(&superseded_release.to_string_lossy()),
+    );
+    run_runtime_command(host, local_runtime, "Release bundle publication", &publish).await?;
+    release_event(db, operation_id, "Immutable release bundle published.").await;
+
+    let _ = sqlx::query("UPDATE runtime_deployments SET status='switching' WHERE id=$1")
+        .bind(deployment_id)
+        .execute(db)
+        .await;
     let activation = if router_enabled {
+        release_event(
+            db,
+            operation_id,
+            "Starting the inactive slot, checking health, and switching the local router.",
+        )
+        .await;
         format!(
             "\"$rel/eunha-runtime-router\" switch \"$root\" {} {} {} {} {} \"$rel\" {}; ln -sfn \"$rel\" .current.new; mv -h .current.new current",
             shell_quote(tenant_directory),
@@ -2208,26 +2262,78 @@ async fn async_deploy_release(
             shell_quote(health_host),
         )
     } else {
+        release_event(
+            db,
+            operation_id,
+            "Restarting the runtime and checking health; rollback is armed.",
+        )
+        .await;
         format!(
             "previous=$(readlink current 2>/dev/null || true); ln -sfn \"$rel\" .current.new; mv -h .current.new current; launchctl kickstart -k gui/$(id -u)/{}; for i in $(seq 1 45); do curl -sf -m 5 -o /dev/null -H 'Host: {}' http://{}/api/v2/instance && exit 0; sleep 1; done; if [ -n \"$previous\" ]; then ln -sfn \"$previous\" .current.new; mv -h .current.new current; launchctl kickstart -k gui/$(id -u)/{}; fi; exit 1",
             service_label, health_host, bind_address, service_label
         )
     };
     let script = format!(
-        "set -eu; rel={}; stage={}; superseded={}; root={}; cd \"$root\"; \"$stage/eunha\" --tenants {} migrate; if [ -e \"$rel\" ]; then mv \"$rel\" \"$superseded\"; fi; mv \"$stage\" \"$rel\"; {}",
+        "set -eu; rel={}; root={}; cd \"$root\"; {}",
         shell_quote(&release_path.to_string_lossy()),
-        remote_staging,
-        shell_quote(&superseded_release.to_string_lossy()),
         shell_quote(&runtime_root.to_string_lossy()),
-        shell_quote(tenant_directory),
         activation,
     );
-    if local_runtime {
-        command_status("/bin/sh", &["-c", &script], None).await.map_err(|_| "Runtime migration, switch, or health check failed; the prior release was restored when available.".to_string())?;
-    } else {
-        command_status("ssh", &[host, &script], None).await.map_err(|_| "Runtime migration, switch, or health check failed; the prior release was restored when available.".to_string())?;
+    let switch_result = run_runtime_command(
+        host,
+        local_runtime,
+        "Runtime switch and health check",
+        &script,
+    )
+    .await;
+    if let Err(message) = switch_result {
+        let detail = if router_enabled {
+            describe_router_failure(&message)
+        } else {
+            format!("{message} The previous release was restored when available.")
+        };
+        release_event(db, operation_id, &detail).await;
+        return Err(detail);
     }
+    release_event(
+        db,
+        operation_id,
+        "Runtime switch and post-switch health check completed.",
+    )
+    .await;
     Ok(reference)
+}
+
+async fn run_runtime_command(
+    host: &str,
+    local_runtime: bool,
+    label: &str,
+    script: &str,
+) -> Result<(), String> {
+    if local_runtime {
+        command_status(label, "/bin/sh", &["-c", script], None).await
+    } else {
+        command_status(label, "ssh", &[host, script], None).await
+    }
+}
+
+fn describe_router_failure(message: &str) -> String {
+    let phase = if message.contains("status 71") {
+        "router prerequisites"
+    } else if message.contains("status 72") {
+        "inactive-slot startup or health check"
+    } else if message.contains("status 73") {
+        "HAProxy configuration or reload"
+    } else if message.contains("status 74") {
+        "post-switch health check and rollback"
+    } else if message.contains("status 75") {
+        "old-slot drain or shutdown"
+    } else {
+        "runtime switching"
+    };
+    format!(
+        "Runtime switch failed during {phase}. {message} The previously active slot was retained or restored when possible."
+    )
 }
 
 fn shell_quote(value: &str) -> String {

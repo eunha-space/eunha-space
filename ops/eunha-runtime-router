@@ -1,6 +1,24 @@
 #!/bin/bash
 set -euo pipefail
 
+# Exit codes are deliberately stable and contain no tenant data. The control
+# plane records only the code and its safe phase description, never command
+# output or arguments.
+PHASE=prerequisites
+router_error() {
+  local original="$?" code=71
+  case "$PHASE" in
+    slot_start) code=72 ;;
+    proxy_switch) code=73 ;;
+    post_switch_health) code=74 ;;
+    drain) code=75 ;;
+  esac
+  trap - ERR
+  if [[ "$original" -ge 71 && "$original" -le 75 ]]; then code="$original"; fi
+  exit "$code"
+}
+trap router_error ERR
+
 MODE="${1:?bootstrap or switch}"
 ROOT="${2:?runtime root}"
 TENANTS="${3:?tenant directory}"
@@ -83,7 +101,9 @@ start_slot() {
 }
 
 if [[ "$MODE" == bootstrap ]]; then
+  PHASE=slot_start
   start_slot blue "$BLUE"
+  PHASE=proxy_switch
   write_haproxy_config "$BLUE"
   ROUTER_LABEL="$BASE_LABEL.router"
   ROUTER_PLIST="$HOME/Library/LaunchAgents/$ROUTER_LABEL.plist"
@@ -96,21 +116,26 @@ if [[ "$MODE" == bootstrap ]]; then
   launchctl bootout "gui/$UID_N/$BASE_LABEL" 2>/dev/null || true
   launchctl bootstrap "gui/$UID_N" "$ROUTER_PLIST"
   printf '%s\n' blue >"$STATE"
+  PHASE=post_switch_health
   wait_ready "$STABLE"
   exit 0
 fi
 
 ACTIVE="$(cat "$STATE")"
 if [[ "$ACTIVE" == blue ]]; then NEXT=green; NEXT_ADDR="$GREEN"; OLD_ADDR="$BLUE"; else NEXT=blue; NEXT_ADDR="$BLUE"; OLD_ADDR="$GREEN"; fi
+PHASE=slot_start
 start_slot "$NEXT" "$NEXT_ADDR"
+PHASE=proxy_switch
 write_haproxy_config "$NEXT_ADDR"
 kill -USR2 "$(cat "$ROUTER_DIR/haproxy.pid")"
+PHASE=post_switch_health
 if ! wait_ready "$STABLE"; then
   write_haproxy_config "$OLD_ADDR"
   kill -USR2 "$(cat "$ROUTER_DIR/haproxy.pid")"
   launchctl bootout "gui/$UID_N/$BASE_LABEL.$NEXT" 2>/dev/null || true
-  exit 1
+  exit 74
 fi
 printf '%s\n' "$NEXT" >"$STATE"
+PHASE=drain
 sleep "${EUNHA_DRAIN_SECONDS:-30}"
 launchctl bootout "gui/$UID_N/$BASE_LABEL.$ACTIVE" 2>/dev/null || true
