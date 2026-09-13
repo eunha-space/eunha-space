@@ -675,6 +675,9 @@ async fn main() -> Result<()> {
             .timeout(Duration::from_secs(4))
             .build()?,
     });
+    if let Err(error) = rename_legacy_tenant_files(&state).await {
+        tracing::error!(error = %format!("{error:#}"), "could not rename tenant configuration files");
+    }
     tokio::spawn(health_reconciler(state.clone()));
     tokio::spawn(release_recovery_reconciler(state.clone()));
     tokio::spawn(automatic_release_reconciler(state.clone()));
@@ -1935,14 +1938,6 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
         return Ok(());
     }
     render_provisioned_tenant(state, tenant_id).await?;
-    let (directory, aliases) = sqlx::query_as::<_, (String, Vec<String>)>("SELECT r.tenant_directory,t.aliases FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1")
-        .bind(tenant_id).fetch_one(&state.db).await?;
-    for alias in aliases {
-        let old_file = PathBuf::from(&directory).join(tenant_file_name(&alias));
-        if tokio::fs::try_exists(&old_file).await? {
-            tokio::fs::remove_file(old_file).await?;
-        }
-    }
     reload_provisioned_runtime(state, tenant_id).await?;
     healthcheck_provisioned_tenant(state, tenant_id).await?;
     finish_domain(&state.db, id).await?;
@@ -2831,8 +2826,8 @@ async fn purge_tenant_configuration(state: &Shared, tenant_id: Uuid) -> Result<O
 /// Remove the tenant's runtime configuration so the runtime stops serving it on
 /// its next reload. The configuration itself stays in PostgreSQL.
 async fn unrender_tenant(state: &Shared, tenant_id: Uuid) -> Result<()> {
-    let (domain, aliases, directory, runtime_host) = sqlx::query_as::<_, (String, Vec<String>, String, String)>(
-        "SELECT t.domain,t.aliases,r.tenant_directory,i.address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id WHERE t.id=$1",
+    let (directory, runtime_host) = sqlx::query_as::<_, (String, String)>(
+        "SELECT r.tenant_directory,i.address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id WHERE t.id=$1",
     )
     .bind(tenant_id)
     .fetch_one(&state.db)
@@ -2842,19 +2837,45 @@ async fn unrender_tenant(state: &Shared, tenant_id: Uuid) -> Result<()> {
         !configured_host.is_empty() && configured_host == runtime_host,
         "runtime is managed elsewhere"
     );
-    let directory = PathBuf::from(directory);
-    for host in std::iter::once(&domain).chain(aliases.iter()) {
-        anyhow::ensure!(is_safe_domain(host), "invalid tenant domain");
-        let file_name = tenant_file_name(host);
-        anyhow::ensure!(
-            is_safe_tenant_file_name(&file_name),
-            "invalid tenant file name"
-        );
-        match tokio::fs::remove_file(directory.join(file_name)).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+    match tokio::fs::remove_file(PathBuf::from(directory).join(tenant_file_name(tenant_id))).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Rename files still named after their tenant's domain to the tenant's id.
+/// Renaming within a directory is atomic, so the runtime never sees two files
+/// for one domain, and the contents are unchanged, so a reload leaves the
+/// tenant running. Only this host's runtimes are touched.
+async fn rename_legacy_tenant_files(state: &Shared) -> Result<()> {
+    let configured_host = std::env::var("CONTROL_RUNTIME_HOST").unwrap_or_default();
+    if configured_host.is_empty() {
+        return Ok(());
+    }
+    let tenants = sqlx::query_as::<_, (Uuid, String, String)>(
+        "SELECT t.id,t.domain,r.tenant_directory FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id WHERE i.address=$1 AND t.lifecycle_state<>'purged'",
+    )
+    .bind(&configured_host)
+    .fetch_all(&state.db)
+    .await?;
+    for (tenant_id, domain, directory) in tenants {
+        if !is_safe_domain(&domain) {
+            continue;
         }
+        let directory = PathBuf::from(directory);
+        let legacy = directory.join(legacy_tenant_file_name(&domain));
+        let current = directory.join(tenant_file_name(tenant_id));
+        if !tokio::fs::try_exists(&legacy).await? {
+            continue;
+        }
+        if tokio::fs::try_exists(&current).await? {
+            // Rendered under both names; the id-named file is the newer one.
+            tokio::fs::remove_file(&legacy).await?;
+        } else {
+            tokio::fs::rename(&legacy, &current).await?;
+        }
+        tracing::info!(%tenant_id, %domain, "renamed tenant configuration file to its tenant id");
     }
     Ok(())
 }
@@ -3289,7 +3310,7 @@ async fn render_provisioned_tenant(state: &Shared, tenant_id: Uuid) -> Result<()
         tokio::fs::metadata(&directory).await?.is_dir(),
         "tenant directory unavailable"
     );
-    let file_name = tenant_file_name(&domain);
+    let file_name = tenant_file_name(tenant_id);
     let target = directory.join(&file_name);
     let temporary = directory.join(format!(".{file_name}.{}", Uuid::new_v4()));
     tokio::fs::write(&temporary, rendered.as_bytes()).await?;
@@ -3507,7 +3528,7 @@ async fn tenant_configuration(
     redact_tenant_toml(&mut typed);
     let rendered = toml::to_string_pretty(&typed).map_err(ApiError::from)?;
     Ok(Json(TenantConfiguration {
-        file_name: tenant_file_name(&domain),
+        file_name: tenant_file_name(id),
         domain,
         config_revision,
         rendered_revision,
@@ -4438,7 +4459,16 @@ fn is_safe_tenant_file_name(file_name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
 }
 
-fn tenant_file_name(domain: &str) -> String {
+/// A tenant's runtime configuration file, named by its id. Eunha loads every
+/// `*.toml` in the directory and identifies a tenant by the domain inside, so
+/// the name only has to be unique and stable, which a domain-derived one is
+/// not: hyphens are legal in domains, and domains change.
+fn tenant_file_name(tenant_id: Uuid) -> String {
+    format!("{tenant_id}.toml")
+}
+
+/// The name a tenant's file had before files were named by tenant id.
+fn legacy_tenant_file_name(domain: &str) -> String {
     format!("{}.toml", domain.replace('.', "-"))
 }
 
@@ -4485,7 +4515,7 @@ async fn render_tenant(
         ));
     }
     let domain = tenant.domain.clone();
-    let tenant_file_name = tenant_file_name(&domain);
+    let tenant_file_name = tenant_file_name(id);
     let op = Uuid::new_v4();
     sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,requested_by,started_at) VALUES($1,$2,'render','running',$3,now())")
         .bind(op).bind(id).bind(operator_id).execute(&s.db).await?;
@@ -4656,6 +4686,23 @@ mod tests {
         printed_password, redact_connection_url, tenant_redis_key_prefix,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn tenant_files_are_named_by_tenant_id() {
+        let tenant = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
+        assert_eq!(
+            super::tenant_file_name(tenant),
+            "44444444-4444-4444-4444-444444444444.toml"
+        );
+        assert!(super::is_safe_tenant_file_name(&super::tenant_file_name(
+            tenant
+        )));
+        // The collision that naming by domain allowed.
+        assert_eq!(
+            super::legacy_tenant_file_name("foo-bar.example.com"),
+            super::legacy_tenant_file_name("foo.bar-example.com")
+        );
+    }
 
     #[test]
     fn dns_check_looks_for_the_custom_hostname_target() {
