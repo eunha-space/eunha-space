@@ -3,6 +3,8 @@
 /.pnpm-store
 /frontend/node_modules
 /frontend/dist
+/frontend/dist.previous
 /frontend/*.tsbuildinfo
+/releases
 /.env
 /.sites-runtime
