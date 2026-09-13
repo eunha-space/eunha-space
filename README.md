@@ -46,6 +46,24 @@ Signup requires only an email address. The verification link signs the customer
 in and requires password setup; later sessions can use either that password or
 a fresh email sign-in link.
 
+Each customer instance gets its first account the way a Mastodon server does.
+The customer picks an admin username when creating the instance, and the final
+`owner` provisioning step runs the runtime's
+`eunha accounts create <username> --role=Owner --confirmed --approve` with the
+customer's email. Instances start with registrations closed, as Mastodon's do,
+so nobody can sign up first. The step waits for a custom domain requested at
+creation to connect or fail, because local accounts fix the instance's
+ActivityPub identity to its primary domain. Runtimes must run an Eunha release
+that includes the `accounts` commands.
+
+The account's password is never stored. The instance page's **Create password**
+and **Reset password** action runs
+`eunha accounts modify <username> --reset-password`, shows the printed password
+to the customer once with `Cache-Control: no-store`, and records an
+`owner_password_reset` operation without the password. A reset signs the
+account out of every session and app. Like other runtime commands, these must
+run on the machine whose `CONTROL_RUNTIME_HOST` matches the runtime.
+
 `EUNHA_PROVIDED_DOMAIN_SUFFIXES` is a comma-separated, primary-first list of
 platform domains (default `eunha.space`). Provisioning `garden` with
 `eunha.space,eunha.site` reserves `garden.eunha.space` as primary and

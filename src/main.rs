@@ -167,6 +167,7 @@ struct CustomerTenantRequest {
     subdomain: String,
     title: String,
     custom_domain: Option<String>,
+    owner_username: String,
 }
 
 #[derive(Deserialize)]
@@ -235,6 +236,10 @@ struct CustomerTenantInfo {
     observed_state: String,
     #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
+    owner_username: Option<String>,
+    owner_ready: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
+    owner_password_issued_at: Option<OffsetDateTime>,
 }
 
 #[derive(Serialize)]
@@ -652,6 +657,10 @@ async fn main() -> Result<()> {
             get(customer_tenants).post(customer_create_tenant),
         )
         .route("/customer/tenants/{id}", get(customer_tenant_detail))
+        .route(
+            "/customer/tenants/{id}/owner/password",
+            post(customer_reset_owner_password),
+        )
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/tenants/{id}/check", post(check_tenant))
         .route("/tenants/{id}/retry", post(retry_provisioning))
@@ -1047,7 +1056,7 @@ async fn customer_tenant_detail(
     Path(id): Path<Uuid>,
 ) -> Result<Json<CustomerTenantDetail>, ApiError> {
     let (customer_id, _) = customer(&headers, &s.db).await?;
-    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at FROM tenants t WHERE t.id=$1 AND t.customer_id=$2")
+    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at FROM tenants t WHERE t.id=$1 AND t.customer_id=$2")
         .bind(id)
         .bind(customer_id)
         .fetch_optional(&s.db)
@@ -1057,7 +1066,7 @@ async fn customer_tenant_detail(
         .bind(id)
         .fetch_all(&s.db)
         .await?;
-    let provisioning_steps = sqlx::query_as("SELECT step,status,updated_at FROM provisioning_steps WHERE tenant_id=$1 ORDER BY array_position(ARRAY['database','migrate','render','reload','health','routing'],step)")
+    let provisioning_steps = sqlx::query_as("SELECT step,status,updated_at FROM provisioning_steps WHERE tenant_id=$1 ORDER BY array_position(ARRAY['database','migrate','render','reload','health','routing','owner'],step)")
         .bind(id)
         .fetch_all(&s.db)
         .await?;
@@ -1111,7 +1120,7 @@ async fn create_tenant(
     Json(body): Json<NewTenant>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let (operator_id, _) = operator(&headers, &s.db).await?;
-    create_tenant_inner(&s, body, Some(operator_id), None, None).await
+    create_tenant_inner(&s, body, Some(operator_id), None, None, None).await
 }
 
 async fn customer_create_tenant(
@@ -1132,6 +1141,13 @@ async fn customer_create_tenant(
             "Set a password before creating an instance.".into(),
         ));
     }
+    let owner_username = body.owner_username.trim().to_owned();
+    if !is_valid_owner_username(&owner_username) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Use up to 30 letters, numbers, and underscores for the admin username.".into(),
+        ));
+    }
     let runtime_id=sqlx::query_scalar::<_,Uuid>("SELECT r.id FROM runtimes r WHERE EXISTS(SELECT 1 FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.runtime_id=r.id AND t.lifecycle_state='ready') ORDER BY (SELECT count(*) FROM tenants t WHERE t.runtime_id=r.id AND t.lifecycle_state <> 'purged'),r.created_at LIMIT 1").fetch_optional(&s.db).await?.ok_or_else(||ApiError(StatusCode::SERVICE_UNAVAILABLE,"No runtime is currently available.".into()))?;
     create_tenant_inner(
         &s,
@@ -1140,12 +1156,16 @@ async fn customer_create_tenant(
             title: body.title,
             contact_email: Some(email),
             runtime_id,
-            registrations_open: true,
+            // Mastodon's default `registrations_mode` is `none`: a new server
+            // is closed until its Owner decides otherwise, so nobody can sign
+            // up ahead of the account provisioning creates for the customer.
+            registrations_open: false,
             approval_required: false,
         },
         None,
         Some(customer_id),
         body.custom_domain,
+        Some(owner_username),
     )
     .await
 }
@@ -1156,6 +1176,7 @@ async fn create_tenant_inner(
     operator_id: Option<Uuid>,
     customer_id: Option<Uuid>,
     custom_domain: Option<String>,
+    owner_username: Option<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     body.subdomain = body.subdomain.trim().to_ascii_lowercase();
     let suffix = s.provided_domain_suffixes.first().ok_or_else(|| {
@@ -1289,10 +1310,10 @@ async fn create_tenant_inner(
             ));
         }
     }
-    sqlx::query("INSERT INTO tenants(id,domain,aliases,title,runtime_id,desired_state,observed_state,lifecycle_state,contact_email,registrations_open,approval_required,vapid_private_key,vapid_public_key,customer_id) VALUES($1,$2,$3,$4,$5,'running','unknown','provisioning',$6,$7,$8,$9,$10,$11)")
+    sqlx::query("INSERT INTO tenants(id,domain,aliases,title,runtime_id,desired_state,observed_state,lifecycle_state,contact_email,registrations_open,approval_required,vapid_private_key,vapid_public_key,customer_id,owner_username) VALUES($1,$2,$3,$4,$5,'running','unknown','provisioning',$6,$7,$8,$9,$10,$11,$12)")
         .bind(tenant_id).bind(&domain).bind(&aliases).bind(&body.title).bind(body.runtime_id)
         .bind(&body.contact_email).bind(body.registrations_open).bind(body.approval_required)
-        .bind(vapid_private).bind(vapid_public).bind(customer_id).execute(&mut *tx).await
+        .bind(vapid_private).bind(vapid_public).bind(customer_id).bind(&owner_username).execute(&mut *tx).await
         .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenants_domain_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
     sqlx::query(r#"INSERT INTO tenant_configuration(
         tenant_id,database_url,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,
@@ -1320,8 +1341,8 @@ async fn create_tenant_inner(
     }
     sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,requested_by_customer,detail,started_at) VALUES($1,$2,$3,'tenant_provision','running',$4,$5,jsonb_build_object('domain',$6),now())")
         .bind(operation_id).bind(tenant_id).bind(body.runtime_id).bind(operator_id).bind(customer_id).bind(&domain).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['database','migrate','render','reload','health','routing'])")
-        .bind(tenant_id).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['database','migrate','render','reload','health','routing'] || CASE WHEN $2 THEN ARRAY['owner'] ELSE ARRAY[]::text[] END)")
+        .bind(tenant_id).bind(owner_username.is_some()).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Tenant reserved; provisioning queued.')")
         .bind(operation_id).execute(&mut *tx).await?;
     tx.commit().await?;
@@ -1661,7 +1682,30 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
         finish_domain(&state.db, id).await?;
         return Ok(());
     }
-    if primary_kind == "custom" {
+    let has_identity = if primary_kind == "custom" {
+        true
+    } else {
+        let database_url = sqlx::query_scalar::<_, String>(
+            "SELECT database_url FROM tenant_configuration WHERE tenant_id=$1",
+        )
+        .bind(tenant_id)
+        .fetch_one(&state.db)
+        .await?;
+        let tenant_db = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await?;
+        let has_identity = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM public.accounts WHERE domain IS NULL)",
+        )
+        .fetch_one(&tenant_db)
+        .await;
+        tenant_db.close().await;
+        has_identity?
+    };
+    // Local accounts' ActivityPub identities are bound to the primary domain,
+    // so once any exist a verified custom domain can only be an alias.
+    if has_identity {
         sqlx::query("UPDATE tenants SET aliases=CASE WHEN $1=ANY(aliases) THEN aliases ELSE array_append(aliases,$1) END,config_revision=config_revision+1,updated_at=now() WHERE id=$2")
             .bind(&hostname).bind(tenant_id).execute(&state.db).await?;
         render_provisioned_tenant(state, tenant_id).await?;
@@ -1670,24 +1714,6 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
         finish_domain(&state.db, id).await?;
         return Ok(());
     }
-
-    let database_url = sqlx::query_scalar::<_, String>(
-        "SELECT database_url FROM tenant_configuration WHERE tenant_id=$1",
-    )
-    .bind(tenant_id)
-    .fetch_one(&state.db)
-    .await?;
-    let tenant_db = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&database_url)
-        .await?;
-    let has_identity = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM public.accounts WHERE domain IS NULL)",
-    )
-    .fetch_one(&tenant_db)
-    .await?;
-    tenant_db.close().await;
-    anyhow::ensure!(!has_identity, "tenant already has local identities");
 
     let mut tx = state.db.begin().await?;
     sqlx::query("UPDATE tenant_domains SET is_primary=false,updated_at=now() WHERE tenant_id=$1 AND is_primary")
@@ -1742,8 +1768,13 @@ async fn provisioning_step(state: &Shared, tenant_id: Uuid, step: &str) -> Resul
     )
     .bind(tenant_id)
     .bind(step)
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await?;
+    // Tenants without an owner, such as operator-created ones, have no owner
+    // step to run.
+    let Some(status) = status else {
+        return Ok(false);
+    };
     if status == "succeeded" {
         return Ok(false);
     }
@@ -1775,16 +1806,19 @@ async fn fail_provisioning(db: &PgPool, tenant_id: Uuid, step: &str) {
 
 async fn provision_tenant(state: &Shared, tenant_id: Uuid) {
     for step in [
-        "database", "migrate", "render", "reload", "health", "routing",
+        "database", "migrate", "render", "reload", "health", "routing", "owner",
     ] {
-        if step == "routing" {
-            match tenant_routing_ready(&state.db, tenant_id).await {
-                Ok(true) => {}
-                Ok(false) => return,
-                Err(_) => {
-                    fail_provisioning(&state.db, tenant_id, step).await;
-                    return;
-                }
+        let ready = match step {
+            "routing" => tenant_routing_ready(&state.db, tenant_id).await,
+            "owner" => tenant_identity_settled(&state.db, tenant_id).await,
+            _ => Ok(true),
+        };
+        match ready {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(_) => {
+                fail_provisioning(&state.db, tenant_id, step).await;
+                return;
             }
         }
         let should_run = match provisioning_step(state, tenant_id, step).await {
@@ -1803,6 +1837,7 @@ async fn provision_tenant(state: &Shared, tenant_id: Uuid) {
             "reload" => reload_provisioned_runtime(state, tenant_id).await,
             "health" => healthcheck_provisioned_tenant(state, tenant_id).await,
             "routing" => Ok(()),
+            "owner" => create_tenant_owner(state, tenant_id).await,
             _ => unreachable!(),
         };
         if result.is_err() {
@@ -1841,6 +1876,184 @@ async fn tenant_routing_ready(db: &PgPool, tenant_id: Uuid) -> Result<bool> {
         "provided hostname routing failed"
     );
     Ok(statuses.iter().all(|status| status == "active"))
+}
+
+/// Whether the owner can be created: a custom domain requested with the
+/// instance becomes its ActivityPub identity only while no local account
+/// exists, so the owner waits until that domain connects or fails. Tenants with
+/// no owner left to create never wait.
+async fn tenant_identity_settled(db: &PgPool, tenant_id: Uuid) -> Result<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT NOT EXISTS(SELECT 1 FROM provisioning_steps WHERE tenant_id=$1 AND step='owner' AND status<>'succeeded') OR NOT EXISTS(SELECT 1 FROM tenant_domains WHERE tenant_id=$1 AND kind='custom' AND status='pending')",
+    )
+    .bind(tenant_id)
+    .fetch_one(db)
+    .await?)
+}
+
+/// Create the customer's Owner account, as `tootctl accounts create --role
+/// Owner --confirmed --approve` would. Its random password is discarded: the
+/// customer area issues one on request, so no copy is ever kept.
+async fn create_tenant_owner(state: &Shared, tenant_id: Uuid) -> Result<()> {
+    let (username, email, database_url) = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT t.owner_username,c.email,tc.database_url FROM tenants t JOIN customers c ON c.id=t.customer_id JOIN tenant_configuration tc ON tc.tenant_id=t.id WHERE t.id=$1 AND t.owner_username IS NOT NULL",
+    )
+    .bind(tenant_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    // A retry after the command succeeded but before the step was recorded
+    // finds the owner already there. Sign-ups are closed until then, so the
+    // username can only belong to someone else if something is badly wrong.
+    let tenant_db = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&database_url)
+        .await?;
+    let existing = sqlx::query_scalar::<_, String>(
+        "SELECT u.email FROM public.users u JOIN public.accounts a ON a.id=u.account_id WHERE lower(a.username)=lower($1) AND a.domain IS NULL",
+    )
+    .bind(&username)
+    .fetch_optional(&tenant_db)
+    .await;
+    tenant_db.close().await;
+    if let Some(existing) = existing? {
+        anyhow::ensure!(
+            existing.eq_ignore_ascii_case(&email),
+            "owner username belongs to another account"
+        );
+        return Ok(());
+    }
+
+    tenant_account_command(
+        state,
+        tenant_id,
+        &[
+            "accounts",
+            "create",
+            &username,
+            &format!("--email={email}"),
+            "--confirmed",
+            "--approve",
+            "--role=Owner",
+        ],
+    )
+    .await
+    .map(drop)
+}
+
+/// Run an `eunha accounts` command that prints a password against one tenant,
+/// with the runtime's current release, and return that password.
+///
+/// Like every other runtime command, its output is never persisted or logged.
+async fn tenant_account_command(state: &Shared, tenant_id: Uuid, args: &[&str]) -> Result<String> {
+    let (domain, tenant_directory, runtime_host) = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT t.domain,r.tenant_directory,i.address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id WHERE t.id=$1",
+    )
+    .bind(tenant_id)
+    .fetch_one(&state.db)
+    .await?;
+    let configured_host = std::env::var("CONTROL_RUNTIME_HOST").unwrap_or_default();
+    anyhow::ensure!(
+        !configured_host.is_empty() && configured_host == runtime_host,
+        "runtime is managed elsewhere"
+    );
+    anyhow::ensure!(is_safe_domain(&domain), "invalid tenant domain");
+    let runtime_root = PathBuf::from(&tenant_directory)
+        .parent()
+        .context("runtime directory has no parent")?
+        .to_path_buf();
+    let output = tokio::time::timeout(
+        Duration::from_secs(60),
+        tokio::process::Command::new(runtime_root.join("current/eunha"))
+            .arg("--tenants")
+            .arg(&tenant_directory)
+            .args(args)
+            .arg(format!("--instance={domain}"))
+            .current_dir(runtime_root.join("current"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .context("account command timed out")??;
+    anyhow::ensure!(output.status.success(), "account command failed");
+    printed_password(&String::from_utf8_lossy(&output.stdout))
+        .context("account command printed no password")
+}
+
+/// The password `tootctl`-style account commands print after `OK`.
+fn printed_password(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("New password: "))
+        .filter(|password| password.len() >= 16 && password.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_owned)
+}
+
+fn is_valid_owner_username(username: &str) -> bool {
+    (1..=30).contains(&username.len())
+        && username
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+async fn customer_reset_owner_password(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let (customer_id, _) = customer(&headers, &s.db).await?;
+    let owner = sqlx::query_as::<_, (Option<String>, bool, Uuid)>(
+        "SELECT t.owner_username,t.lifecycle_state='ready' AND EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded'),t.runtime_id FROM tenants t WHERE t.id=$1 AND t.customer_id=$2",
+    )
+    .bind(id)
+    .bind(customer_id)
+    .fetch_optional(&s.db)
+    .await?
+    .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Instance not found".into()))?;
+    let (Some(username), true, runtime_id) = owner else {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "The admin account is not ready yet.".into(),
+        ));
+    };
+
+    let operation_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by_customer,detail,started_at) VALUES($1,$2,$3,'owner_password_reset','running',$4,jsonb_build_object('username',$5::text),now())")
+        .bind(operation_id).bind(id).bind(runtime_id).bind(customer_id).bind(&username).execute(&s.db).await?;
+    let password = match tenant_account_command(
+        &s,
+        id,
+        &["accounts", "modify", &username, "--reset-password"],
+    )
+    .await
+    {
+        Ok(password) => password,
+        Err(_) => {
+            let message = "The admin password could not be reset.";
+            mark_operation_failed(&s.db, operation_id, message).await;
+            return Err(ApiError(StatusCode::BAD_GATEWAY, message.into()));
+        }
+    };
+    sqlx::query("UPDATE tenants SET owner_password_issued_at=now(),updated_at=now() WHERE id=$1")
+        .bind(id)
+        .execute(&s.db)
+        .await?;
+    sqlx::query("UPDATE operations SET status='succeeded',finished_at=now() WHERE id=$1")
+        .bind(operation_id)
+        .execute(&s.db)
+        .await?;
+    sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Admin password reset; every session was signed out.')")
+        .bind(operation_id)
+        .execute(&s.db)
+        .await?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "username": username, "password": password })),
+    )
+        .into_response())
 }
 
 async fn create_tenant_database(state: &Shared, tenant_id: Uuid) -> Result<()> {
@@ -3200,10 +3413,37 @@ async fn render_tenant(
 #[cfg(test)]
 mod tests {
     use super::{
-        DomainDnsTargetError, REDACTED, domain_reconcile_error_message, redact_connection_url,
-        tenant_redis_key_prefix,
+        DomainDnsTargetError, REDACTED, domain_reconcile_error_message, is_valid_owner_username,
+        printed_password, redact_connection_url, tenant_redis_key_prefix,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn account_commands_print_their_password_after_ok() {
+        let stdout = "2026-09-13T10:00:00Z  INFO eunha: connected\nOK\nNew password: 0123456789abcdef0123456789abcdef\n";
+        assert_eq!(
+            printed_password(stdout).as_deref(),
+            Some("0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(printed_password("OK\n"), None);
+        assert_eq!(printed_password("New password: \n"), None);
+        assert_eq!(
+            printed_password("New password: not hex at all, sorry\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn owner_usernames_follow_mastodons_local_username_rules() {
+        assert!(is_valid_owner_username("gardener"));
+        assert!(is_valid_owner_username("Garden_Keeper_2"));
+        assert!(is_valid_owner_username(&"a".repeat(30)));
+        assert!(!is_valid_owner_username(""));
+        assert!(!is_valid_owner_username(&"a".repeat(31)));
+        assert!(!is_valid_owner_username("garden-keeper"));
+        assert!(!is_valid_owner_username("garden.keeper"));
+        assert!(!is_valid_owner_username("--help"));
+    }
 
     #[test]
     fn generated_redis_prefix_uses_eunhas_safe_alphabet() {

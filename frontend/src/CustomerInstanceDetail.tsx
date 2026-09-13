@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft, Check, CircleAlert, Clock } from "lucide-react";
+import {
+  ArrowLeft,
+  Check,
+  CircleAlert,
+  Clock,
+  Copy,
+  KeyRound,
+} from "lucide-react";
 import { useLingui } from "@lingui/react";
 import {
   api,
@@ -8,6 +15,17 @@ import {
   errorMessage,
 } from "@/api";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -26,6 +44,7 @@ const STEP_LABELS: Record<CustomerProvisioningStep["step"], string> = {
   reload: "Starting your instance",
   health: "Checking availability",
   routing: "Connecting domains",
+  owner: "Creating your admin account",
 };
 
 export function CustomerInstanceDetail({ id }: { id: string }) {
@@ -100,6 +119,18 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
       </div>
 
       <div className="grid gap-6 md:grid-cols-2">
+        {detail.tenant.owner_username && (
+          <AdminAccount
+            tenantId={detail.tenant.id}
+            domain={detail.tenant.domain}
+            username={detail.tenant.owner_username}
+            ready={detail.tenant.owner_ready}
+            passwordIssued={detail.tenant.owner_password_issued_at !== null}
+            waitingForDomain={customDomains.some((domain) =>
+              domain.status === "pending"
+            )}
+          />
+        )}
         <Card>
           <CardHeader>
             <CardTitle>{t("Custom domain setup")}</CardTitle>
@@ -209,6 +240,161 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
         </Card>
       </div>
     </div>
+  );
+}
+
+type IssuedPassword = { username: string; password: string };
+
+function AdminAccount(
+  { tenantId, domain, username, ready, passwordIssued, waitingForDomain }: {
+    tenantId: string;
+    domain: string;
+    username: string;
+    ready: boolean;
+    passwordIssued: boolean;
+    waitingForDomain: boolean;
+  },
+) {
+  const { i18n } = useLingui();
+  const t = (message: string) => i18n._(message);
+  const [issued, setIssued] = useState<IssuedPassword | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [error, setError] = useState("");
+
+  async function issue() {
+    setConfirming(false);
+    setBusy(true);
+    setError("");
+    setIssued(null);
+    setCopied(false);
+    try {
+      // The password lives only in this component's state; the server keeps no
+      // copy, so leaving the page is the end of it.
+      setIssued(
+        await api<IssuedPassword>(`/customer/tenants/${tenantId}/owner/password`, {
+          method: "POST",
+        }),
+      );
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copy() {
+    if (!issued) return;
+    try {
+      await navigator.clipboard.writeText(issued.password);
+      setCopied(true);
+    } catch {
+      setError(t("The password could not be copied. Select it and copy it instead."));
+    }
+  }
+
+  const loginUrl = `https://${domain}/account/login`;
+  const button = (
+    <Button
+      variant={passwordIssued ? "outline" : "default"}
+      disabled={!ready || busy}
+      onClick={passwordIssued ? undefined : () => void issue()}
+    >
+      {busy ? <Spinner label={t("In progress")} /> : <KeyRound />}
+      {passwordIssued ? t("Reset password") : t("Create password")}
+    </Button>
+  );
+
+  return (
+    <Card className="md:col-span-2">
+      <CardHeader>
+        <CardTitle>{t("Admin account")}</CardTitle>
+        <CardDescription>
+          {ready
+            ? t("Sign in to your instance as its owner to manage it.")
+            : waitingForDomain
+            ? t("Your admin account is created after your custom domain is connected.")
+            : t("Your admin account is created when setup finishes.")}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-4">
+        <div className="grid gap-4 sm:grid-cols-2">
+          <div className="grid gap-1">
+            <span className="text-muted-foreground text-xs">{t("Username")}</span>
+            <code className="break-all">@{username}</code>
+          </div>
+          {ready && (
+            <div className="grid gap-1">
+              <span className="text-muted-foreground text-xs">{t("Sign-in page")}</span>
+              <a
+                className="break-all text-sm underline-offset-4 hover:underline"
+                href={loginUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {loginUrl}
+              </a>
+            </div>
+          )}
+        </div>
+
+        {issued && (
+          <div className="bg-muted/60 grid gap-3 rounded-md p-3 text-sm">
+            <div className="grid gap-1">
+              <span className="text-muted-foreground text-xs">
+                {t("New password")} · @{issued.username}
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <code className="flex-1 break-all select-all">
+                  {issued.password}
+                </code>
+                <Button variant="ghost" size="sm" onClick={() => void copy()}>
+                  <Copy />
+                  {copied ? t("Copied") : t("Copy")}
+                </Button>
+              </div>
+            </div>
+            <p className="text-muted-foreground text-xs">
+              {t("Save this password now. It is not stored and will not be shown again.")}
+            </p>
+          </div>
+        )}
+
+        {error && (
+          <Alert variant="destructive">
+            <CircleAlert />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+
+        <div>
+          {passwordIssued && ready && !busy
+            ? (
+              <AlertDialog open={confirming} onOpenChange={setConfirming}>
+                <AlertDialogTrigger render={button} />
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>{t("Reset the admin password?")}</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t(
+                        "A new password is generated, and the admin account is signed out everywhere it is signed in.",
+                      )}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>{t("Cancel")}</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => void issue()}>
+                      {t("Reset password")}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            )
+            : button}
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

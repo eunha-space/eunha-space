@@ -58,6 +58,31 @@ const ko: Record<string, string> = {
   "Starting your instance": "인스턴스 시작",
   "Checking availability": "사용 가능 여부 확인",
   "Connecting domains": "도메인 연결",
+  "Creating your admin account": "관리자 계정 만들기",
+  "Admin username": "관리자 사용자명",
+  "Letters, numbers, and underscores.": "영문, 숫자, 밑줄(_)만 사용할 수 있습니다.",
+  "Admin account": "관리자 계정",
+  "Sign in to your instance as its owner to manage it.":
+    "소유자로 인스턴스에 로그인하여 관리하세요.",
+  "Your admin account is created after your custom domain is connected.":
+    "커스텀 도메인이 연결되면 관리자 계정이 만들어집니다.",
+  "Your admin account is created when setup finishes.":
+    "설정이 끝나면 관리자 계정이 만들어집니다.",
+  Username: "사용자명",
+  "Sign-in page": "로그인 페이지",
+  "Create password": "비밀번호 만들기",
+  "Reset password": "비밀번호 재설정",
+  "Reset the admin password?": "관리자 비밀번호를 재설정할까요?",
+  "A new password is generated, and the admin account is signed out everywhere it is signed in.":
+    "새 비밀번호가 만들어지고, 관리자 계정은 로그인된 모든 곳에서 로그아웃됩니다.",
+  Cancel: "취소",
+  "New password": "새 비밀번호",
+  Copy: "복사",
+  Copied: "복사됨",
+  "Save this password now. It is not stored and will not be shown again.":
+    "지금 이 비밀번호를 저장하세요. 저장되지 않으며 다시 표시되지 않습니다.",
+  "The password could not be copied. Select it and copy it instead.":
+    "비밀번호를 복사하지 못했습니다. 직접 선택하여 복사하세요.",
   Done: "완료",
   "In progress": "진행 중",
   "Needs attention": "확인 필요",

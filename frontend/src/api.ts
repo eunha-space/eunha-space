@@ -32,7 +32,14 @@ export type CustomerDomainSetup = {
 };
 
 export type CustomerProvisioningStep = {
-  step: "database" | "migrate" | "render" | "reload" | "health" | "routing";
+  step:
+    | "database"
+    | "migrate"
+    | "render"
+    | "reload"
+    | "health"
+    | "routing"
+    | "owner";
   status: "pending" | "running" | "succeeded" | "failed";
   updated_at: string;
 };
@@ -46,7 +53,13 @@ export type CustomerTenantDetail = {
     | "lifecycle_state"
     | "observed_state"
     | "updated_at"
-  >;
+  > & {
+    /** The instance's Owner account; null for instances created without one. */
+    owner_username: string | null;
+    owner_ready: boolean;
+    /** When the customer area last issued a password for the Owner. */
+    owner_password_issued_at: string | null;
+  };
   domains: CustomerDomainSetup[];
   provisioning_steps: CustomerProvisioningStep[];
 };

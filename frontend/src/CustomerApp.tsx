@@ -42,6 +42,7 @@ export function CustomerApp() {
   const [subdomain, setSubdomain] = useState("");
   const [title, setTitle] = useState("");
   const [customDomain, setCustomDomain] = useState("");
+  const [ownerUsername, setOwnerUsername] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   async function load() {
@@ -130,11 +131,13 @@ export function CustomerApp() {
           subdomain,
           title,
           custom_domain: customDomain || null,
+          owner_username: ownerUsername,
         }),
       });
       setSubdomain("");
       setTitle("");
       setCustomDomain("");
+      setOwnerUsername("");
       await load();
     } catch (e) {
       setError(errorMessage(e));
@@ -330,6 +333,24 @@ export function CustomerApp() {
                     onChange={(e) => setTitle(e.target.value)}
                     required
                   />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="owner">{t("Admin username")}</Label>
+                  <Input
+                    id="owner"
+                    placeholder="admin"
+                    pattern="[A-Za-z0-9_]{1,30}"
+                    maxLength={30}
+                    autoComplete="off"
+                    value={ownerUsername}
+                    onChange={(e) => setOwnerUsername(e.target.value)}
+                    required
+                  />
+                  <span className="text-muted-foreground text-xs">
+                    @{ownerUsername || "admin"}
+                    {" · "}
+                    {t("Letters, numbers, and underscores.")}
+                  </span>
                 </div>
                 <div className="grid gap-2">
                   <Label htmlFor="domain">
