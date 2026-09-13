@@ -1108,7 +1108,7 @@ async fn customer_tenant_detail(
     Path(id): Path<Uuid>,
 ) -> Result<Json<CustomerTenantDetail>, ApiError> {
     let (customer_id, _) = customer(&headers, &s.db).await?;
-    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds') THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,CASE WHEN t.owner_username IS NOT NULL THEN c.email END owner_email,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.purge_scheduled_for,t.abandoned_custom_domain FROM tenants t JOIN customers c ON c.id=t.customer_id WHERE t.id=$1 AND t.customer_id=$2 AND t.lifecycle_state NOT IN ('purging','purged')")
+    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds') THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,t.owner_email,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.purge_scheduled_for,t.abandoned_custom_domain FROM tenants t JOIN customers c ON c.id=t.customer_id WHERE t.id=$1 AND t.customer_id=$2 AND t.lifecycle_state NOT IN ('purging','purged')")
         .bind(id)
         .bind(customer_id)
         .fetch_optional(&s.db)
@@ -1236,6 +1236,9 @@ async fn create_tenant_inner(
         .contact_email
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
+    let owner_email = owner_username
+        .as_ref()
+        .and_then(|_| body.contact_email.clone());
     if body.title.is_empty() || body.title.len() > 200 {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -1370,10 +1373,10 @@ async fn create_tenant_inner(
             ));
         }
     }
-    sqlx::query("INSERT INTO tenants(id,domain,aliases,title,runtime_id,desired_state,observed_state,lifecycle_state,contact_email,registrations_open,approval_required,vapid_private_key,vapid_public_key,customer_id,owner_username) VALUES($1,$2,$3,$4,$5,'running','unknown','provisioning',$6,$7,$8,$9,$10,$11,$12)")
+    sqlx::query("INSERT INTO tenants(id,domain,aliases,title,runtime_id,desired_state,observed_state,lifecycle_state,contact_email,registrations_open,approval_required,vapid_private_key,vapid_public_key,customer_id,owner_username,owner_email) VALUES($1,$2,$3,$4,$5,'running','unknown','provisioning',$6,$7,$8,$9,$10,$11,$12,$13)")
         .bind(tenant_id).bind(&domain).bind(&aliases).bind(&body.title).bind(body.runtime_id)
         .bind(&body.contact_email).bind(body.registrations_open).bind(body.approval_required)
-        .bind(vapid_private).bind(vapid_public).bind(customer_id).bind(&owner_username).execute(&mut *tx).await
+        .bind(vapid_private).bind(vapid_public).bind(customer_id).bind(&owner_username).bind(owner_email).execute(&mut *tx).await
         .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenants_domain_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
     sqlx::query(r#"INSERT INTO tenant_configuration(
         tenant_id,database_url,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,
@@ -3074,7 +3077,7 @@ async fn custom_domain_validated(db: &PgPool, tenant_id: Uuid) -> Result<bool> {
 /// customer area issues one on request, so no copy is ever kept.
 async fn create_tenant_owner(state: &Shared, tenant_id: Uuid) -> Result<()> {
     let (username, email, database_url) = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT t.owner_username,c.email,tc.database_url FROM tenants t JOIN customers c ON c.id=t.customer_id JOIN tenant_configuration tc ON tc.tenant_id=t.id WHERE t.id=$1 AND t.owner_username IS NOT NULL",
+        "SELECT t.owner_username,t.owner_email,tc.database_url FROM tenants t JOIN tenant_configuration tc ON tc.tenant_id=t.id WHERE t.id=$1 AND t.owner_username IS NOT NULL AND t.owner_email IS NOT NULL",
     )
     .bind(tenant_id)
     .fetch_one(&state.db)
@@ -3182,16 +3185,16 @@ async fn customer_reset_owner_password(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let (customer_id, email) = customer(&headers, &s.db).await?;
-    let owner = sqlx::query_as::<_, (Option<String>, bool, Uuid)>(
-        "SELECT t.owner_username,t.lifecycle_state='ready' AND EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded'),t.runtime_id FROM tenants t WHERE t.id=$1 AND t.customer_id=$2",
+    let (customer_id, _) = customer(&headers, &s.db).await?;
+    let owner = sqlx::query_as::<_, (Option<String>, Option<String>, bool, Uuid)>(
+        "SELECT t.owner_username,t.owner_email,t.lifecycle_state='ready' AND EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded'),t.runtime_id FROM tenants t WHERE t.id=$1 AND t.customer_id=$2",
     )
     .bind(id)
     .bind(customer_id)
     .fetch_optional(&s.db)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Instance not found".into()))?;
-    let (Some(username), true, runtime_id) = owner else {
+    let (Some(username), Some(email), true, runtime_id) = owner else {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "The admin account is not ready yet.".into(),
