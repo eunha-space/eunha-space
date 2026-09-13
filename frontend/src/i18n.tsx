@@ -40,7 +40,8 @@ const ko: Record<string, string> = {
     "이 인스턴스에 추가된 커스텀 도메인이 없습니다.",
   Connected: "연결됨",
   "Waiting for DNS": "DNS 설정 대기 중",
-  "Your custom domain is connected.": "커스텀 도메인이 연결되었습니다.",
+  "Your custom domain is connected. Keep this CNAME record at your DNS provider; without it, your instance can't be reached at this domain.":
+    "커스텀 도메인이 연결되었습니다. DNS 설정에서 이 CNAME 레코드를 유지하세요. 레코드가 없으면 이 도메인으로 인스턴스에 접속할 수 없습니다.",
   "Add this CNAME record at your DNS provider.":
     "도메인의 DNS 설정에 다음 CNAME 레코드를 추가하세요.",
   "If requested, also add this verification record.":

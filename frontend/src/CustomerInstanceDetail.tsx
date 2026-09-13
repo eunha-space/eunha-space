@@ -580,9 +580,18 @@ function CustomDomainSetup(
               </Badge>
             </div>
             {domain.status === "active" && (
-              <p className="text-muted-foreground text-sm">
-                {t("Your custom domain is connected.")}
-              </p>
+              <>
+                <p className="text-muted-foreground text-sm">
+                  {t(
+                    "Your custom domain is connected. Keep this CNAME record at your DNS provider; without it, your instance can't be reached at this domain.",
+                  )}
+                </p>
+                <DnsRecord
+                  type="CNAME"
+                  name={domain.hostname}
+                  value={domain.cname_target}
+                />
+              </>
             )}
             {domain.status === "removing" && (
               <p className="text-muted-foreground text-sm">
