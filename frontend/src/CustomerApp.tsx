@@ -13,6 +13,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Mark, ThemeToggle } from "@/components/console/brand";
+import { Spinner } from "@/components/console/status";
 import { useLingui } from "@lingui/react";
 import { LanguageToggle } from "@/i18n";
 
@@ -27,6 +28,7 @@ export function CustomerApp() {
   const t = (message: string, values?: Record<string, string | number>) =>
     i18n._(message, values);
   const [customer, setCustomer] = useState<Customer | null>(null);
+  const [sessionLoaded, setSessionLoaded] = useState(false);
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [signup, setSignup] = useState(false);
   const [sent, setSent] = useState(false);
@@ -43,8 +45,9 @@ export function CustomerApp() {
   const [busy, setBusy] = useState(false);
   async function load() {
     const me = await api<Customer>("/customer/session/me");
+    const nextTenants = await api<Tenant[]>("/customer/tenants");
     setCustomer(me);
-    setTenants(await api<Tenant[]>("/customer/tenants"));
+    setTenants(nextTenants);
   }
   useEffect(() => {
     const token = new URLSearchParams(location.search).get("token");
@@ -53,7 +56,7 @@ export function CustomerApp() {
         .then(() => location.replace(`${location.origin}/?verified=1`))
         .catch((e) => setError(errorMessage(e)));
     }
-    load().catch(() => {});
+    load().catch(() => {}).finally(() => setSessionLoaded(true));
   }, []);
   async function authenticate(event: React.FormEvent) {
     event.preventDefault();
@@ -137,6 +140,16 @@ export function CustomerApp() {
     } finally {
       setBusy(false);
     }
+  }
+  if (!sessionLoaded) {
+    return (
+      <main className="grid min-h-screen place-items-center p-4">
+        <div className="grid justify-items-center gap-4">
+          <Mark />
+          <Spinner label={t("Loading…")} />
+        </div>
+      </main>
+    );
   }
   if (!customer) {
     return (

@@ -19,6 +19,7 @@ const ko: Record<string, string> = {
   "Create account": "계정 만들기",
   "Sign in": "로그인",
   "Please wait…": "잠시만 기다려 주세요…",
+  "Loading…": "불러오는 중…",
   "Email me a sign-in link": "이메일로 로그인 링크 받기",
   "Already have an account? Sign in": "이미 계정이 있나요? 로그인",
   "New here? Create an account": "처음이신가요? 계정 만들기",
