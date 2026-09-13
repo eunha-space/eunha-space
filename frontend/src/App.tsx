@@ -30,6 +30,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Mark, ThemeToggle } from "@/components/console/brand";
 import { Spinner } from "@/components/console/status";
 import { cn } from "cn";
+import { useLingui } from "@lingui/react";
+import { LanguageToggle } from "@/i18n";
 
 type Session =
   | { state: "loading" }
@@ -40,6 +42,8 @@ type Session =
 const POLL_INTERVAL = 3000;
 
 export function App() {
+  const { i18n } = useLingui();
+  const t = (message: string) => i18n._(message);
   const [session, setSession] = useState<Session>({ state: "loading" });
   const [view, navigate] = useRoute();
   const [tenants, setTenants] = useState<Tenant[]>([]);
@@ -176,10 +180,10 @@ export function App() {
   }
 
   const sections: { id: View; label: string; icon: typeof Server }[] = [
-    { id: "tenants", label: "Tenants", icon: Server },
-    { id: "instances", label: "Instances", icon: HardDrive },
-    { id: "releases", label: "Releases", icon: Rocket },
-    { id: "operations", label: "Operations", icon: Activity },
+    { id: "tenants", label: t("Tenants"), icon: Server },
+    { id: "instances", label: t("Instances"), icon: HardDrive },
+    { id: "releases", label: t("Releases"), icon: Rocket },
+    { id: "operations", label: t("Operations"), icon: Activity },
   ];
   const heading = sections.find((section) => section.id === view)?.label ??
     "Tenants";
@@ -236,13 +240,14 @@ export function App() {
               {session.username}
             </span>
             <div className="flex items-center gap-1">
+              <LanguageToggle />
               <ThemeToggle />
               <Button
                 variant="outline"
                 size="icon"
                 onClick={() => void signOut()}
-                aria-label="Sign out"
-                title="Sign out"
+                aria-label={t("Sign out")}
+                title={t("Sign out")}
               >
                 <LogOut />
               </Button>
@@ -278,8 +283,8 @@ export function App() {
                 size="icon"
                 onClick={() => void load({ manual: true })}
                 disabled={refreshing}
-                aria-label="Refresh now"
-                title="Refresh now"
+                aria-label={t("Refresh now")}
+                title={t("Refresh now")}
               >
                 <RefreshCw
                   className={refreshing ? "animate-spin" : undefined}

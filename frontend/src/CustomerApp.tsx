@@ -13,6 +13,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Mark, ThemeToggle } from "@/components/console/brand";
+import { useLingui } from "@lingui/react";
+import { LanguageToggle } from "@/i18n";
 
 type Customer = {
   email: string;
@@ -21,6 +23,9 @@ type Customer = {
 };
 
 export function CustomerApp() {
+  const { i18n } = useLingui();
+  const t = (message: string, values?: Record<string, string | number>) =>
+    i18n._(message, values);
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [signup, setSignup] = useState(false);
@@ -93,7 +98,7 @@ export function CustomerApp() {
     event.preventDefault();
     setError("");
     if (newPassword.length < 14) {
-      setError("Use a password with at least 14 characters.");
+      setError(t("Use a password with at least 14 characters."));
       return;
     }
     setBusy(true);
@@ -137,20 +142,23 @@ export function CustomerApp() {
     return (
       <main className="grid min-h-screen place-items-center p-4">
         <div className="fixed top-5 right-5">
-          <ThemeToggle />
+          <div className="flex gap-2">
+            <LanguageToggle />
+            <ThemeToggle />
+          </div>
         </div>
         <Card className="w-full max-w-md">
           <CardHeader>
             <Mark className="mb-4" />
             <CardTitle>
-              {signup ? "Create your account" : "Your Eunha instances"}
+              {t(signup ? "Create your account" : "Your eunha space instances")}
             </CardTitle>
             <CardDescription>
               {sent
-                ? "Check your inbox and follow the verification link."
+                ? t("Check your inbox and follow the verification link.")
                 : signup
-                ? "Verify your email before creating up to two instances."
-                : "Sign in to create and manage your instances."}
+                ? t("Verify your email before creating up to two instances.")
+                : t("Sign in to create and manage your instances.")}
             </CardDescription>
           </CardHeader>
           {!sent && (
@@ -158,13 +166,13 @@ export function CustomerApp() {
               {verified && (
                 <Alert className="mb-4">
                   <AlertDescription>
-                    Email verified. Sign in to continue.
+                    {t("Email verified. Sign in to continue.")}
                   </AlertDescription>
                 </Alert>
               )}
               <form onSubmit={authenticate} className="grid gap-4">
                 <div className="grid gap-2">
-                  <Label htmlFor="email">Email</Label>
+                  <Label htmlFor="email">{t("Email")}</Label>
                   <Input
                     id="email"
                     type="email"
@@ -176,7 +184,7 @@ export function CustomerApp() {
                 </div>
                 {!signup && (
                   <div className="grid gap-2">
-                    <Label htmlFor="password">Password</Label>
+                    <Label htmlFor="password">{t("Password")}</Label>
                     <Input
                       id="password"
                       type="password"
@@ -195,10 +203,10 @@ export function CustomerApp() {
                 )}
                 <Button type="submit" disabled={busy}>
                   {busy
-                    ? "Please wait…"
+                    ? t("Please wait…")
                     : signup
-                    ? "Create account"
-                    : "Sign in"}
+                    ? t("Create account")
+                    : t("Sign in")}
                 </Button>
                 {!signup && (
                   <Button
@@ -207,7 +215,7 @@ export function CustomerApp() {
                     disabled={busy || !email}
                     onClick={emailSignIn}
                   >
-                    Email me a sign-in link
+                    {t("Email me a sign-in link")}
                   </Button>
                 )}
                 <Button
@@ -216,8 +224,8 @@ export function CustomerApp() {
                   onClick={() => setSignup(!signup)}
                 >
                   {signup
-                    ? "Already have an account? Sign in"
-                    : "New here? Create an account"}
+                    ? t("Already have an account? Sign in")
+                    : t("New here? Create an account")}
                 </Button>
               </form>
             </CardContent>
@@ -237,6 +245,7 @@ export function CustomerApp() {
           </div>
         </div>
         <div className="flex gap-2">
+          <LanguageToggle />
           <ThemeToggle />
           <Button
             variant="outline"
@@ -260,10 +269,11 @@ export function CustomerApp() {
       {!customer.has_password && (
         <Card className="mb-6 border-primary/40">
           <CardHeader>
-            <CardTitle>Set your password</CardTitle>
+            <CardTitle>{t("Set your password")}</CardTitle>
             <CardDescription>
-              Your email is verified. Add a password of at least 14 characters
-              for password sign-in.
+              {t(
+                "Your email is verified. Add a password of at least 14 characters for password sign-in.",
+              )}
             </CardDescription>
           </CardHeader>
           <CardContent>
@@ -275,7 +285,7 @@ export function CustomerApp() {
                 onChange={(e) => setNewPassword(e.target.value)}
                 required
               />
-              <Button type="submit" disabled={busy}>Set password</Button>
+              <Button type="submit" disabled={busy}>{t("Set password")}</Button>
             </form>
           </CardContent>
         </Card>
@@ -284,16 +294,18 @@ export function CustomerApp() {
         <div className="grid gap-6 md:grid-cols-2">
           <Card>
             <CardHeader>
-              <CardTitle>Create an instance</CardTitle>
+              <CardTitle>{t("Create an instance")}</CardTitle>
               <CardDescription>
-                {tenants.length} of {customer.instance_limit}{" "}
-                used. Runtime placement is automatic.
+                {t("{used} of {limit} used. Runtime placement is automatic.", {
+                  used: tenants.length,
+                  limit: customer.instance_limit,
+                })}
               </CardDescription>
             </CardHeader>
             <CardContent>
               <form onSubmit={create} className="grid gap-4">
                 <div className="grid gap-2">
-                  <Label htmlFor="subdomain">Eunha hostname</Label>
+                  <Label htmlFor="subdomain">{t("Eunha hostname")}</Label>
                   <Input
                     id="subdomain"
                     placeholder="community"
@@ -307,7 +319,7 @@ export function CustomerApp() {
                   </span>
                 </div>
                 <div className="grid gap-2">
-                  <Label htmlFor="title">Name</Label>
+                  <Label htmlFor="title">{t("Name")}</Label>
                   <Input
                     id="title"
                     value={title}
@@ -316,7 +328,9 @@ export function CustomerApp() {
                   />
                 </div>
                 <div className="grid gap-2">
-                  <Label htmlFor="domain">Custom domain (optional)</Label>
+                  <Label htmlFor="domain">
+                    {t("Custom domain (optional)")}
+                  </Label>
                   <Input
                     id="domain"
                     placeholder="social.example.com"
@@ -325,30 +339,30 @@ export function CustomerApp() {
                       setCustomDomain(e.target.value.toLowerCase())}
                   />
                   <span className="text-muted-foreground text-xs">
-                    Point it to customers.eunha.space after creation.
+                    {t("Point it to customers.eunha.space after creation.")}
                   </span>
                 </div>
                 <Button
                   type="submit"
                   disabled={busy || tenants.length >= customer.instance_limit}
                 >
-                  {busy ? "Creating…" : "Create instance"}
+                  {busy ? t("Creating…") : t("Create instance")}
                 </Button>
               </form>
             </CardContent>
           </Card>
           <Card>
             <CardHeader>
-              <CardTitle>Your instances</CardTitle>
+              <CardTitle>{t("Your instances")}</CardTitle>
               <CardDescription>
-                Provisioning continues safely in the background.
+                {t("Provisioning continues safely in the background.")}
               </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3">
               {tenants.length === 0
                 ? (
                   <p className="text-muted-foreground text-sm">
-                    No instances yet.
+                    {t("No instances yet.")}
                   </p>
                 )
                 : tenants.map((t) => (
