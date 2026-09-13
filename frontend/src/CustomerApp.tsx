@@ -14,7 +14,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Mark, ThemeToggle } from "@/components/console/brand";
 
-type Customer = { email: string; instance_limit: number };
+type Customer = {
+  email: string;
+  instance_limit: number;
+  has_password: boolean;
+};
 
 export function CustomerApp() {
   const [customer, setCustomer] = useState<Customer | null>(null);
@@ -26,6 +30,7 @@ export function CustomerApp() {
   );
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const [subdomain, setSubdomain] = useState("");
   const [title, setTitle] = useState("");
   const [customDomain, setCustomDomain] = useState("");
@@ -48,16 +53,12 @@ export function CustomerApp() {
   async function authenticate(event: React.FormEvent) {
     event.preventDefault();
     setError("");
-    if (signup && password.length < 14) {
-      setError("Use a password with at least 14 characters.");
-      return;
-    }
     setBusy(true);
     try {
       if (signup) {
         await api("/customer/register", {
           method: "POST",
-          body: JSON.stringify({ email, password }),
+          body: JSON.stringify({ email }),
         });
         setSent(true);
       } else {
@@ -67,6 +68,42 @@ export function CustomerApp() {
         });
         await load();
       }
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function emailSignIn() {
+    setBusy(true);
+    setError("");
+    try {
+      await api("/customer/session", {
+        method: "POST",
+        body: JSON.stringify({ email }),
+      });
+      setSent(true);
+    } catch (e) {
+      setError(errorMessage(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function setCustomerPassword(event: React.FormEvent) {
+    event.preventDefault();
+    setError("");
+    if (newPassword.length < 14) {
+      setError("Use a password with at least 14 characters.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await api("/customer/password", {
+        method: "POST",
+        body: JSON.stringify({ password: newPassword }),
+      });
+      setNewPassword("");
+      await load();
     } catch (e) {
       setError(errorMessage(e));
     } finally {
@@ -137,17 +174,19 @@ export function CustomerApp() {
                     required
                   />
                 </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="password">Password</Label>
-                  <Input
-                    id="password"
-                    type="password"
-                    autoComplete={signup ? "new-password" : "current-password"}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                  />
-                </div>
+                {!signup && (
+                  <div className="grid gap-2">
+                    <Label htmlFor="password">Password</Label>
+                    <Input
+                      id="password"
+                      type="password"
+                      autoComplete="current-password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                )}
                 {error && (
                   <Alert variant="destructive">
                     <CircleAlert />
@@ -161,6 +200,16 @@ export function CustomerApp() {
                     ? "Create account"
                     : "Sign in"}
                 </Button>
+                {!signup && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    disabled={busy || !email}
+                    onClick={emailSignIn}
+                  >
+                    Email me a sign-in link
+                  </Button>
+                )}
                 <Button
                   type="button"
                   variant="ghost"
@@ -208,87 +257,112 @@ export function CustomerApp() {
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
-      <div className="grid gap-6 md:grid-cols-2">
-        <Card>
+      {!customer.has_password && (
+        <Card className="mb-6 border-primary/40">
           <CardHeader>
-            <CardTitle>Create an instance</CardTitle>
+            <CardTitle>Set your password</CardTitle>
             <CardDescription>
-              {tenants.length} of {customer.instance_limit}{" "}
-              used. Runtime placement is automatic.
+              Your email is verified. Add a password of at least 14 characters
+              for password sign-in.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <form onSubmit={create} className="grid gap-4">
-              <div className="grid gap-2">
-                <Label htmlFor="subdomain">Eunha hostname</Label>
-                <Input
-                  id="subdomain"
-                  placeholder="community"
-                  pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
-                  value={subdomain}
-                  onChange={(e) => setSubdomain(e.target.value.toLowerCase())}
-                  required
-                />
-                <span className="text-muted-foreground text-xs">
-                  {subdomain || "community"}.eunha.space
-                </span>
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="title">Name</Label>
-                <Input
-                  id="title"
-                  value={title}
-                  onChange={(e) => setTitle(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="domain">Custom domain (optional)</Label>
-                <Input
-                  id="domain"
-                  placeholder="social.example.com"
-                  value={customDomain}
-                  onChange={(e) =>
-                    setCustomDomain(e.target.value.toLowerCase())}
-                />
-                <span className="text-muted-foreground text-xs">
-                  Point it to customers.eunha.space after creation.
-                </span>
-              </div>
-              <Button
-                type="submit"
-                disabled={busy || tenants.length >= customer.instance_limit}
-              >
-                {busy ? "Creating…" : "Create instance"}
-              </Button>
+            <form onSubmit={setCustomerPassword} className="flex gap-2">
+              <Input
+                type="password"
+                autoComplete="new-password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                required
+              />
+              <Button type="submit" disabled={busy}>Set password</Button>
             </form>
           </CardContent>
         </Card>
-        <Card>
-          <CardHeader>
-            <CardTitle>Your instances</CardTitle>
-            <CardDescription>
-              Provisioning continues safely in the background.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="grid gap-3">
-            {tenants.length === 0
-              ? (
-                <p className="text-muted-foreground text-sm">
-                  No instances yet.
-                </p>
-              )
-              : tenants.map((t) => (
-                <div key={t.id} className="bg-muted/50 rounded-md p-3">
-                  <strong>{t.title}</strong>
-                  <p className="text-muted-foreground text-sm">
-                    {t.domain} · {t.lifecycle_state}
-                  </p>
+      )}
+      {customer.has_password && (
+        <div className="grid gap-6 md:grid-cols-2">
+          <Card>
+            <CardHeader>
+              <CardTitle>Create an instance</CardTitle>
+              <CardDescription>
+                {tenants.length} of {customer.instance_limit}{" "}
+                used. Runtime placement is automatic.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={create} className="grid gap-4">
+                <div className="grid gap-2">
+                  <Label htmlFor="subdomain">Eunha hostname</Label>
+                  <Input
+                    id="subdomain"
+                    placeholder="community"
+                    pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+                    value={subdomain}
+                    onChange={(e) => setSubdomain(e.target.value.toLowerCase())}
+                    required
+                  />
+                  <span className="text-muted-foreground text-xs">
+                    {subdomain || "community"}.eunha.space
+                  </span>
                 </div>
-              ))}
-          </CardContent>
-        </Card>
-      </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="title">Name</Label>
+                  <Input
+                    id="title"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    required
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="domain">Custom domain (optional)</Label>
+                  <Input
+                    id="domain"
+                    placeholder="social.example.com"
+                    value={customDomain}
+                    onChange={(e) =>
+                      setCustomDomain(e.target.value.toLowerCase())}
+                  />
+                  <span className="text-muted-foreground text-xs">
+                    Point it to customers.eunha.space after creation.
+                  </span>
+                </div>
+                <Button
+                  type="submit"
+                  disabled={busy || tenants.length >= customer.instance_limit}
+                >
+                  {busy ? "Creating…" : "Create instance"}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader>
+              <CardTitle>Your instances</CardTitle>
+              <CardDescription>
+                Provisioning continues safely in the background.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="grid gap-3">
+              {tenants.length === 0
+                ? (
+                  <p className="text-muted-foreground text-sm">
+                    No instances yet.
+                  </p>
+                )
+                : tenants.map((t) => (
+                  <div key={t.id} className="bg-muted/50 rounded-md p-3">
+                    <strong>{t.title}</strong>
+                    <p className="text-muted-foreground text-sm">
+                      {t.domain} · {t.lifecycle_state}
+                    </p>
+                  </div>
+                ))}
+            </CardContent>
+          </Card>
+        </div>
+      )}
     </main>
   );
 }

@@ -42,6 +42,9 @@ EUNHA_SPACE_PUBLIC_URL=https://eunha.space
 
 Customers may attach one custom hostname while creating an instance. Runtime
 placement is automatic and favors the least-loaded eligible runtime.
+Signup requires only an email address. The verification link signs the customer
+in and requires password setup; later sessions can use either that password or
+a fresh email sign-in link.
 
 `EUNHA_PROVIDED_DOMAIN_SUFFIXES` is a comma-separated, primary-first list of
 platform domains (default `eunha.space`). Provisioning `garden` with

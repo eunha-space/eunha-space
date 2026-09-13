@@ -151,6 +151,11 @@ struct Login {
 #[derive(Deserialize)]
 struct CustomerCredentials {
     email: String,
+    password: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct NewCustomerPassword {
     password: String,
 }
 #[derive(Deserialize)]
@@ -603,6 +608,7 @@ async fn main() -> Result<()> {
             post(customer_login).delete(customer_logout),
         )
         .route("/customer/session/me", get(customer_me))
+        .route("/customer/password", post(customer_set_password))
         .route(
             "/customer/tenants",
             get(customer_tenants).post(customer_create_tenant),
@@ -769,33 +775,16 @@ async fn customer_register(
     Json(mut body): Json<CustomerCredentials>,
 ) -> Result<StatusCode, ApiError> {
     body.email = body.email.trim().to_ascii_lowercase();
-    if !body.email.contains('@') || body.email.len() > 254 || body.password.len() < 14 {
+    if !body.email.contains('@') || body.email.len() > 254 {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
-            "Enter a valid email and a password of at least 14 characters.".into(),
+            "Enter a valid email address.".into(),
         ));
     }
-    let mail = s.customer_email.as_ref().ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Customer email verification is not configured.".into(),
-        )
-    })?;
-    let salt = SaltString::generate(&mut OsRng);
-    let password_hash = Argon2::default()
-        .hash_password(body.password.as_bytes(), &salt)
-        .map_err(|_| {
-            ApiError(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not secure the account.".into(),
-            )
-        })?
-        .to_string();
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO customers(id,email,password_hash) VALUES($1,$2,$3)")
+    sqlx::query("INSERT INTO customers(id,email,password_hash) VALUES($1,$2,NULL)")
         .bind(id)
         .bind(&body.email)
-        .bind(password_hash)
         .execute(&s.db)
         .await
         .map_err(|error| {
@@ -809,46 +798,74 @@ async fn customer_register(
                 ApiError::from(error)
             }
         })?;
-    let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    sqlx::query("INSERT INTO customer_email_verifications(token_hash,customer_id,expires_at) VALUES($1,$2,now()+interval '30 minutes')").bind(token_hash(&token)).bind(id).execute(&s.db).await?;
-    let verify_url = format!(
-        "{}/verify?token={}",
-        mail.public_url.trim_end_matches('/'),
-        token
-    );
-    let response = s.client.post("https://api.resend.com/emails").bearer_auth(&mail.api_key).json(&serde_json::json!({"from":mail.from,"to":[body.email],"subject":"Verify your eunha.space email","text":format!("Verify your email to create your Eunha instance:\n\n{verify_url}\n\nThis link expires in 30 minutes.")})).send().await;
-    if !matches!(response, Ok(response) if response.status().is_success()) {
+    if let Err(error) =
+        send_customer_link(&s, id, &body.email, "Verify your eunha.space email").await
+    {
         sqlx::query("DELETE FROM customers WHERE id=$1")
             .bind(id)
             .execute(&s.db)
             .await?;
-        return Err(ApiError(
-            StatusCode::BAD_GATEWAY,
-            "Could not send the verification email.".into(),
-        ));
+        return Err(error);
     }
     Ok(StatusCode::ACCEPTED)
+}
+
+async fn send_customer_link(
+    s: &Shared,
+    customer_id: Uuid,
+    email: &str,
+    subject: &str,
+) -> Result<(), ApiError> {
+    let mail = s.customer_email.as_ref().ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Customer email verification is not configured.".into(),
+        )
+    })?;
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    sqlx::query("DELETE FROM customer_email_verifications WHERE customer_id=$1")
+        .bind(customer_id)
+        .execute(&s.db)
+        .await?;
+    sqlx::query("INSERT INTO customer_email_verifications(token_hash,customer_id,expires_at) VALUES($1,$2,now()+interval '30 minutes')").bind(token_hash(&token)).bind(customer_id).execute(&s.db).await?;
+    let url = format!(
+        "{}/verify?token={}",
+        mail.public_url.trim_end_matches('/'),
+        token
+    );
+    let response=s.client.post("https://api.resend.com/emails").bearer_auth(&mail.api_key).json(&serde_json::json!({"from":mail.from,"to":[email],"subject":subject,"text":format!("Use this secure link to continue to eunha.space:\n\n{url}\n\nThis link expires in 30 minutes.")})).send().await;
+    if matches!(response,Ok(response) if response.status().is_success()) {
+        Ok(())
+    } else {
+        Err(ApiError(
+            StatusCode::BAD_GATEWAY,
+            "Could not send the email link.".into(),
+        ))
+    }
 }
 
 async fn customer_verify(
     State(s): State<Shared>,
     Query(query): Query<VerificationQuery>,
-) -> Result<StatusCode, ApiError> {
-    let changed = sqlx::query("UPDATE customers c SET email_verified_at=COALESCE(email_verified_at,now()) FROM customer_email_verifications v WHERE v.customer_id=c.id AND v.token_hash=$1 AND v.expires_at>now()")
-        .bind(token_hash(&query.token)).execute(&s.db).await?.rows_affected();
-    if changed == 0 {
+) -> Result<Response, ApiError> {
+    let customer_id=sqlx::query_scalar::<_,Uuid>("UPDATE customers c SET email_verified_at=COALESCE(email_verified_at,now()) FROM customer_email_verifications v WHERE v.customer_id=c.id AND v.token_hash=$1 AND v.expires_at>now() RETURNING c.id").bind(token_hash(&query.token)).fetch_optional(&s.db).await?;
+    let Some(customer_id) = customer_id else {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "That verification link is invalid or expired.".into(),
         ));
-    }
+    };
     sqlx::query("DELETE FROM customer_email_verifications WHERE token_hash=$1")
         .bind(token_hash(&query.token))
         .execute(&s.db)
         .await?;
-    Ok(StatusCode::NO_CONTENT)
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    sqlx::query("INSERT INTO customer_sessions(token_hash,customer_id,expires_at) VALUES($1,$2,now()+interval '30 days')").bind(token_hash(&token)).bind(customer_id).execute(&s.db).await?;
+    Ok(([(header::SET_COOKIE,format!("eunha_space_customer_session={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000"))],StatusCode::NO_CONTENT).into_response())
 }
 
 async fn customer_login(
@@ -856,7 +873,7 @@ async fn customer_login(
     Json(mut body): Json<CustomerCredentials>,
 ) -> Result<Response, ApiError> {
     body.email = body.email.trim().to_ascii_lowercase();
-    let row = sqlx::query_as::<_, (Uuid, String, bool)>(
+    let row = sqlx::query_as::<_, (Uuid, Option<String>, bool)>(
         "SELECT id,password_hash,email_verified_at IS NOT NULL FROM customers WHERE email=$1",
     )
     .bind(&body.email)
@@ -868,6 +885,16 @@ async fn customer_login(
             "Invalid credentials".into(),
         ));
     };
+    if body.password.is_none() {
+        send_customer_link(&s, id, &body.email, "Your eunha.space sign-in link").await?;
+        return Ok(StatusCode::ACCEPTED.into_response());
+    }
+    let hash = hash.ok_or_else(|| {
+        ApiError(
+            StatusCode::FORBIDDEN,
+            "Set a password after signing in with an email link.".into(),
+        )
+    })?;
     let parsed = PasswordHash::new(&hash).map_err(|_| {
         ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -875,7 +902,10 @@ async fn customer_login(
         )
     })?;
     if Argon2::default()
-        .verify_password(body.password.as_bytes(), &parsed)
+        .verify_password(
+            body.password.as_deref().unwrap_or_default().as_bytes(),
+            &parsed,
+        )
         .is_err()
     {
         return Err(ApiError(
@@ -894,6 +924,36 @@ async fn customer_login(
     let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
     sqlx::query("INSERT INTO customer_sessions(token_hash,customer_id,expires_at) VALUES($1,$2,now()+interval '30 days')").bind(token_hash(&token)).bind(id).execute(&s.db).await?;
     Ok(([(header::SET_COOKIE,format!("eunha_space_customer_session={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000"))],Json(serde_json::json!({"email":body.email}))).into_response())
+}
+
+async fn customer_set_password(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<NewCustomerPassword>,
+) -> Result<StatusCode, ApiError> {
+    let (id, _) = customer(&headers, &s.db).await?;
+    if body.password.len() < 14 {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Use a password with at least 14 characters.".into(),
+        ));
+    }
+    let salt = SaltString::generate(&mut OsRng);
+    let hash = Argon2::default()
+        .hash_password(body.password.as_bytes(), &salt)
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not secure the password.".into(),
+            )
+        })?
+        .to_string();
+    sqlx::query("UPDATE customers SET password_hash=$1 WHERE id=$2")
+        .bind(hash)
+        .bind(id)
+        .execute(&s.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn customer_logout(
@@ -919,8 +979,16 @@ async fn customer_me(
     State(s): State<Shared>,
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (_, email) = customer(&headers, &s.db).await?;
-    Ok(Json(serde_json::json!({"email":email,"instance_limit":2})))
+    let (id, email) = customer(&headers, &s.db).await?;
+    let has_password = sqlx::query_scalar::<_, bool>(
+        "SELECT password_hash IS NOT NULL FROM customers WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&s.db)
+    .await?;
+    Ok(Json(
+        serde_json::json!({"email":email,"instance_limit":2,"has_password":has_password}),
+    ))
 }
 async fn customer_tenants(
     State(s): State<Shared>,
@@ -982,6 +1050,18 @@ async fn customer_create_tenant(
     Json(body): Json<CustomerTenantRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let (customer_id, email) = customer(&headers, &s.db).await?;
+    let has_password = sqlx::query_scalar::<_, bool>(
+        "SELECT password_hash IS NOT NULL FROM customers WHERE id=$1",
+    )
+    .bind(customer_id)
+    .fetch_one(&s.db)
+    .await?;
+    if !has_password {
+        return Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "Set a password before creating an instance.".into(),
+        ));
+    }
     let runtime_id=sqlx::query_scalar::<_,Uuid>("SELECT r.id FROM runtimes r WHERE EXISTS(SELECT 1 FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.runtime_id=r.id AND t.lifecycle_state='ready') ORDER BY (SELECT count(*) FROM tenants t WHERE t.runtime_id=r.id AND t.lifecycle_state <> 'purged'),r.created_at LIMIT 1").fetch_optional(&s.db).await?.ok_or_else(||ApiError(StatusCode::SERVICE_UNAVAILABLE,"No runtime is currently available.".into()))?;
     create_tenant_inner(
         &s,
