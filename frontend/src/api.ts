@@ -64,6 +64,11 @@ export type CustomerDomainSetup = {
   ownership_name: string | null;
   ownership_value: string | null;
   ssl_status: string | null;
+  /** Why the last check did not connect it. */
+  check_problem: "dns" | "retrying" | null;
+  checked_at: string | null;
+  /** When setup stops waiting for this domain and continues without it. */
+  setup_deadline: string | null;
 };
 
 export type CustomerProvisioningStep = {
@@ -97,6 +102,8 @@ export type CustomerTenantDetail = {
     owner_ready: boolean;
     /** When the customer area last issued a password for the Owner. */
     owner_password_issued_at: string | null;
+    /** A custom domain chosen at creation that never connected. */
+    abandoned_custom_domain: string | null;
   };
   domains: CustomerDomainSetup[];
   provisioning_steps: CustomerProvisioningStep[];

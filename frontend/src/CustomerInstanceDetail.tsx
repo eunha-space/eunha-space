@@ -12,6 +12,7 @@ import {
 import { useLingui } from "@lingui/react";
 import {
   api,
+  type CustomerDomainSetup,
   type CustomerProvisioningStep,
   type CustomerTenantDetail,
   errorMessage,
@@ -148,70 +149,11 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
                 )}
               />
             )}
-            <Card>
-              <CardHeader>
-                <CardTitle>{t("Custom domain setup")}</CardTitle>
-                <CardDescription>
-                  {t("Connect a domain you own to this instance.")}
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="grid gap-5">
-                {customDomains.length === 0
-                  ? (
-                    <p className="text-muted-foreground text-sm">
-                      {t("No custom domain was added for this instance.")}
-                    </p>
-                  )
-                  : customDomains.map((domain) => (
-                    <section key={domain.hostname} className="grid gap-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <strong>{domain.hostname}</strong>
-                        <Badge
-                          variant={domain.status === "active"
-                            ? "secondary"
-                            : "outline"}
-                        >
-                          {domain.status === "active"
-                            ? t("Connected")
-                            : t("Waiting for DNS")}
-                        </Badge>
-                      </div>
-                      {domain.status === "active"
-                        ? (
-                          <p className="text-muted-foreground text-sm">
-                            {t("Your custom domain is connected.")}
-                          </p>
-                        )
-                        : (
-                          <>
-                            <p className="text-muted-foreground text-sm">
-                              {t("Add this CNAME record at your DNS provider.")}
-                            </p>
-                            <DnsRecord
-                              type="CNAME"
-                              name={domain.hostname}
-                              value={domain.cname_target}
-                            />
-                            {domain.ownership_name && domain.ownership_value && (
-                              <>
-                                <p className="text-muted-foreground text-sm">
-                                  {t(
-                                    "If requested, also add this verification record.",
-                                  )}
-                                </p>
-                                <DnsRecord
-                                  type="TXT"
-                                  name={domain.ownership_name}
-                                  value={domain.ownership_value}
-                                />
-                              </>
-                            )}
-                          </>
-                        )}
-                    </section>
-                  ))}
-              </CardContent>
-            </Card>
+            <CustomDomainSetup
+              tenant={detail.tenant}
+              domains={customDomains}
+              onChanged={() => setRevision((value) => value + 1)}
+            />
 
             <Card>
               <CardHeader>
@@ -572,6 +514,158 @@ function DeleteInstance(
                   )}
               >
                 {confirming === "now" ? t("Delete now") : t("Delete instance")}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </CardContent>
+    </Card>
+  );
+}
+
+function CustomDomainSetup(
+  { tenant, domains, onChanged }: {
+    tenant: CustomerTenantDetail["tenant"];
+    domains: CustomerDomainSetup[];
+    onChanged: () => void;
+  },
+) {
+  const { i18n } = useLingui();
+  const t = (message: string) => i18n._(message);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function skip() {
+    setConfirming(false);
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/customer/tenants/${tenant.id}/custom-domain/skip`, {
+        method: "POST",
+      });
+      onChanged();
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t("Custom domain setup")}</CardTitle>
+        <CardDescription>
+          {t("Custom domains can only be added when creating an instance.")}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-5">
+        {domains.length === 0 && (
+          <p className="text-muted-foreground text-sm">
+            {tenant.abandoned_custom_domain
+              ? `${tenant.abandoned_custom_domain} · ${
+                t("This domain wasn't connected, so this instance uses its eunha space address.")
+              }`
+              : t("No custom domain was added for this instance.")}
+          </p>
+        )}
+        {domains.map((domain) => (
+          <section key={domain.hostname} className="grid gap-3">
+            <div className="flex items-center justify-between gap-3">
+              <strong className="break-all">{domain.hostname}</strong>
+              <Badge variant={domain.status === "active" ? "secondary" : "outline"}>
+                {domain.status === "active"
+                  ? t("Connected")
+                  : domain.status === "removing"
+                  ? t("Removing")
+                  : t("Waiting for DNS")}
+              </Badge>
+            </div>
+            {domain.status === "active" && (
+              <p className="text-muted-foreground text-sm">
+                {t("Your custom domain is connected.")}
+              </p>
+            )}
+            {domain.status === "removing" && (
+              <p className="text-muted-foreground text-sm">
+                {t("Setup is continuing without this domain.")}
+              </p>
+            )}
+            {domain.status === "pending" && (
+              <>
+                <p className="text-muted-foreground text-sm">
+                  {t("Add this CNAME record at your DNS provider.")}
+                </p>
+                <DnsRecord
+                  type="CNAME"
+                  name={domain.hostname}
+                  value={domain.cname_target}
+                />
+                {domain.ownership_name && domain.ownership_value && (
+                  <>
+                    <p className="text-muted-foreground text-sm">
+                      {t("If requested, also add this verification record.")}
+                    </p>
+                    <DnsRecord
+                      type="TXT"
+                      name={domain.ownership_name}
+                      value={domain.ownership_value}
+                    />
+                  </>
+                )}
+                {domain.check_problem && (
+                  <p className="text-pending text-sm">
+                    {domain.check_problem === "dns"
+                      ? t("Its DNS doesn't point to customers.eunha.space yet. We'll keep checking.")
+                      : t("We couldn't finish checking this domain yet. We'll keep trying.")}
+                  </p>
+                )}
+                {domain.setup_deadline && (
+                  <div className="grid gap-1">
+                    <span className="text-muted-foreground text-xs">
+                      {t("Setup waits for this domain until")}
+                    </span>
+                    <span className="text-sm font-medium">
+                      {absoluteTime(domain.setup_deadline)}
+                    </span>
+                  </div>
+                )}
+                {domain.setup_deadline && tenant.lifecycle_state === "provisioning" && (
+                  <div>
+                    <Button
+                      variant="outline"
+                      disabled={busy}
+                      onClick={() => setConfirming(true)}
+                    >
+                      {t("Continue without custom domain")}
+                    </Button>
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        ))}
+        {error && (
+          <Alert variant="destructive">
+            <CircleAlert />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+        <AlertDialog open={confirming} onOpenChange={setConfirming}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>{t("Continue without your custom domain?")}</AlertDialogTitle>
+              <AlertDialogDescription>
+                {t(
+                  "Setup finishes on the instance's eunha space address, which becomes its permanent address. A custom domain can't be added later.",
+                )}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>{t("Cancel")}</AlertDialogCancel>
+              <AlertDialogAction onClick={() => void skip()}>
+                {t("Continue without custom domain")}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

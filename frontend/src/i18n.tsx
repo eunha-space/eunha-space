@@ -36,8 +36,6 @@ const ko: Record<string, string> = {
   Ready: "사용 가능",
   "Setting up": "설정 중",
   "Custom domain setup": "커스텀 도메인 설정",
-  "Connect a domain you own to this instance.":
-    "보유한 도메인을 이 인스턴스에 연결하세요.",
   "No custom domain was added for this instance.":
     "이 인스턴스에 추가된 커스텀 도메인이 없습니다.",
   Connected: "연결됨",
@@ -115,8 +113,27 @@ const ko: Record<string, string> = {
   "Eunha hostname": "호스트명",
   Name: "이름",
   "Custom domain (optional)": "커스텀 도메인 (선택)",
-  "Point it to customers.eunha.space after creation.":
-    "생성 후 customers.eunha.space를 가리키도록 설정하세요.",
+  "Before creating, add a CNAME record pointing it to customers.eunha.space. A custom domain can only be chosen now; it cannot be added or changed later.":
+    "생성하기 전에 customers.eunha.space를 가리키는 CNAME 레코드를 추가하세요. 커스텀 도메인은 지금만 선택할 수 있으며 나중에 추가하거나 변경할 수 없습니다.",
+  "We can't see that CNAME record yet. You can still create the instance; setup waits up to 24 hours for it.":
+    "아직 CNAME 레코드가 확인되지 않습니다. 인스턴스는 만들 수 있으며, 설정은 최대 24시간 동안 기다립니다.",
+  "The CNAME record is in place.": "CNAME 레코드가 확인되었습니다.",
+  "Custom domains can only be added when creating an instance.":
+    "커스텀 도메인은 인스턴스를 만들 때만 추가할 수 있습니다.",
+  "This domain wasn't connected, so this instance uses its eunha space address.":
+    "이 도메인이 연결되지 않아 인스턴스는 eunha space 주소를 사용합니다.",
+  Removing: "제거 중",
+  "Setup is continuing without this domain.":
+    "이 도메인 없이 설정을 계속하고 있습니다.",
+  "Setup waits for this domain until": "이 도메인을 기다리는 기한",
+  "Its DNS doesn't point to customers.eunha.space yet. We'll keep checking.":
+    "아직 DNS가 customers.eunha.space를 가리키지 않습니다. 계속 확인하겠습니다.",
+  "We couldn't finish checking this domain yet. We'll keep trying.":
+    "아직 이 도메인 확인을 마치지 못했습니다. 계속 시도하겠습니다.",
+  "Continue without custom domain": "커스텀 도메인 없이 계속",
+  "Continue without your custom domain?": "커스텀 도메인 없이 계속할까요?",
+  "Setup finishes on the instance's eunha space address, which becomes its permanent address. A custom domain can't be added later.":
+    "인스턴스는 eunha space 주소로 설정을 마치며, 이 주소가 영구 주소가 됩니다. 커스텀 도메인은 나중에 추가할 수 없습니다.",
   "Use a password with at least 14 characters.":
     "14자 이상의 비밀번호를 사용하세요.",
   "Control plane": "제어판",

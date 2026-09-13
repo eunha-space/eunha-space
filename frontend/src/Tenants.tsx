@@ -421,15 +421,8 @@ function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
 
 function DomainsDialog({ tenant, busy, act }: { tenant: Tenant; busy: string; act: Props["act"] }) {
   const [open, setOpen] = useState(false);
-  const [hostname, setHostname] = useState("");
   const [domains, setDomains] = useState<TenantDomain[]>([]);
   async function refresh() { setDomains(await api<TenantDomain[]>(`/tenants/${tenant.id}/domains`)); }
-  async function add(event: React.FormEvent) {
-    event.preventDefault();
-    if (await act(`/tenants/${tenant.id}/domains`, `domain-${tenant.id}`, { hostname })) {
-      setHostname(""); await refresh();
-    }
-  }
   async function adopt(domain: TenantDomain) {
     if (await act(`/tenants/${tenant.id}/domains/${domain.id}/cloudflare`, `adopt-domain-${domain.id}`)) {
       await refresh();
@@ -438,7 +431,7 @@ function DomainsDialog({ tenant, busy, act }: { tenant: Tenant; busy: string; ac
   return <Dialog open={open} onOpenChange={(next) => { setOpen(next); if (next) void refresh(); }}>
     <DialogTrigger render={<Button variant="outline" />}>Domains</DialogTrigger>
     <DialogContent>
-      <DialogHeader><DialogTitle>Domains for {tenant.domain}</DialogTitle><DialogDescription>Manage tenant routing and Cloudflare certificates. Adopting an existing primary domain does not change its ActivityPub identity.</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>Domains for {tenant.domain}</DialogTitle><DialogDescription>Tenant routing and Cloudflare certificates. Custom domains are chosen only when a customer creates an instance. Adopting an existing primary domain does not change its ActivityPub identity.</DialogDescription></DialogHeader>
       <div className="grid gap-3">{domains.map((domain) => <div key={domain.id} className="bg-muted/50 rounded-md p-3 text-sm">
         <div className="flex items-center justify-between gap-2"><div className="min-w-0"><span className="block truncate font-medium">{domain.hostname}</span><span className="text-muted-foreground text-xs">{domain.kind === "legacy" ? "Existing domain" : domain.kind === "provided" ? "Eunha hostname" : "Cloudflare for SaaS"}</span></div><div className="flex shrink-0 gap-1">{domain.is_primary && <Badge variant="outline">primary</Badge>}<Badge variant={domain.status === "active" ? "secondary" : "outline"}>{domain.status}</Badge>{domain.kind !== "legacy" && <Badge variant="secondary">managed</Badge>}</div></div>
         {domain.kind === "legacy" && domain.is_primary && <div className="mt-3 flex items-center justify-between gap-4 border-t pt-3"><p className="text-muted-foreground text-xs">Move TLS and routing to the shared Eunha tunnel without changing accounts or actor URLs.</p><ActionButton
@@ -455,7 +448,6 @@ function DomainsDialog({ tenant, busy, act }: { tenant: Tenant; busy: string; ac
         {domain.kind === "provided" && domain.status !== "active" && <div className="text-muted-foreground mt-2 font-mono text-xs">Cloudflare: {domain.cloudflare_status ?? "queued"} · TLS: {domain.ssl_status ?? "queued"}</div>}
         {domain.error && <p className="text-destructive mt-2">{domain.error}</p>}
       </div>)}</div>
-      <form onSubmit={add} className="grid gap-3"><Label htmlFor={`custom-domain-${tenant.id}`}>Attach custom domain</Label><div className="flex gap-2"><Input id={`custom-domain-${tenant.id}`} value={hostname} onChange={(e) => setHostname(e.target.value)} placeholder="social.example.com" required /><Button type="submit">Attach</Button></div></form>
     </DialogContent>
   </Dialog>;
 }

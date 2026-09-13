@@ -48,6 +48,9 @@ export function CustomerApp() {
   const [subdomain, setSubdomain] = useState("");
   const [title, setTitle] = useState("");
   const [customDomain, setCustomDomain] = useState("");
+  const [dnsCheck, setDnsCheck] = useState<
+    { hostname: string; points_to_target: boolean | null; target: string } | null
+  >(null);
   const [ownerUsername, setOwnerUsername] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -149,6 +152,19 @@ export function CustomerApp() {
       setError(errorMessage(e));
     } finally {
       setBusy(false);
+    }
+  }
+  async function checkDns() {
+    const hostname = customDomain.trim();
+    if (!hostname.includes(".")) return;
+    try {
+      const result = await api<
+        { points_to_target: boolean | null; target: string }
+      >(`/customer/dns-check?hostname=${encodeURIComponent(hostname)}`);
+      setDnsCheck({ hostname, ...result });
+    } catch {
+      // Only a hint; the domain is still validated when the instance is created.
+      setDnsCheck(null);
     }
   }
   async function signOut() {
@@ -367,12 +383,31 @@ export function CustomerApp() {
                     id="domain"
                     placeholder="social.example.com"
                     value={customDomain}
-                    onChange={(e) =>
-                      setCustomDomain(e.target.value.toLowerCase())}
+                    onChange={(e) => {
+                      setCustomDomain(e.target.value.toLowerCase());
+                      setDnsCheck(null);
+                    }}
+                    onBlur={() => void checkDns()}
                   />
                   <span className="text-muted-foreground text-xs">
-                    {t("Point it to customers.eunha.space after creation.")}
+                    {t(
+                      "Before creating, add a CNAME record pointing it to customers.eunha.space. A custom domain can only be chosen now; it cannot be added or changed later.",
+                    )}
                   </span>
+                  {dnsCheck?.hostname === customDomain &&
+                    dnsCheck.points_to_target === false && (
+                    <span className="text-pending text-xs">
+                      {t(
+                        "We can't see that CNAME record yet. You can still create the instance; setup waits up to 24 hours for it.",
+                      )}
+                    </span>
+                  )}
+                  {dnsCheck?.hostname === customDomain &&
+                    dnsCheck.points_to_target === true && (
+                    <span className="text-success text-xs">
+                      {t("The CNAME record is in place.")}
+                    </span>
+                  )}
                 </div>
                 <Button
                   type="submit"
