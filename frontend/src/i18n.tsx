@@ -32,7 +32,7 @@ const ko: Record<string, string> = {
   "Creating…": "생성 중…",
   "Your instances": "내 인스턴스",
   "No instances yet.": "아직 인스턴스가 없습니다.",
-  "Eunha hostname": "Eunha 호스트명",
+  "Eunha hostname": "호스트명",
   Name: "이름",
   "Custom domain (optional)": "사용자 도메인 (선택)",
   "Point it to customers.eunha.space after creation.":
