@@ -29,7 +29,6 @@ const ko: Record<string, string> = {
   "Create an instance": "인스턴스 만들기",
   "Create instance": "인스턴스 만들기",
   "Creating…": "생성 중…",
-  "{used} of {limit} used.": "{limit}개 중 {used}개 사용 중입니다.",
   "Your instances": "내 인스턴스",
   "No instances yet.": "아직 인스턴스가 없습니다.",
   "Eunha hostname": "Eunha 호스트명",

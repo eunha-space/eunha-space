@@ -296,10 +296,9 @@ export function CustomerApp() {
             <CardHeader>
               <CardTitle>{t("Create an instance")}</CardTitle>
               <CardDescription>
-                {t("{used} of {limit} used.", {
-                  used: tenants.length,
-                  limit: customer.instance_limit,
-                })}
+                {i18n.locale === "ko"
+                  ? `${customer.instance_limit}개 중 ${tenants.length}개 사용 중입니다.`
+                  : `${tenants.length} of ${customer.instance_limit} used.`}
               </CardDescription>
             </CardHeader>
             <CardContent>
