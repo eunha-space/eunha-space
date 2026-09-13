@@ -99,6 +99,8 @@ struct TenantSummary {
     bind_address: String,
     #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    deletion_scheduled_for: Option<OffsetDateTime>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -240,6 +242,8 @@ struct CustomerTenantInfo {
     owner_ready: bool,
     #[serde(with = "time::serde::rfc3339::option")]
     owner_password_issued_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    deletion_scheduled_for: Option<OffsetDateTime>,
 }
 
 #[derive(Serialize)]
@@ -480,6 +484,7 @@ struct StoredTenant {
     icon_url: Option<String>,
     privacy_policy: String,
     terms_of_service: String,
+    lifecycle_state: String,
 }
 fn required(value: Option<String>, name: &str) -> Result<String> {
     value.with_context(|| format!("typed configuration is missing {name}"))
@@ -641,6 +646,7 @@ async fn main() -> Result<()> {
     tokio::spawn(automatic_release_reconciler(state.clone()));
     tokio::spawn(provisioning_reconciler(state.clone()));
     tokio::spawn(domain_reconciler(state.clone()));
+    tokio::spawn(deprovisioning_reconciler(state.clone()));
     let api = Router::new()
         .route("/session", post(login).delete(logout))
         .route("/session/me", get(me))
@@ -661,6 +667,15 @@ async fn main() -> Result<()> {
             "/customer/tenants/{id}/owner/password",
             post(customer_reset_owner_password),
         )
+        .route(
+            "/customer/tenants/{id}/deletion",
+            post(customer_schedule_deletion).delete(customer_cancel_deletion),
+        )
+        .route(
+            "/customer/tenants/{id}/deletion/now",
+            post(customer_delete_now),
+        )
+        .route("/customer/tenants/{id}/restore", post(customer_restore))
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/tenants/{id}/check", post(check_tenant))
         .route("/tenants/{id}/retry", post(retry_provisioning))
@@ -1039,7 +1054,7 @@ async fn customer_me(
     .fetch_one(&s.db)
     .await?;
     Ok(Json(
-        serde_json::json!({"email":email,"instance_limit":2,"has_password":has_password}),
+        serde_json::json!({"email":email,"instance_limit":CUSTOMER_INSTANCE_LIMIT,"has_password":has_password}),
     ))
 }
 async fn customer_tenants(
@@ -1047,7 +1062,7 @@ async fn customer_tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     let (id, _) = customer(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.customer_id=$1 ORDER BY t.created_at").bind(id).fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.deletion_scheduled_for FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.customer_id=$1 AND t.lifecycle_state <> 'purged' ORDER BY t.created_at").bind(id).fetch_all(&s.db).await?))
 }
 
 async fn customer_tenant_detail(
@@ -1056,7 +1071,7 @@ async fn customer_tenant_detail(
     Path(id): Path<Uuid>,
 ) -> Result<Json<CustomerTenantDetail>, ApiError> {
     let (customer_id, _) = customer(&headers, &s.db).await?;
-    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at FROM tenants t WHERE t.id=$1 AND t.customer_id=$2")
+    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.deletion_scheduled_for FROM tenants t WHERE t.id=$1 AND t.customer_id=$2 AND t.lifecycle_state <> 'purged'")
         .bind(id)
         .bind(customer_id)
         .fetch_optional(&s.db)
@@ -1081,7 +1096,7 @@ async fn tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     operator(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at FROM tenants t JOIN runtimes r ON r.id=t.runtime_id ORDER BY t.domain").fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.deletion_scheduled_for FROM tenants t JOIN runtimes r ON r.id=t.runtime_id ORDER BY t.domain").fetch_all(&s.db).await?))
 }
 
 fn random_hex(bytes: usize) -> String {
@@ -1297,13 +1312,7 @@ async fn create_tenant_inner(
             .bind(customer_id)
             .execute(&mut *tx)
             .await?;
-        let count = sqlx::query_scalar::<_, i64>(
-            "SELECT count(*) FROM tenants WHERE customer_id=$1 AND lifecycle_state <> 'purged'",
-        )
-        .bind(customer_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if count >= 2 {
+        if customer_instance_count(&mut tx, customer_id).await? >= CUSTOMER_INSTANCE_LIMIT {
             return Err(ApiError(
                 StatusCode::CONFLICT,
                 "Each customer may create up to two instances.".into(),
@@ -1491,7 +1500,7 @@ fn is_valid_domain(domain: &str) -> bool {
 
 async fn domain_reconciler(state: Shared) {
     loop {
-        if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT d.id FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id JOIN runtimes r ON r.id=t.runtime_id WHERE d.kind IN ('provided','custom') AND ((d.status='pending' AND d.updated_at < now()-interval '15 seconds') OR d.routed_origin_hostname IS DISTINCT FROM r.origin_hostname) ORDER BY d.created_at LIMIT 10")
+        if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT d.id FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id JOIN runtimes r ON r.id=t.runtime_id WHERE d.kind IN ('provided','custom') AND t.lifecycle_state IN ('provisioning','ready','failed') AND ((d.status='pending' AND d.updated_at < now()-interval '15 seconds') OR d.routed_origin_hostname IS DISTINCT FROM r.origin_hostname) ORDER BY d.created_at LIMIT 10")
             .fetch_all(&state.db).await {
             for id in ids {
                 if let Err(error) = reconcile_domain(&state, id).await {
@@ -1750,6 +1759,351 @@ async fn finish_domain(db: &PgPool, id: Uuid) -> Result<()> {
     sqlx::query("UPDATE operations SET status='succeeded',finished_at=now() WHERE id=(SELECT o.id FROM operations o JOIN tenant_domains d ON d.tenant_id=o.tenant_id WHERE d.id=$1 AND o.kind='custom_domain_attach' AND o.status='running' ORDER BY o.created_at DESC LIMIT 1)")
         .bind(id).execute(db).await?;
     Ok(())
+}
+
+const CUSTOMER_INSTANCE_LIMIT: i64 = 2;
+
+/// How long a customer's deleted instance keeps running before it is
+/// deprovisioned, unless they cancel or bring it forward.
+const DELETION_GRACE: &str = "7 days";
+
+/// Instances counting against a customer's limit. A deprovisioned instance
+/// frees its slot while its data is retained.
+async fn customer_instance_count(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    customer_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT count(*) FROM tenants WHERE customer_id=$1 AND lifecycle_state NOT IN ('deprovisioning','retained','purged')",
+    )
+    .bind(customer_id)
+    .fetch_one(&mut **tx)
+    .await
+}
+
+async fn customer_schedule_deletion(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let (customer_id, _) = customer(&headers, &s.db).await?;
+    let mut tx = s.db.begin().await?;
+    let scheduled = sqlx::query_scalar::<_, OffsetDateTime>(&format!(
+        "UPDATE tenants SET deletion_scheduled_for=now()+interval '{DELETION_GRACE}',updated_at=now() WHERE id=$1 AND customer_id=$2 AND lifecycle_state IN ('ready','failed') AND deletion_scheduled_for IS NULL RETURNING deletion_scheduled_for"
+    ))
+    .bind(id)
+    .bind(customer_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| {
+        ApiError(
+            StatusCode::CONFLICT,
+            "This instance cannot be scheduled for deletion.".into(),
+        )
+    })?;
+    record_customer_operation(
+        &mut tx,
+        id,
+        customer_id,
+        "tenant_deletion_scheduled",
+        "Deletion scheduled; the instance keeps running until then.",
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(serde_json::json!({
+        "deletion_scheduled_for": scheduled.format(&time::format_description::well_known::Rfc3339)?,
+    })))
+}
+
+async fn customer_cancel_deletion(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let (customer_id, _) = customer(&headers, &s.db).await?;
+    let mut tx = s.db.begin().await?;
+    let changed = sqlx::query("UPDATE tenants SET deletion_scheduled_for=NULL,updated_at=now() WHERE id=$1 AND customer_id=$2 AND lifecycle_state IN ('ready','failed') AND deletion_scheduled_for IS NOT NULL")
+        .bind(id).bind(customer_id).execute(&mut *tx).await?.rows_affected();
+    if changed == 0 {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "This instance has no deletion to cancel.".into(),
+        ));
+    }
+    record_customer_operation(
+        &mut tx,
+        id,
+        customer_id,
+        "tenant_deletion_cancelled",
+        "Scheduled deletion cancelled.",
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Deprovision an instance already scheduled for deletion without waiting for
+/// the rest of its grace period.
+async fn customer_delete_now(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let (customer_id, _) = customer(&headers, &s.db).await?;
+    let mut tx = s.db.begin().await?;
+    let scheduled = sqlx::query_scalar::<_, bool>("SELECT true FROM tenants WHERE id=$1 AND customer_id=$2 AND lifecycle_state IN ('ready','failed') AND deletion_scheduled_for IS NOT NULL FOR UPDATE")
+        .bind(id).bind(customer_id).fetch_optional(&mut *tx).await?.is_some();
+    if !scheduled {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Schedule this instance for deletion first.".into(),
+        ));
+    }
+    begin_deprovisioning(&mut tx, id, Some(customer_id)).await?;
+    tx.commit().await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Bring a retained instance back on its hostnames, database and accounts.
+async fn customer_restore(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let (customer_id, _) = customer(&headers, &s.db).await?;
+    let mut tx = s.db.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))")
+        .bind(customer_id)
+        .execute(&mut *tx)
+        .await?;
+    let retained = sqlx::query_scalar::<_, bool>("SELECT true FROM tenants WHERE id=$1 AND customer_id=$2 AND lifecycle_state='retained' FOR UPDATE")
+        .bind(id).bind(customer_id).fetch_optional(&mut *tx).await?.is_some();
+    if !retained {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Only a deleted instance can be restored.".into(),
+        ));
+    }
+    if customer_instance_count(&mut tx, customer_id).await? >= CUSTOMER_INSTANCE_LIMIT {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Delete another instance before restoring this one.".into(),
+        ));
+    }
+    sqlx::query("UPDATE tenants SET lifecycle_state='provisioning',desired_state='running',observed_state='unknown',observed_at=NULL,observation_error=NULL,deletion_scheduled_for=NULL,updated_at=now() WHERE id=$1")
+        .bind(id).execute(&mut *tx).await?;
+    // Its database, owner and routing survive; the instance only needs its
+    // schema brought up to the runtime's release and its configuration served.
+    sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['migrate','render','reload','health']) ON CONFLICT (tenant_id,step) DO UPDATE SET status='pending',error=NULL,started_at=NULL,finished_at=NULL,updated_at=now()")
+        .bind(id).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM deprovisioning_steps WHERE tenant_id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    let operation_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by_customer,detail,started_at) SELECT $1,t.id,t.runtime_id,'tenant_provision','running',$2,jsonb_build_object('mode','restore'),now() FROM tenants t WHERE t.id=$3")
+        .bind(operation_id).bind(customer_id).bind(id).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Restore queued; retained data is served again once the instance is healthy.')")
+        .bind(operation_id).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+async fn record_customer_operation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    customer_id: Uuid,
+    kind: &str,
+    message: &str,
+) -> Result<(), sqlx::Error> {
+    let operation_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by_customer,started_at,finished_at) SELECT $1,t.id,t.runtime_id,$2,'succeeded',$3,now(),now() FROM tenants t WHERE t.id=$4")
+        .bind(operation_id).bind(kind).bind(customer_id).bind(tenant_id).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,$2)")
+        .bind(operation_id)
+        .bind(message)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Start taking a tenant offline. Nothing is destroyed: the database, media,
+/// configuration and hostnames stay, and only an operator's purge removes them.
+async fn begin_deprovisioning(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    customer_id: Option<Uuid>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE tenants SET lifecycle_state='deprovisioning',desired_state='deprovisioning',observed_state='disabled',observed_at=now(),observation_error=NULL,deletion_scheduled_for=NULL,updated_at=now() WHERE id=$1")
+        .bind(tenant_id).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO deprovisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['unrender','reload','offline']) ON CONFLICT (tenant_id,step) DO UPDATE SET status='pending',attempts=0,error=NULL,started_at=NULL,finished_at=NULL,updated_at=now()")
+        .bind(tenant_id).execute(&mut **tx).await?;
+    let operation_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by_customer,started_at) SELECT $1,t.id,t.runtime_id,'tenant_deprovision','running',$2,now() FROM tenants t WHERE t.id=$3")
+        .bind(operation_id).bind(customer_id).bind(tenant_id).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Deprovisioning started; data is retained.')")
+        .bind(operation_id).execute(&mut **tx).await?;
+    Ok(())
+}
+
+/// A deprovisioning step that failed is retried this often, this many times,
+/// before the operation is left failed for an operator.
+const DEPROVISION_RETRY_SECONDS: i64 = 60;
+const DEPROVISION_MAX_ATTEMPTS: i32 = 10;
+
+async fn deprovisioning_reconciler(state: Shared) {
+    loop {
+        if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM tenants WHERE lifecycle_state IN ('ready','failed') AND deletion_scheduled_for <= now() ORDER BY deletion_scheduled_for LIMIT 10")
+            .fetch_all(&state.db).await
+        {
+            for id in ids {
+                if let Ok(mut tx) = state.db.begin().await {
+                    // Re-checked under the row lock, so a cancellation that
+                    // landed after the scan wins.
+                    let due = sqlx::query_scalar::<_, bool>("SELECT true FROM tenants WHERE id=$1 AND lifecycle_state IN ('ready','failed') AND deletion_scheduled_for <= now() FOR UPDATE")
+                        .bind(id).fetch_optional(&mut *tx).await.ok().flatten().is_some();
+                    if due && begin_deprovisioning(&mut tx, id, None).await.is_ok() {
+                        let _ = tx.commit().await;
+                    }
+                }
+            }
+        }
+        if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM tenants WHERE lifecycle_state='deprovisioning' ORDER BY updated_at LIMIT 10")
+            .fetch_all(&state.db).await
+        {
+            for id in ids {
+                deprovision_tenant(&state, id).await;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+}
+
+async fn deprovision_tenant(state: &Shared, tenant_id: Uuid) {
+    for step in ["unrender", "reload", "offline"] {
+        let row = sqlx::query_as::<_, (String, i32, bool)>(&format!(
+            "SELECT status,attempts,updated_at < now()-interval '{DEPROVISION_RETRY_SECONDS} seconds' FROM deprovisioning_steps WHERE tenant_id=$1 AND step=$2"
+        ))
+        .bind(tenant_id)
+        .bind(step)
+        .fetch_optional(&state.db)
+        .await;
+        let Ok(Some((status, attempts, stale))) = row else {
+            return;
+        };
+        match status.as_str() {
+            "succeeded" => continue,
+            "failed" if !stale || attempts >= DEPROVISION_MAX_ATTEMPTS => return,
+            _ => {}
+        }
+        if sqlx::query("UPDATE deprovisioning_steps SET status='running',attempts=attempts+1,error=NULL,started_at=now(),finished_at=NULL,updated_at=now() WHERE tenant_id=$1 AND step=$2")
+            .bind(tenant_id).bind(step).execute(&state.db).await.is_err()
+        {
+            return;
+        }
+        let result = match step {
+            "unrender" => unrender_tenant(state, tenant_id).await,
+            "reload" => reload_provisioned_runtime(state, tenant_id).await,
+            "offline" => verify_tenant_offline(state, tenant_id).await,
+            _ => unreachable!(),
+        };
+        let operation = sqlx::query_scalar::<_, Uuid>("SELECT id FROM operations WHERE tenant_id=$1 AND kind='tenant_deprovision' AND status='running' ORDER BY created_at DESC LIMIT 1")
+            .bind(tenant_id).fetch_optional(&state.db).await.ok().flatten();
+        if result.is_err() {
+            let exhausted = attempts + 1 >= DEPROVISION_MAX_ATTEMPTS;
+            let message = if exhausted {
+                format!("{step} failed; an operator needs to take the instance offline.")
+            } else {
+                format!("{step} failed; retrying.")
+            };
+            let _ = sqlx::query("UPDATE deprovisioning_steps SET status='failed',error=$1,finished_at=now(),updated_at=now() WHERE tenant_id=$2 AND step=$3")
+                .bind(&message).bind(tenant_id).bind(step).execute(&state.db).await;
+            if let Some(operation) = operation {
+                let _ =
+                    sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,$2)")
+                        .bind(operation)
+                        .bind(&message)
+                        .execute(&state.db)
+                        .await;
+                if exhausted {
+                    mark_operation_failed(&state.db, operation, &message).await;
+                }
+            }
+            return;
+        }
+        let _ = sqlx::query("UPDATE deprovisioning_steps SET status='succeeded',finished_at=now(),updated_at=now() WHERE tenant_id=$1 AND step=$2")
+            .bind(tenant_id).bind(step).execute(&state.db).await;
+        if let Some(operation) = operation {
+            let _ = sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,$2)")
+                .bind(operation)
+                .bind(format!("{step} completed."))
+                .execute(&state.db)
+                .await;
+        }
+    }
+    let _ = sqlx::query("UPDATE tenants SET lifecycle_state='retained',updated_at=now() WHERE id=$1 AND lifecycle_state='deprovisioning'")
+        .bind(tenant_id).execute(&state.db).await;
+    let _ = sqlx::query("UPDATE operations SET status='succeeded',finished_at=now() WHERE id=(SELECT id FROM operations WHERE tenant_id=$1 AND kind='tenant_deprovision' AND status='running' ORDER BY created_at DESC LIMIT 1)")
+        .bind(tenant_id).execute(&state.db).await;
+}
+
+/// Remove the tenant's runtime configuration so the runtime stops serving it on
+/// its next reload. The configuration itself stays in PostgreSQL.
+async fn unrender_tenant(state: &Shared, tenant_id: Uuid) -> Result<()> {
+    let (domain, aliases, directory, runtime_host) = sqlx::query_as::<_, (String, Vec<String>, String, String)>(
+        "SELECT t.domain,t.aliases,r.tenant_directory,i.address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id WHERE t.id=$1",
+    )
+    .bind(tenant_id)
+    .fetch_one(&state.db)
+    .await?;
+    let configured_host = std::env::var("CONTROL_RUNTIME_HOST").unwrap_or_default();
+    anyhow::ensure!(
+        !configured_host.is_empty() && configured_host == runtime_host,
+        "runtime is managed elsewhere"
+    );
+    let directory = PathBuf::from(directory);
+    for host in std::iter::once(&domain).chain(aliases.iter()) {
+        anyhow::ensure!(is_safe_domain(host), "invalid tenant domain");
+        let file_name = tenant_file_name(host);
+        anyhow::ensure!(
+            is_safe_tenant_file_name(&file_name),
+            "invalid tenant file name"
+        );
+        match tokio::fs::remove_file(directory.join(file_name)).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Confirm the runtime no longer answers for the tenant's domain.
+async fn verify_tenant_offline(state: &Shared, tenant_id: Uuid) -> Result<()> {
+    let (domain, bind_address) = sqlx::query_as::<_, (String, String)>("SELECT t.domain,r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1")
+        .bind(tenant_id).fetch_one(&state.db).await?;
+    let url = format!("http://{bind_address}/api/v2/instance");
+    for _ in 0..30 {
+        // A runtime left with a single tenant answers every host with that
+        // tenant, so only a response naming this domain means it is served.
+        let serving = match state.client.get(&url).header("Host", &domain).send().await {
+            Ok(response) if response.status().is_success() => response
+                .json::<serde_json::Value>()
+                .await
+                .ok()
+                .and_then(|body| body.get("domain")?.as_str().map(str::to_owned))
+                .is_none_or(|served| served.eq_ignore_ascii_case(&domain)),
+            Ok(_) => false,
+            // An unreachable runtime is not serving it either, but that is not
+            // evidence the reload took; ask again.
+            Err(_) => true,
+        };
+        if !serving {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    anyhow::bail!("tenant is still served")
 }
 
 async fn provisioning_reconciler(state: Shared) {
@@ -2431,7 +2785,7 @@ async fn queue_runtime_release(
     trigger: &str,
 ) -> Result<Uuid, ApiError> {
     let row = sqlx::query_as::<_, (String, String, String, String, String, bool, String, String, String)>(
-        "SELECT r.name,i.address,r.tenant_directory,r.service_label,r.bind_address,r.router_enabled,r.blue_bind_address,r.green_bind_address,(SELECT domain FROM tenants WHERE runtime_id=r.id ORDER BY created_at LIMIT 1) FROM runtimes r JOIN instances i ON i.id=r.instance_id WHERE r.id=$1",
+        "SELECT r.name,i.address,r.tenant_directory,r.service_label,r.bind_address,r.router_enabled,r.blue_bind_address,r.green_bind_address,(SELECT domain FROM tenants WHERE runtime_id=r.id AND lifecycle_state='ready' ORDER BY created_at LIMIT 1) FROM runtimes r JOIN instances i ON i.id=r.instance_id WHERE r.id=$1",
     )
     .bind(runtime_id)
     .fetch_optional(&state.db)
@@ -3245,6 +3599,15 @@ async fn render_tenant(
         router_enabled,
         revision,
     ) = row;
+    if matches!(
+        tenant.lifecycle_state.as_str(),
+        "deprovisioning" | "retained" | "purged"
+    ) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "A deprovisioned tenant is not rendered; restore it first.".into(),
+        ));
+    }
     let domain = tenant.domain.clone();
     let tenant_file_name = tenant_file_name(&domain);
     let op = Uuid::new_v4();

@@ -1,6 +1,12 @@
 import { useEffect, useState } from "react";
 import { CircleAlert, LogOut } from "lucide-react";
-import { api, errorMessage, type Tenant } from "@/api";
+import {
+  api,
+  countsTowardInstanceLimit,
+  errorMessage,
+  instanceStatus,
+  type Tenant,
+} from "@/api";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -150,6 +156,7 @@ export function CustomerApp() {
     setCustomer(null);
     setTenants([]);
   }
+  const activeInstances = tenants.filter(countsTowardInstanceLimit).length;
   if (!sessionLoaded) {
     return (
       <main className="grid min-h-screen place-items-center p-4">
@@ -305,8 +312,8 @@ export function CustomerApp() {
               <CardTitle>{t("Create an instance")}</CardTitle>
               <CardDescription>
                 {i18n.locale === "ko"
-                  ? `${customer.instance_limit}개 중 ${tenants.length}개 사용 중입니다.`
-                  : `${tenants.length} of ${customer.instance_limit} used.`}
+                  ? `${customer.instance_limit}개 중 ${activeInstances}개 사용 중입니다.`
+                  : `${activeInstances} of ${customer.instance_limit} used.`}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -369,7 +376,7 @@ export function CustomerApp() {
                 </div>
                 <Button
                   type="submit"
-                  disabled={busy || tenants.length >= customer.instance_limit}
+                  disabled={busy || activeInstances >= customer.instance_limit}
                 >
                   {busy ? t("Creating…") : t("Create instance")}
                 </Button>
@@ -395,7 +402,7 @@ export function CustomerApp() {
                   >
                     <strong>{t.title}</strong>
                     <p className="text-muted-foreground text-sm">
-                      {t.domain} · {t.lifecycle_state}
+                      {t.domain} · {i18n._(instanceStatus(t))}
                     </p>
                   </a>
                 ))}

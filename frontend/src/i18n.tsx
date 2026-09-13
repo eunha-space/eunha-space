@@ -76,6 +76,28 @@ const ko: Record<string, string> = {
   "A new password is generated, and the admin account is signed out everywhere it is signed in.":
     "새 비밀번호가 만들어지고, 관리자 계정은 로그인된 모든 곳에서 로그아웃됩니다.",
   Cancel: "취소",
+  "Deletion scheduled": "삭제 예정",
+  Deleting: "삭제 중",
+  Deleted: "삭제됨",
+  "Delete instance": "인스턴스 삭제",
+  "Restore instance": "인스턴스 복원",
+  "Cancel deletion": "삭제 취소",
+  "Delete now": "지금 삭제",
+  "Scheduled deletion": "삭제 예정 시각",
+  "This instance is offline. Its data is kept, so you can restore it.":
+    "이 인스턴스는 오프라인 상태입니다. 데이터가 보관되어 있어 복원할 수 있습니다.",
+  "Taking this instance offline. Its data is kept.":
+    "인스턴스를 오프라인으로 전환하는 중입니다. 데이터는 보관됩니다.",
+  "This instance keeps running until its scheduled deletion. Cancel any time before then, or delete it now.":
+    "예정된 삭제 시각까지 인스턴스는 계속 운영됩니다. 그 전에 언제든 취소하거나 지금 삭제할 수 있습니다.",
+  "Deleting schedules this instance to go offline in 7 days. Its data is kept, so you can restore it later.":
+    "삭제하면 7일 후 인스턴스가 오프라인으로 전환됩니다. 데이터는 보관되어 나중에 복원할 수 있습니다.",
+  "Delete this instance now?": "지금 이 인스턴스를 삭제할까요?",
+  "Schedule this instance for deletion?": "이 인스턴스의 삭제를 예약할까요?",
+  "It goes offline right away instead of at its scheduled time. Its data is kept, so you can restore it later.":
+    "예정된 시각을 기다리지 않고 바로 오프라인으로 전환됩니다. 데이터는 보관되어 나중에 복원할 수 있습니다.",
+  "It keeps running for 7 days, then goes offline. You can cancel until then.":
+    "7일 동안 계속 운영된 후 오프라인으로 전환됩니다. 그 전까지 취소할 수 있습니다.",
   "New password": "새 비밀번호",
   Copy: "복사",
   Copied: "복사됨",

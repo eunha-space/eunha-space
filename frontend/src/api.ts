@@ -18,7 +18,36 @@ export type Tenant = {
   runtime_name: string;
   bind_address: string;
   updated_at: string;
+  /** When a customer's deletion takes the instance offline, if one is scheduled. */
+  deletion_scheduled_for: string | null;
 };
+
+/** A deprovisioned instance keeps its data but frees its slot. */
+export function countsTowardInstanceLimit(tenant: Pick<Tenant, "lifecycle_state">) {
+  return !["deprovisioning", "retained", "purged"].includes(
+    tenant.lifecycle_state,
+  );
+}
+
+/** The customer-facing name of an instance's state, as an untranslated message. */
+export function instanceStatus(
+  tenant: Pick<Tenant, "lifecycle_state" | "deletion_scheduled_for">,
+): string {
+  if (tenant.deletion_scheduled_for) return "Deletion scheduled";
+  switch (tenant.lifecycle_state) {
+    case "ready":
+      return "Ready";
+    case "failed":
+      return "Needs attention";
+    case "deprovisioning":
+      return "Deleting";
+    case "retained":
+    case "purged":
+      return "Deleted";
+    default:
+      return "Setting up";
+  }
+}
 
 export type CustomerDomainSetup = {
   hostname: string;
@@ -53,6 +82,7 @@ export type CustomerTenantDetail = {
     | "lifecycle_state"
     | "observed_state"
     | "updated_at"
+    | "deletion_scheduled_for"
   > & {
     /** The instance's Owner account; null for instances created without one. */
     owner_username: string | null;
@@ -124,7 +154,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
       response.status,
     );
   }
-  return response.status === 204 ? (undefined as T) : response.json();
+  // Accepted work (202) and No Content (204) may both come back without a body.
+  const text = await response.text();
+  return (text ? JSON.parse(text) : undefined) as T;
 }
 
 export function errorMessage(error: unknown): string {
