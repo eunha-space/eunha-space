@@ -21,7 +21,16 @@ export type Tenant = {
   updated_at: string;
   /** When a customer's deletion takes the instance offline, if one is scheduled. */
   deletion_scheduled_for: string | null;
+  /** A custom domain released because it never validated; `domain` is then a placeholder. */
+  abandoned_custom_domain: string | null;
 };
+
+/** The address to show for an instance, including one whose domain was released. */
+export function instanceAddress(
+  tenant: Pick<Tenant, "domain" | "abandoned_custom_domain">,
+): string {
+  return tenant.abandoned_custom_domain ?? tenant.domain;
+}
 
 /** Whether a tenant is being or has been taken offline; the runtime does not serve it. */
 export function isOffline(tenant: Pick<Tenant, "lifecycle_state">): boolean {
@@ -94,6 +103,7 @@ export type CustomerTenantDetail = {
     | "observed_state"
     | "updated_at"
     | "deletion_scheduled_for"
+    | "abandoned_custom_domain"
   > & {
     /** The instance's Owner account; null for instances created without one. */
     owner_username: string | null;
@@ -102,8 +112,6 @@ export type CustomerTenantDetail = {
     owner_ready: boolean;
     /** When the customer area last issued a password for the Owner. */
     owner_password_issued_at: string | null;
-    /** A custom domain chosen at creation that never connected. */
-    abandoned_custom_domain: string | null;
   };
   domains: CustomerDomainSetup[];
   provisioning_steps: CustomerProvisioningStep[];

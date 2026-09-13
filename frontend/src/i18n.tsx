@@ -112,7 +112,10 @@ const ko: Record<string, string> = {
   Value: "값",
   "Eunha hostname": "호스트명",
   Name: "이름",
-  "Custom domain (optional)": "커스텀 도메인 (선택)",
+  Address: "주소",
+  "eunha space address": "eunha space 주소",
+  "My own domain": "내 도메인",
+  "Custom domain": "커스텀 도메인",
   "Before creating, add a CNAME record pointing it to customers.eunha.space. A custom domain can only be chosen now; it cannot be added or changed later.":
     "생성하기 전에 customers.eunha.space를 가리키는 CNAME 레코드를 추가하세요. 커스텀 도메인은 지금만 선택할 수 있으며 나중에 추가하거나 변경할 수 없습니다.",
   "We can't see that CNAME record yet. You can still create the instance; setup keeps trying for 7 days, then deletes the instance.":

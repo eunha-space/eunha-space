@@ -46,20 +46,23 @@ because an instance's accounts fix its ActivityPub identity to its primary
 domain. The create form asks for the CNAME to `customers.eunha.space` before
 creation and checks it through DNS-over-HTTPS, warning without blocking.
 
-An instance created with a custom domain is not set up at all until that domain
-validates: no database, runtime file or owner exists, and only its hostnames are
-registered with Cloudflare. The domain is checked with backoff, from 30 seconds
-up to 15 minutes, for seven days. Cloudflare is asked to validate again even
-after it reports the hostname or certificate as failed, since the customer may
-still fix what stopped it. Nothing about a waiting instance counts toward a
-provided hostname's failure limit. When the domain validates it becomes the
-primary domain, and provisioning runs under it from the start. If it has not
-validated after seven days, the domain is removed from Cloudflare and released,
-and the never-set-up instance is deleted in the ordinary way: it becomes
-retained and frees its slot. Restoring such an instance tries the same domain
-again for another seven days, unless another instance has claimed it meanwhile.
-It is never set up under its provided hostname instead. Runtime placement is
-automatic and favors the least-loaded eligible runtime.
+An instance lives either at a `*.eunha.space` hostname or at the customer's
+own domain, never both. With a custom domain, that domain is the instance's
+primary domain from the start, and no `*.eunha.space` hostname is created. The
+instance is not set up at all until the domain validates: no database, runtime
+file or owner exists, and only the hostname is registered with Cloudflare. The
+domain is checked with backoff, from 30 seconds up to 15 minutes, for seven
+days. Cloudflare is asked to validate again even after it reports the hostname
+or certificate as failed, since the customer may still fix what stopped it.
+Once it validates, provisioning runs under it. If it has not validated after
+seven days, the hostname is removed from Cloudflare, and the never-set-up
+instance is deleted in the ordinary way: it becomes retained and frees its slot.
+Its tenant row gives up the domain for a `<tenant id>.invalid` placeholder and
+remembers it as `abandoned_custom_domain`. A purge of any tenant that was never
+set up frees its domain the same way, since no account ever lived under it.
+Restoring such an instance tries the same domain again for another seven days,
+and is refused if another instance has claimed the domain meanwhile. Runtime
+placement is automatic and favors the least-loaded eligible runtime.
 
 Signup requires only an email address. The verification link signs the customer
 in and requires password setup; later sessions can use either that password or

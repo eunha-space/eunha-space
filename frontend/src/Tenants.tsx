@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { HardDrive, Inbox, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
-import { api, isOffline, pendingRender, type Runtime, type Tenant, type TenantDomain } from "@/api";
+import { api, instanceAddress, isOffline, pendingRender, type Runtime, type Tenant, type TenantDomain } from "@/api";
 import { absoluteTime, relativeTime } from "@/format";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -63,7 +63,7 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
       (tenant) =>
         matches(tenant, filter) &&
         (needle === "" ||
-          `${tenant.domain} ${tenant.title} ${tenant.runtime_name} ${hostByRuntime.get(tenant.runtime_name) ?? ""}`
+          `${instanceAddress(tenant)} ${tenant.title} ${tenant.runtime_name} ${hostByRuntime.get(tenant.runtime_name) ?? ""}`
             .toLowerCase()
             .includes(needle)),
     );
@@ -187,8 +187,8 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                 >
                   <StatusDot state={tenant.observed_state} />
                   <div className="min-w-0">
-                    <h3 className="truncate font-semibold" title={tenant.domain}>
-                      {tenant.domain}
+                    <h3 className="truncate font-semibold" title={instanceAddress(tenant)}>
+                      {instanceAddress(tenant)}
                     </h3>
                     <p className="text-muted-foreground mt-0.5 truncate text-sm" title={tenant.title}>
                       {tenant.title}
@@ -268,7 +268,7 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                           icon={<RotateCcw />}
                           busy={busy === `restore-${tenant.id}`}
                           confirm={{
-                            title: `Restore ${tenant.domain}?`,
+                            title: `Restore ${instanceAddress(tenant)}?`,
                             description: "The tenant is migrated to its runtime's release, rendered and served again with its retained data. The customer's instance limit is not checked.",
                             action: "Restore",
                           }}
@@ -324,7 +324,8 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
 function PurgeDialog({ tenant, busy, act }: { tenant: Tenant; busy: boolean; act: Props["act"] }) {
   const [open, setOpen] = useState(false);
   const [confirmation, setConfirmation] = useState("");
-  const confirmed = confirmation.trim().toLowerCase() === tenant.domain.toLowerCase();
+  const address = instanceAddress(tenant);
+  const confirmed = confirmation.trim().toLowerCase() === address.toLowerCase();
   return (
     <Dialog
       open={open}
@@ -338,7 +339,7 @@ function PurgeDialog({ tenant, busy, act }: { tenant: Tenant; busy: boolean; act
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Purge {tenant.domain}?</DialogTitle>
+          <DialogTitle>Purge {address}?</DialogTitle>
           <DialogDescription>
             {tenant.lifecycle_state === "retained"
               ? "This permanently destroys the tenant: "
@@ -358,7 +359,7 @@ function PurgeDialog({ tenant, busy, act }: { tenant: Tenant; busy: boolean; act
             }
           }}
         >
-          <Label htmlFor={`purge-${tenant.id}`}>Type {tenant.domain} to confirm</Label>
+          <Label htmlFor={`purge-${tenant.id}`}>Type {address} to confirm</Label>
           <Input
             id={`purge-${tenant.id}`}
             autoComplete="off"

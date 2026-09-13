@@ -114,6 +114,9 @@ struct TenantSummary {
     updated_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339::option")]
     deletion_scheduled_for: Option<OffsetDateTime>,
+    /// A custom domain released because it never validated; the tenant's own
+    /// `domain` is then a placeholder.
+    abandoned_custom_domain: Option<String>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -179,6 +182,8 @@ struct VerificationQuery {
 }
 #[derive(Deserialize)]
 struct CustomerTenantRequest {
+    /// The `*.eunha.space` label, when the customer is not bringing a domain.
+    #[serde(default)]
     subdomain: String,
     title: String,
     custom_domain: Option<String>,
@@ -1091,7 +1096,7 @@ async fn customer_tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     let (id, _) = customer(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.deletion_scheduled_for FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.customer_id=$1 AND t.lifecycle_state NOT IN ('purging','purged') ORDER BY t.created_at").bind(id).fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.deletion_scheduled_for,t.abandoned_custom_domain FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.customer_id=$1 AND t.lifecycle_state NOT IN ('purging','purged') ORDER BY t.created_at").bind(id).fetch_all(&s.db).await?))
 }
 
 async fn customer_tenant_detail(
@@ -1106,7 +1111,7 @@ async fn customer_tenant_detail(
         .fetch_optional(&s.db)
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Instance not found".into()))?;
-    let domains = sqlx::query_as(&format!("SELECT hostname,kind,status,is_primary,cname_target,ownership_name,ownership_value,ssl_status,CASE WHEN status<>'pending' OR error IS NULL THEN NULL WHEN error LIKE '%DNS does not point to%' THEN 'dns' ELSE 'retrying' END check_problem,CASE WHEN attempts>0 THEN updated_at END checked_at,CASE WHEN kind='custom' AND status='pending' AND NOT is_primary THEN created_at+interval '{CUSTOM_DOMAIN_SETUP_WINDOW}' END setup_deadline FROM tenant_domains WHERE tenant_id=$1 AND kind IN ('provided','custom') ORDER BY is_primary DESC,created_at"))
+    let domains = sqlx::query_as(&format!("SELECT hostname,kind,status,is_primary,cname_target,ownership_name,ownership_value,ssl_status,CASE WHEN status<>'pending' OR error IS NULL THEN NULL WHEN error LIKE '%DNS does not point to%' THEN 'dns' ELSE 'retrying' END check_problem,CASE WHEN attempts>0 THEN updated_at END checked_at,CASE WHEN kind='custom' AND status='pending' AND NOT EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=tenant_domains.tenant_id AND p.step='database' AND p.status='succeeded') THEN created_at+interval '{CUSTOM_DOMAIN_SETUP_WINDOW}' END setup_deadline FROM tenant_domains WHERE tenant_id=$1 AND kind IN ('provided','custom') ORDER BY is_primary DESC,created_at"))
         .bind(id)
         .fetch_all(&s.db)
         .await?;
@@ -1125,7 +1130,7 @@ async fn tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     operator(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.deletion_scheduled_for FROM tenants t JOIN runtimes r ON r.id=t.runtime_id ORDER BY t.domain").fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.deletion_scheduled_for,t.abandoned_custom_domain FROM tenants t JOIN runtimes r ON r.id=t.runtime_id ORDER BY t.domain").fetch_all(&s.db).await?))
 }
 
 fn random_hex(bytes: usize) -> String {
@@ -1223,52 +1228,76 @@ async fn create_tenant_inner(
     owner_username: Option<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     body.subdomain = body.subdomain.trim().to_ascii_lowercase();
-    let suffix = s.provided_domain_suffixes.first().ok_or_else(|| {
-        ApiError(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "No provided domain suffix is configured.".into(),
-        )
-    })?;
-    let domain = format!("{}.{}", body.subdomain, suffix);
-    let provided_domains: Vec<String> = s
-        .provided_domain_suffixes
-        .iter()
-        .map(|suffix| format!("{}.{}", body.subdomain, suffix))
-        .collect();
-    let aliases: Vec<String> = provided_domains.iter().skip(1).cloned().collect();
     body.title = body.title.trim().to_owned();
     body.contact_email = body
         .contact_email
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty());
-    if body.subdomain.is_empty()
-        || body.subdomain.len() > 63
-        || body.subdomain.starts_with('-')
-        || body.subdomain.ends_with('-')
-        || !body
-            .subdomain
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        || body.title.is_empty()
-        || body.title.len() > 200
-    {
+    if body.title.is_empty() || body.title.len() > 200 {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "Enter a valid domain and title.".into(),
         ));
     }
-    if sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM reserved_subdomains WHERE label=$1)",
-    )
-    .bind(&body.subdomain)
-    .fetch_one(&s.db)
-    .await?
-    {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "That subdomain is reserved.".into(),
-        ));
-    }
+    let custom_domain = custom_domain
+        .map(|value| value.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    // An instance lives either at a customer's own domain or at a provided
+    // `*.eunha.space` hostname, never both: its accounts are created under one
+    // domain, and a second hostname would only ever be an alias to it.
+    let (domain, provided_domains) = if let Some(custom_domain) = &custom_domain {
+        if !is_valid_domain(custom_domain)
+            || s.provided_domain_suffixes.iter().any(|suffix| {
+                custom_domain == suffix || custom_domain.ends_with(&format!(".{suffix}"))
+            })
+        {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "Enter a valid externally owned custom domain.".into(),
+            ));
+        }
+        (custom_domain.clone(), Vec::new())
+    } else {
+        let suffix = s.provided_domain_suffixes.first().ok_or_else(|| {
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "No provided domain suffix is configured.".into(),
+            )
+        })?;
+        if body.subdomain.is_empty()
+            || body.subdomain.len() > 63
+            || body.subdomain.starts_with('-')
+            || body.subdomain.ends_with('-')
+            || !body
+                .subdomain
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "Enter a valid domain and title.".into(),
+            ));
+        }
+        if sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM reserved_subdomains WHERE label=$1)",
+        )
+        .bind(&body.subdomain)
+        .fetch_one(&s.db)
+        .await?
+        {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "That subdomain is reserved.".into(),
+            ));
+        }
+        let provided: Vec<String> = s
+            .provided_domain_suffixes
+            .iter()
+            .map(|suffix| format!("{}.{}", body.subdomain, suffix))
+            .collect();
+        (format!("{}.{}", body.subdomain, suffix), provided)
+    };
+    let aliases: Vec<String> = provided_domains.iter().skip(1).cloned().collect();
 
     let origin_hostname =
         sqlx::query_scalar::<_, String>("SELECT origin_hostname FROM runtimes WHERE id=$1")
@@ -1323,20 +1352,6 @@ async fn create_tenant_inner(
     // alphabet.
     let redis_prefix = tenant_redis_key_prefix(tenant_id);
 
-    let custom_domain = custom_domain
-        .map(|value| value.trim().trim_end_matches('.').to_ascii_lowercase())
-        .filter(|value| !value.is_empty());
-    if custom_domain.as_deref().is_some_and(|value| {
-        !is_valid_domain(value)
-            || s.provided_domain_suffixes
-                .iter()
-                .any(|suffix| value == suffix || value.ends_with(&format!(".{suffix}")))
-    }) {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "Enter a valid externally owned custom domain.".into(),
-        ));
-    }
     let mut tx = s.db.begin().await?;
     if let Some(customer_id) = customer_id {
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))")
@@ -1377,7 +1392,9 @@ async fn create_tenant_inner(
             .bind(Uuid::new_v4()).bind(tenant_id).bind(hostname).bind(index == 0).bind(&cname_target).execute(&mut *tx).await?;
     }
     if let Some(hostname) = custom_domain {
-        sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary,cname_target) VALUES($1,$2,$3,'custom','pending',false,$4)").bind(Uuid::new_v4()).bind(tenant_id).bind(hostname).bind(&cname_target).execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary,cname_target) VALUES($1,$2,$3,'custom','pending',true,$4)")
+            .bind(Uuid::new_v4()).bind(tenant_id).bind(hostname).bind(&cname_target).execute(&mut *tx).await
+            .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenant_domains_hostname_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
     }
     sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,requested_by_customer,detail,started_at) VALUES($1,$2,$3,'tenant_provision','running',$4,$5,jsonb_build_object('domain',$6),now())")
         .bind(operation_id).bind(tenant_id).bind(body.runtime_id).bind(operator_id).bind(customer_id).bind(&domain).execute(&mut *tx).await?;
@@ -1525,7 +1542,7 @@ async fn domain_reconciler(state: Shared) {
 /// and only an operator's purge destroys its data.
 async fn expire_custom_domains(state: &Shared) {
     let Ok(expired) = sqlx::query_as::<_, (Uuid, Uuid, String)>(&format!(
-        "SELECT d.id,d.tenant_id,d.hostname FROM tenant_domains d WHERE d.kind='custom' AND d.status='pending' AND NOT d.is_primary AND d.created_at < now()-interval '{CUSTOM_DOMAIN_SETUP_WINDOW}' ORDER BY d.created_at LIMIT 10"
+        "SELECT d.id,d.tenant_id,d.hostname FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id WHERE d.kind='custom' AND d.status='pending' AND t.lifecycle_state='provisioning' AND d.created_at < now()-interval '{CUSTOM_DOMAIN_SETUP_WINDOW}' ORDER BY d.created_at LIMIT 10"
     ))
     .fetch_all(&state.db)
     .await
@@ -1579,11 +1596,12 @@ impl std::fmt::Display for DomainTerminalError {
 impl std::error::Error for DomainTerminalError {}
 
 /// Remove a custom domain that did not connect: its Cloudflare hostname, then
-/// its record, which frees the hostname. A primary domain is never dropped.
+/// its record, which frees the hostname. A primary domain is only released from
+/// an instance that was never set up, since no account ever lived under it.
 async fn drop_custom_domain(state: &Shared, id: Uuid) -> Result<()> {
     let Some((tenant_id, hostname, cloudflare_id, reason)) =
         sqlx::query_as::<_, (Uuid, String, Option<String>, Option<String>)>(
-            "SELECT tenant_id,hostname,cloudflare_id,error FROM tenant_domains WHERE id=$1 AND kind='custom' AND status='removing' AND NOT is_primary",
+            "SELECT d.tenant_id,d.hostname,d.cloudflare_id,d.error FROM tenant_domains d WHERE d.id=$1 AND d.kind='custom' AND d.status='removing' AND (NOT d.is_primary OR NOT EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=d.tenant_id AND p.step='database' AND p.status='succeeded'))",
         )
         .bind(id)
         .fetch_optional(&state.db)
@@ -1618,17 +1636,18 @@ async fn drop_custom_domain(state: &Shared, id: Uuid) -> Result<()> {
     }
     let reason = reason.unwrap_or_else(|| "The custom domain was removed.".into());
     let mut tx = state.db.begin().await?;
-    let deleted = sqlx::query(
-        "DELETE FROM tenant_domains WHERE id=$1 AND status='removing' AND NOT is_primary",
-    )
-    .bind(id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
+    let deleted = sqlx::query("DELETE FROM tenant_domains WHERE id=$1 AND status='removing'")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
     if deleted == 0 {
         return Ok(());
     }
-    sqlx::query("UPDATE tenants SET abandoned_custom_domain=$1,aliases=array_remove(aliases,$1) WHERE id=$2")
+    // A released primary domain must not stay reserved on the tenant row, which
+    // otherwise holds its domain forever: the tenant takes a placeholder that
+    // can never be a real hostname, and remembers the domain for restoring.
+    sqlx::query("UPDATE tenants SET abandoned_custom_domain=$1,aliases=array_remove(aliases,$1),domain=CASE WHEN domain=$1 THEN id::text||'.invalid' ELSE domain END WHERE id=$2")
         .bind(&hostname).bind(tenant_id).execute(&mut *tx).await?;
     if let Some(operation_id) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM operations WHERE tenant_id=$1 AND kind='tenant_provision' AND status='running' ORDER BY created_at DESC LIMIT 1")
         .bind(tenant_id).fetch_optional(&mut *tx).await?
@@ -1843,6 +1862,12 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
     // An imported tenant can adopt its existing primary hostname into
     // Cloudflare for SaaS. Its ActivityPub identity and runtime configuration
     // are already correct, so activation only completes the durable operation.
+    if unserved && primary_id == id && kind == "custom" {
+        // The domain has validated; setup can now begin under it and checks the
+        // tenant's health itself.
+        finish_domain(&state.db, id).await?;
+        return Ok(());
+    }
     if unserved && kind == "provided" {
         schedule_next_domain_check(&state.db, id).await?;
         return Ok(());
@@ -2148,7 +2173,7 @@ async fn customer_restore(
             "Delete another instance before restoring this one.".into(),
         ));
     }
-    queue_restore(&mut tx, id, None, Some(customer_id)).await?;
+    queue_restore(&s, &mut tx, id, None, Some(customer_id)).await?;
     tx.commit().await?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -2176,7 +2201,7 @@ async fn restore_tenant(
             "Only a retained tenant can be restored.".into(),
         ));
     }
-    queue_restore(&mut tx, id, Some(operator_id), None).await?;
+    queue_restore(&s, &mut tx, id, Some(operator_id), None).await?;
     tx.commit().await?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -2185,6 +2210,7 @@ async fn restore_tenant(
 /// survive, so it only needs its schema brought up to the runtime's release and
 /// its configuration served.
 async fn queue_restore(
+    s: &Shared,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: Uuid,
     operator_id: Option<Uuid>,
@@ -2200,17 +2226,39 @@ async fn queue_restore(
     .fetch_optional(&mut **tx)
     .await?;
     if let Some(hostname) = retried {
-        sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary,cname_target) SELECT $1,$2,$3,'custom','pending',false,cname_target FROM tenant_domains WHERE tenant_id=$2 AND kind='provided' ORDER BY created_at LIMIT 1")
-            .bind(Uuid::new_v4()).bind(tenant_id).bind(&hostname).execute(&mut **tx).await
-            .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenant_domains_hostname_key") {
-                ApiError(StatusCode::CONFLICT, "Its custom domain is now used by another instance, so it cannot be restored.".into())
+        let cname_target = s
+            .cloudflare
+            .as_ref()
+            .map(|cloudflare| cloudflare.cname_target.clone())
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Cloudflare for SaaS is not configured.".into(),
+                )
+            })?;
+        let taken = |error: sqlx::Error| {
+            if matches!(
+                error.as_database_error().and_then(|e| e.constraint()),
+                Some("tenant_domains_hostname_key" | "tenants_domain_key")
+            ) {
+                ApiError(
+                    StatusCode::CONFLICT,
+                    "Its custom domain is now used by another instance, so it cannot be restored."
+                        .into(),
+                )
             } else {
                 ApiError::from(error)
-            })?;
-        sqlx::query("UPDATE tenants SET abandoned_custom_domain=NULL WHERE id=$1")
+            }
+        };
+        sqlx::query("UPDATE tenants SET domain=$1,abandoned_custom_domain=NULL WHERE id=$2")
+            .bind(&hostname)
             .bind(tenant_id)
             .execute(&mut **tx)
-            .await?;
+            .await
+            .map_err(taken)?;
+        sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary,cname_target) VALUES($1,$2,$3,'custom','pending',true,$4)")
+            .bind(Uuid::new_v4()).bind(tenant_id).bind(&hostname).bind(&cname_target)
+            .execute(&mut **tx).await.map_err(taken)?;
     }
     sqlx::query("UPDATE tenants SET lifecycle_state='provisioning',desired_state='running',observed_state='unknown',observed_at=NULL,observation_error=NULL,deletion_scheduled_for=NULL,updated_at=now() WHERE id=$1")
         .bind(tenant_id).execute(&mut **tx).await?;
@@ -2458,8 +2506,10 @@ async fn purge_tenant(
     let mut tx = s.db.begin().await?;
     // A tenant already on its way offline finishes that first; anything else,
     // served or not, can be purged.
+    // A tenant whose custom domain was released is confirmed by that domain; its
+    // own `domain` is only a placeholder.
     let (domain, retained) = sqlx::query_as::<_, (String, bool)>(
-        "SELECT domain,lifecycle_state='retained' FROM tenants WHERE id=$1 AND lifecycle_state IN ('provisioning','ready','failed','retained') FOR UPDATE",
+        "SELECT COALESCE(abandoned_custom_domain,domain),lifecycle_state='retained' FROM tenants WHERE id=$1 AND lifecycle_state IN ('provisioning','ready','failed','retained') FOR UPDATE",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
@@ -2779,6 +2829,13 @@ async fn purge_tenant_configuration(state: &Shared, tenant_id: Uuid) -> Result<O
         .bind(tenant_id)
         .execute(&mut *tx)
         .await?;
+    // A purged tenant keeps its domain reserved because remote servers remember
+    // the accounts that lived there. One that was never set up had no accounts,
+    // so its domain goes back to whoever controls it.
+    sqlx::query("UPDATE tenants SET domain=id::text||'.invalid',aliases='{}' WHERE id=$1 AND domain<>id::text||'.invalid' AND NOT EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=tenants.id AND p.step='database' AND p.status='succeeded') AND EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=tenants.id)")
+        .bind(tenant_id)
+        .execute(&mut *tx)
+        .await?;
     tx.commit().await?;
     Ok(None)
 }
@@ -2965,26 +3022,25 @@ async fn provision_tenant(state: &Shared, tenant_id: Uuid) {
 
 async fn tenant_routing_ready(db: &PgPool, tenant_id: Uuid) -> Result<bool> {
     let statuses = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM tenant_domains WHERE tenant_id=$1 AND kind='provided'",
+        "SELECT status FROM tenant_domains WHERE tenant_id=$1 AND kind IN ('provided','custom')",
     )
     .bind(tenant_id)
     .fetch_all(db)
     .await?;
-    anyhow::ensure!(!statuses.is_empty(), "tenant has no provided hostname");
+    anyhow::ensure!(!statuses.is_empty(), "tenant has no managed hostname");
     anyhow::ensure!(
         !statuses.iter().any(|status| status == "failed"),
-        "provided hostname routing failed"
+        "hostname routing failed"
     );
     Ok(statuses.iter().all(|status| status == "active"))
 }
 
 /// Whether an instance created with a custom domain may be set up. Nothing is
-/// provisioned — no database, no runtime file, no owner — until the domain has
-/// validated and become the primary domain, so an instance whose domain never
-/// validates leaves nothing behind.
+/// provisioned — no database, no runtime file, no owner — until its domain has
+/// validated, so an instance whose domain never validates leaves nothing behind.
 async fn custom_domain_validated(db: &PgPool, tenant_id: Uuid) -> Result<bool> {
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT NOT EXISTS(SELECT 1 FROM tenant_domains WHERE tenant_id=$1 AND kind='custom' AND status IN ('pending','removing') AND NOT is_primary)",
+        "SELECT NOT EXISTS(SELECT 1 FROM tenant_domains WHERE tenant_id=$1 AND kind='custom' AND is_primary AND status<>'active')",
     )
     .bind(tenant_id)
     .fetch_one(db)

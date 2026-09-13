@@ -16,6 +16,7 @@ import {
   type CustomerProvisioningStep,
   type CustomerTenantDetail,
   errorMessage,
+  instanceAddress,
   instanceStatus,
 } from "@/api";
 import { absoluteTime } from "@/format";
@@ -125,11 +126,11 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
         </div>
         <a
           className="text-muted-foreground hover:text-foreground text-sm underline-offset-4 hover:underline"
-          href={`https://${detail.tenant.domain}`}
+          href={`https://${instanceAddress(detail.tenant)}`}
           target="_blank"
           rel="noreferrer"
         >
-          {detail.tenant.domain}
+          {instanceAddress(detail.tenant)}
         </a>
       </div>
 

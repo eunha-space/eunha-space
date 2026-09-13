@@ -4,9 +4,11 @@ import {
   api,
   countsTowardInstanceLimit,
   errorMessage,
+  instanceAddress,
   instanceStatus,
   type Tenant,
 } from "@/api";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,6 +47,9 @@ export function CustomerApp() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [addressKind, setAddressKind] = useState<"provided" | "custom">(
+    "provided",
+  );
   const [subdomain, setSubdomain] = useState("");
   const [title, setTitle] = useState("");
   const [customDomain, setCustomDomain] = useState("");
@@ -137,9 +142,9 @@ export function CustomerApp() {
       await api("/customer/tenants", {
         method: "POST",
         body: JSON.stringify({
-          subdomain,
+          subdomain: addressKind === "provided" ? subdomain : "",
           title,
-          custom_domain: customDomain || null,
+          custom_domain: addressKind === "custom" ? customDomain : null,
           owner_username: ownerUsername,
         }),
       });
@@ -335,53 +340,51 @@ export function CustomerApp() {
             <CardContent>
               <form onSubmit={create} className="grid gap-4">
                 <div className="grid gap-2">
-                  <Label htmlFor="subdomain">{t("Eunha hostname")}</Label>
-                  <Input
-                    id="subdomain"
-                    placeholder="community"
-                    pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
-                    value={subdomain}
-                    onChange={(e) => setSubdomain(e.target.value.toLowerCase())}
-                    required
-                  />
-                  <span className="text-muted-foreground text-xs">
-                    {subdomain || "community"}.eunha.space
-                  </span>
+                  <Label>{t("Address")}</Label>
+                  <ToggleGroup
+                    variant="outline"
+                    size="sm"
+                    // Base UI keeps single-select state as an array and clears it
+                    // when the pressed item is pressed again; keep the choice.
+                    value={[addressKind]}
+                    onValueChange={(next) =>
+                      setAddressKind(
+                        (next[0] as "provided" | "custom" | undefined) ??
+                          addressKind,
+                      )}
+                  >
+                    <ToggleGroupItem value="provided">
+                      {t("eunha space address")}
+                    </ToggleGroupItem>
+                    <ToggleGroupItem value="custom">
+                      {t("My own domain")}
+                    </ToggleGroupItem>
+                  </ToggleGroup>
                 </div>
+                {addressKind === "provided" && (
+                  <div className="grid gap-2">
+                    <Label htmlFor="subdomain">{t("Eunha hostname")}</Label>
+                    <Input
+                      id="subdomain"
+                      placeholder="community"
+                      pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+                      value={subdomain}
+                      onChange={(e) =>
+                        setSubdomain(e.target.value.toLowerCase())}
+                      required
+                    />
+                    <span className="text-muted-foreground text-xs">
+                      {subdomain || "community"}.eunha.space
+                    </span>
+                  </div>
+                )}
+                {addressKind === "custom" && (
                 <div className="grid gap-2">
-                  <Label htmlFor="title">{t("Name")}</Label>
-                  <Input
-                    id="title"
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    required
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="owner">{t("Admin username")}</Label>
-                  <Input
-                    id="owner"
-                    placeholder="admin"
-                    pattern="[A-Za-z0-9_]{1,30}"
-                    maxLength={30}
-                    autoComplete="off"
-                    value={ownerUsername}
-                    onChange={(e) => setOwnerUsername(e.target.value)}
-                    required
-                  />
-                  <span className="text-muted-foreground text-xs">
-                    @{ownerUsername || "admin"}
-                    {" · "}
-                    {t("Letters, numbers, and underscores.")}
-                  </span>
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="domain">
-                    {t("Custom domain (optional)")}
-                  </Label>
+                  <Label htmlFor="domain">{t("Custom domain")}</Label>
                   <Input
                     id="domain"
                     placeholder="social.example.com"
+                    required
                     value={customDomain}
                     onChange={(e) => {
                       setCustomDomain(e.target.value.toLowerCase());
@@ -409,6 +412,35 @@ export function CustomerApp() {
                     </span>
                   )}
                 </div>
+                )}
+                <div className="grid gap-2">
+                  <Label htmlFor="title">{t("Name")}</Label>
+                  <Input
+                    id="title"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    required
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="owner">{t("Admin username")}</Label>
+                  <Input
+                    id="owner"
+                    placeholder="admin"
+                    pattern="[A-Za-z0-9_]{1,30}"
+                    maxLength={30}
+                    autoComplete="off"
+                    value={ownerUsername}
+                    onChange={(e) => setOwnerUsername(e.target.value)}
+                    required
+                  />
+                  <span className="text-muted-foreground text-xs">
+                    @{ownerUsername || "admin"}
+                    {" · "}
+                    {t("Letters, numbers, and underscores.")}
+                  </span>
+                </div>
+
                 <Button
                   type="submit"
                   disabled={busy || activeInstances >= customer.instance_limit}
@@ -437,7 +469,7 @@ export function CustomerApp() {
                   >
                     <strong>{t.title}</strong>
                     <p className="text-muted-foreground text-sm">
-                      {t.domain} · {i18n._(instanceStatus(t))}
+                      {instanceAddress(t)} · {i18n._(instanceStatus(t))}
                     </p>
                   </a>
                 ))}
