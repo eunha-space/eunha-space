@@ -1,6 +1,5 @@
 import { i18n } from "@lingui/core";
 import { I18nProvider, useLingui } from "@lingui/react";
-import { Languages } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const en: Record<string, string> = {};
@@ -83,7 +82,9 @@ export function LanguageToggle() {
       aria-label={korean ? "Switch to English" : "한국어로 전환"}
       title={korean ? "English" : "한국어"}
     >
-      <Languages />
+      <span className="text-xs font-semibold" aria-hidden="true">
+        {korean ? "EN" : "KO"}
+      </span>
     </Button>
   );
 }
