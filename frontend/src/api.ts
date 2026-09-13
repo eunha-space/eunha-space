@@ -10,6 +10,7 @@ export type Tenant = {
     | "failed"
     | "deprovisioning"
     | "retained"
+    | "purging"
     | "purged";
   desired_state: string;
   observed_state: TenantState;
@@ -22,11 +23,16 @@ export type Tenant = {
   deletion_scheduled_for: string | null;
 };
 
-/** A deprovisioned instance keeps its data but frees its slot. */
-export function countsTowardInstanceLimit(tenant: Pick<Tenant, "lifecycle_state">) {
-  return !["deprovisioning", "retained", "purged"].includes(
+/** Whether a tenant is being or has been taken offline; the runtime does not serve it. */
+export function isOffline(tenant: Pick<Tenant, "lifecycle_state">): boolean {
+  return ["deprovisioning", "retained", "purging", "purged"].includes(
     tenant.lifecycle_state,
   );
+}
+
+/** A deprovisioned instance keeps its data but frees its slot. */
+export function countsTowardInstanceLimit(tenant: Pick<Tenant, "lifecycle_state">) {
+  return !isOffline(tenant);
 }
 
 /** The customer-facing name of an instance's state, as an untranslated message. */
@@ -171,7 +177,8 @@ export function isSettled(status: string | null): boolean {
 }
 
 export function pendingRender(tenant: Tenant): boolean {
-  return tenant.rendered_revision !== tenant.config_revision;
+  // A tenant taken offline is deliberately not rendered.
+  return !isOffline(tenant) && tenant.rendered_revision !== tenant.config_revision;
 }
 
 export type TenantConfiguration = {

@@ -74,8 +74,22 @@ are kept, nothing is announced to other servers, and it no longer counts
 against the customer's two-instance limit. The customer can restore it while
 they have a free slot, which re-runs migration, rendering, reload and health
 checks. Only an operator purge destroys retained data, and nothing purges
-automatically. Retained tenants are ignored by domain reconciliation, operator
-renders and runtime-release health checks.
+automatically. Retained tenants are ignored by domain reconciliation, health
+checks, operator renders and runtime-release health checks.
+
+Operators can **Restore** a retained tenant without checking the customer's
+instance limit, or **Purge** it after typing its domain. Purging runs as
+durable, retried steps. It deletes the tenant's Cloudflare for SaaS hostnames
+and domain records, which frees a customer's custom domain for use elsewhere.
+It drops the tenant's database and role, deletes its media under `t/<tenant id>/`
+and its Redis keys under its own prefix, and discards its configuration and
+VAPID keys. Each resource is removed only when it provably belongs to the tenant:
+the database and role must carry the names provisioning derives from the tenant
+id, and the media and Redis prefixes must be the tenant's own. Anything else,
+such as an imported tenant's database, is left in place and noted on the
+operation. If Redis refuses, the purge notes it and continues rather than
+blocking. The tenant row stays as `purged`, keeping its domain reserved, because
+remote servers still remember the accounts that lived there.
 
 `EUNHA_PROVIDED_DOMAIN_SUFFIXES` is a comma-separated, primary-first list of
 platform domains (default `eunha.space`). Provisioning `garden` with

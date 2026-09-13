@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
-import { HardDrive, Inbox, Plus, RefreshCw } from "lucide-react";
-import { api, pendingRender, type Runtime, type Tenant, type TenantDomain } from "@/api";
+import { HardDrive, Inbox, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
+import { api, isOffline, pendingRender, type Runtime, type Tenant, type TenantDomain } from "@/api";
 import { absoluteTime, relativeTime } from "@/format";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -24,6 +24,7 @@ type Props = {
 };
 
 const NEEDS_ATTENTION = new Set(["unhealthy", "unknown"]);
+
 
 function matches(tenant: Tenant, filter: string): boolean {
   if (filter === "healthy") return tenant.observed_state === "healthy";
@@ -208,7 +209,7 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                       )}
                       {/* A deleted tenant's lifecycle badge already says it is going or has gone offline. */}
                       {tenant.desired_state !== "running" &&
-                        !["deprovisioning", "retained", "purged"].includes(tenant.lifecycle_state) && (
+                        !isOffline(tenant) && (
                         <Badge variant="outline" className="text-muted-foreground">
                           Desired: {tenant.desired_state}
                         </Badge>
@@ -261,27 +262,52 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                         Retry provisioning
                       </ActionButton>
                     )}
-                    <DomainsDialog tenant={tenant} busy={busy} act={act} />
-                    <TenantConfigDialog tenantId={tenant.id} domain={tenant.domain} />
-                    <ActionButton
-                      icon={<RefreshCw />}
-                      busy={busy === `check-${tenant.id}`}
-                      onClick={() => act(`/tenants/${tenant.id}/check`, `check-${tenant.id}`)}
-                    >
-                      Check
-                    </ActionButton>
-                    <ActionButton
-                      variant="default"
-                      busy={busy === `render-${tenant.id}`}
-                      confirm={{
-                        title: `Render and restart ${tenant.domain}?`,
-                        description: `This rewrites the runtime configuration file for ${tenant.domain} from revision ${tenant.config_revision} and restarts its service. The tenant is briefly unavailable while it restarts.`,
-                        action: "Render & restart",
-                      }}
-                      onClick={() => act(`/tenants/${tenant.id}/render`, `render-${tenant.id}`)}
-                    >
-                      Render &amp; restart
-                    </ActionButton>
+                    {tenant.lifecycle_state === "retained" && (
+                      <>
+                        <ActionButton
+                          icon={<RotateCcw />}
+                          busy={busy === `restore-${tenant.id}`}
+                          confirm={{
+                            title: `Restore ${tenant.domain}?`,
+                            description: "The tenant is migrated to its runtime's release, rendered and served again with its retained data. The customer's instance limit is not checked.",
+                            action: "Restore",
+                          }}
+                          onClick={() => act(`/tenants/${tenant.id}/restore`, `restore-${tenant.id}`)}
+                        >
+                          Restore
+                        </ActionButton>
+                        <PurgeDialog tenant={tenant} busy={busy === `purge-${tenant.id}`} act={act} />
+                      </>
+                    )}
+                    {tenant.lifecycle_state !== "purging" && tenant.lifecycle_state !== "purged" && (
+                      <>
+                        <DomainsDialog tenant={tenant} busy={busy} act={act} />
+                        <TenantConfigDialog tenantId={tenant.id} domain={tenant.domain} />
+                      </>
+                    )}
+                    {!isOffline(tenant) && (
+                      <>
+                        <ActionButton
+                          icon={<RefreshCw />}
+                          busy={busy === `check-${tenant.id}`}
+                          onClick={() => act(`/tenants/${tenant.id}/check`, `check-${tenant.id}`)}
+                        >
+                          Check
+                        </ActionButton>
+                        <ActionButton
+                          variant="default"
+                          busy={busy === `render-${tenant.id}`}
+                          confirm={{
+                            title: `Render and restart ${tenant.domain}?`,
+                            description: `This rewrites the runtime configuration file for ${tenant.domain} from revision ${tenant.config_revision} and restarts its service. The tenant is briefly unavailable while it restarts.`,
+                            action: "Render & restart",
+                          }}
+                          onClick={() => act(`/tenants/${tenant.id}/render`, `render-${tenant.id}`)}
+                        >
+                          Render &amp; restart
+                        </ActionButton>
+                      </>
+                    )}
                   </div>
                 </div>
               ))}
@@ -290,6 +316,58 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
         )}
       </Card>
     </div>
+  );
+}
+
+function PurgeDialog({ tenant, busy, act }: { tenant: Tenant; busy: boolean; act: Props["act"] }) {
+  const [open, setOpen] = useState(false);
+  const [confirmation, setConfirmation] = useState("");
+  const confirmed = confirmation.trim().toLowerCase() === tenant.domain.toLowerCase();
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) setConfirmation("");
+      }}
+    >
+      <DialogTrigger render={<Button variant="destructive" />}>
+        <Trash2 /> Purge
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Purge {tenant.domain}?</DialogTitle>
+          <DialogDescription>
+            This permanently destroys the tenant: its Cloudflare hostnames, database and role, media, Redis keys and configuration.
+            It cannot be restored afterwards. The domain stays reserved so it is never reused.
+          </DialogDescription>
+        </DialogHeader>
+        <form
+          className="grid gap-2"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            if (!confirmed) return;
+            if (await act(`/tenants/${tenant.id}/purge`, `purge-${tenant.id}`, { confirm_domain: confirmation })) {
+              setOpen(false);
+              setConfirmation("");
+            }
+          }}
+        >
+          <Label htmlFor={`purge-${tenant.id}`}>Type {tenant.domain} to confirm</Label>
+          <Input
+            id={`purge-${tenant.id}`}
+            autoComplete="off"
+            value={confirmation}
+            onChange={(event) => setConfirmation(event.target.value)}
+          />
+          <DialogFooter>
+            <Button type="submit" variant="destructive" disabled={!confirmed || busy}>
+              Purge permanently
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 

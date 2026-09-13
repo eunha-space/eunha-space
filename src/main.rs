@@ -190,6 +190,11 @@ struct NewTenant {
 }
 
 #[derive(Deserialize)]
+struct PurgeConfirmation {
+    confirm_domain: String,
+}
+
+#[derive(Deserialize)]
 struct NewDomain {
     hostname: String,
 }
@@ -683,6 +688,8 @@ async fn main() -> Result<()> {
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/tenants/{id}/check", post(check_tenant))
         .route("/tenants/{id}/retry", post(retry_provisioning))
+        .route("/tenants/{id}/restore", post(restore_tenant))
+        .route("/tenants/{id}/purge", post(purge_tenant))
         .route(
             "/tenants/{id}/domains",
             get(tenant_domains).post(attach_domain),
@@ -1066,7 +1073,7 @@ async fn customer_tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     let (id, _) = customer(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.deletion_scheduled_for FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.customer_id=$1 AND t.lifecycle_state <> 'purged' ORDER BY t.created_at").bind(id).fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.deletion_scheduled_for FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.customer_id=$1 AND t.lifecycle_state NOT IN ('purging','purged') ORDER BY t.created_at").bind(id).fetch_all(&s.db).await?))
 }
 
 async fn customer_tenant_detail(
@@ -1075,7 +1082,7 @@ async fn customer_tenant_detail(
     Path(id): Path<Uuid>,
 ) -> Result<Json<CustomerTenantDetail>, ApiError> {
     let (customer_id, _) = customer(&headers, &s.db).await?;
-    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,CASE WHEN t.owner_username IS NOT NULL THEN c.email END owner_email,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.deletion_scheduled_for FROM tenants t JOIN customers c ON c.id=t.customer_id WHERE t.id=$1 AND t.customer_id=$2 AND t.lifecycle_state <> 'purged'")
+    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds') THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,CASE WHEN t.owner_username IS NOT NULL THEN c.email END owner_email,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.deletion_scheduled_for FROM tenants t JOIN customers c ON c.id=t.customer_id WHERE t.id=$1 AND t.customer_id=$2 AND t.lifecycle_state NOT IN ('purging','purged')")
         .bind(id)
         .bind(customer_id)
         .fetch_optional(&s.db)
@@ -1100,7 +1107,7 @@ async fn tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     operator(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.deletion_scheduled_for FROM tenants t JOIN runtimes r ON r.id=t.runtime_id ORDER BY t.domain").fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.deletion_scheduled_for FROM tenants t JOIN runtimes r ON r.id=t.runtime_id ORDER BY t.domain").fetch_all(&s.db).await?))
 }
 
 fn random_hex(bytes: usize) -> String {
@@ -1778,7 +1785,7 @@ async fn customer_instance_count(
     customer_id: Uuid,
 ) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM tenants WHERE customer_id=$1 AND lifecycle_state NOT IN ('deprovisioning','retained','purged')",
+        "SELECT count(*) FROM tenants WHERE customer_id=$1 AND lifecycle_state NOT IN ('deprovisioning','retained','purging','purged')",
     )
     .bind(customer_id)
     .fetch_one(&mut **tx)
@@ -1894,23 +1901,62 @@ async fn customer_restore(
             "Delete another instance before restoring this one.".into(),
         ));
     }
-    sqlx::query("UPDATE tenants SET lifecycle_state='provisioning',desired_state='running',observed_state='unknown',observed_at=NULL,observation_error=NULL,deletion_scheduled_for=NULL,updated_at=now() WHERE id=$1")
-        .bind(id).execute(&mut *tx).await?;
-    // Its database, owner and routing survive; the instance only needs its
-    // schema brought up to the runtime's release and its configuration served.
-    sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['migrate','render','reload','health']) ON CONFLICT (tenant_id,step) DO UPDATE SET status='pending',error=NULL,started_at=NULL,finished_at=NULL,updated_at=now()")
-        .bind(id).execute(&mut *tx).await?;
-    sqlx::query("DELETE FROM deprovisioning_steps WHERE tenant_id=$1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    let operation_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by_customer,detail,started_at) SELECT $1,t.id,t.runtime_id,'tenant_provision','running',$2,jsonb_build_object('mode','restore'),now() FROM tenants t WHERE t.id=$3")
-        .bind(operation_id).bind(customer_id).bind(id).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Restore queued; retained data is served again once the instance is healthy.')")
-        .bind(operation_id).execute(&mut *tx).await?;
+    queue_restore(&mut tx, id, None, Some(customer_id)).await?;
     tx.commit().await?;
     Ok(StatusCode::ACCEPTED)
+}
+
+/// Restore a retained tenant on an operator's behalf. Unlike a customer's own
+/// restore it does not check the customer's instance limit: an operator can
+/// grant the exception.
+async fn restore_tenant(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let mut tx = s.db.begin().await?;
+    let retained = sqlx::query_scalar::<_, bool>(
+        "SELECT true FROM tenants WHERE id=$1 AND lifecycle_state='retained' FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if !retained {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Only a retained tenant can be restored.".into(),
+        ));
+    }
+    queue_restore(&mut tx, id, Some(operator_id), None).await?;
+    tx.commit().await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Queue a retained tenant to be served again. Its database, owner and routing
+/// survive, so it only needs its schema brought up to the runtime's release and
+/// its configuration served.
+async fn queue_restore(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    operator_id: Option<Uuid>,
+    customer_id: Option<Uuid>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE tenants SET lifecycle_state='provisioning',desired_state='running',observed_state='unknown',observed_at=NULL,observation_error=NULL,deletion_scheduled_for=NULL,updated_at=now() WHERE id=$1")
+        .bind(tenant_id).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['migrate','render','reload','health']) ON CONFLICT (tenant_id,step) DO UPDATE SET status='pending',error=NULL,started_at=NULL,finished_at=NULL,updated_at=now()")
+        .bind(tenant_id).execute(&mut **tx).await?;
+    sqlx::query("DELETE FROM deprovisioning_steps WHERE tenant_id=$1")
+        .bind(tenant_id)
+        .execute(&mut **tx)
+        .await?;
+    let operation_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,requested_by_customer,detail,started_at) SELECT $1,t.id,t.runtime_id,'tenant_provision','running',$2,$3,jsonb_build_object('mode','restore'),now() FROM tenants t WHERE t.id=$4")
+        .bind(operation_id).bind(operator_id).bind(customer_id).bind(tenant_id).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Restore queued; retained data is served again once the instance is healthy.')")
+        .bind(operation_id).execute(&mut **tx).await?;
+    Ok(())
 }
 
 async fn record_customer_operation(
@@ -1950,10 +1996,39 @@ async fn begin_deprovisioning(
     Ok(())
 }
 
-/// A deprovisioning step that failed is retried this often, this many times,
-/// before the operation is left failed for an operator.
-const DEPROVISION_RETRY_SECONDS: i64 = 60;
-const DEPROVISION_MAX_ATTEMPTS: i32 = 10;
+/// A deprovisioning or purge step that failed is retried this often, this many
+/// times, before the operation is left failed for an operator.
+const LIFECYCLE_RETRY_SECONDS: i64 = 60;
+const LIFECYCLE_MAX_ATTEMPTS: i32 = 10;
+
+/// A durable sequence that moves a tenant from one lifecycle state to the next.
+struct LifecycleFlow {
+    steps_table: &'static str,
+    operation_kind: &'static str,
+    running_state: &'static str,
+    done_state: &'static str,
+    steps: &'static [&'static str],
+    /// What an exhausted step asks of an operator.
+    exhausted: &'static str,
+}
+
+const DEPROVISION: LifecycleFlow = LifecycleFlow {
+    steps_table: "deprovisioning_steps",
+    operation_kind: "tenant_deprovision",
+    running_state: "deprovisioning",
+    done_state: "retained",
+    steps: &["unrender", "reload", "offline"],
+    exhausted: "an operator needs to take the instance offline",
+};
+
+const PURGE: LifecycleFlow = LifecycleFlow {
+    steps_table: "purge_steps",
+    operation_kind: "tenant_purge",
+    running_state: "purging",
+    done_state: "purged",
+    steps: &["cloudflare", "database", "media", "redis", "configuration"],
+    exhausted: "an operator needs to finish removing the tenant's data",
+};
 
 async fn deprovisioning_reconciler(state: Shared) {
     loop {
@@ -1972,21 +2047,28 @@ async fn deprovisioning_reconciler(state: Shared) {
                 }
             }
         }
-        if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM tenants WHERE lifecycle_state='deprovisioning' ORDER BY updated_at LIMIT 10")
-            .fetch_all(&state.db).await
-        {
-            for id in ids {
-                deprovision_tenant(&state, id).await;
+        for flow in [&DEPROVISION, &PURGE] {
+            if let Ok(ids) = sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM tenants WHERE lifecycle_state=$1 ORDER BY updated_at LIMIT 10",
+            )
+            .bind(flow.running_state)
+            .fetch_all(&state.db)
+            .await
+            {
+                for id in ids {
+                    run_lifecycle_flow(&state, id, flow).await;
+                }
             }
         }
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
 
-async fn deprovision_tenant(state: &Shared, tenant_id: Uuid) {
-    for step in ["unrender", "reload", "offline"] {
+async fn run_lifecycle_flow(state: &Shared, tenant_id: Uuid, flow: &LifecycleFlow) {
+    let table = flow.steps_table;
+    for &step in flow.steps {
         let row = sqlx::query_as::<_, (String, i32, bool)>(&format!(
-            "SELECT status,attempts,updated_at < now()-interval '{DEPROVISION_RETRY_SECONDS} seconds' FROM deprovisioning_steps WHERE tenant_id=$1 AND step=$2"
+            "SELECT status,attempts,updated_at < now()-interval '{LIFECYCLE_RETRY_SECONDS} seconds' FROM {table} WHERE tenant_id=$1 AND step=$2"
         ))
         .bind(tenant_id)
         .bind(step)
@@ -1997,58 +2079,407 @@ async fn deprovision_tenant(state: &Shared, tenant_id: Uuid) {
         };
         match status.as_str() {
             "succeeded" => continue,
-            "failed" if !stale || attempts >= DEPROVISION_MAX_ATTEMPTS => return,
+            "failed" if !stale || attempts >= LIFECYCLE_MAX_ATTEMPTS => return,
             _ => {}
         }
-        if sqlx::query("UPDATE deprovisioning_steps SET status='running',attempts=attempts+1,error=NULL,started_at=now(),finished_at=NULL,updated_at=now() WHERE tenant_id=$1 AND step=$2")
+        if sqlx::query(&format!("UPDATE {table} SET status='running',attempts=attempts+1,error=NULL,started_at=now(),finished_at=NULL,updated_at=now() WHERE tenant_id=$1 AND step=$2"))
             .bind(tenant_id).bind(step).execute(&state.db).await.is_err()
         {
             return;
         }
-        let result = match step {
-            "unrender" => unrender_tenant(state, tenant_id).await,
-            "reload" => reload_provisioned_runtime(state, tenant_id).await,
-            "offline" => verify_tenant_offline(state, tenant_id).await,
-            _ => unreachable!(),
-        };
-        let operation = sqlx::query_scalar::<_, Uuid>("SELECT id FROM operations WHERE tenant_id=$1 AND kind='tenant_deprovision' AND status='running' ORDER BY created_at DESC LIMIT 1")
-            .bind(tenant_id).fetch_optional(&state.db).await.ok().flatten();
-        if result.is_err() {
-            let exhausted = attempts + 1 >= DEPROVISION_MAX_ATTEMPTS;
-            let message = if exhausted {
-                format!("{step} failed; an operator needs to take the instance offline.")
-            } else {
-                format!("{step} failed; retrying.")
-            };
-            let _ = sqlx::query("UPDATE deprovisioning_steps SET status='failed',error=$1,finished_at=now(),updated_at=now() WHERE tenant_id=$2 AND step=$3")
-                .bind(&message).bind(tenant_id).bind(step).execute(&state.db).await;
-            if let Some(operation) = operation {
-                let _ =
-                    sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,$2)")
-                        .bind(operation)
-                        .bind(&message)
-                        .execute(&state.db)
-                        .await;
-                if exhausted {
-                    mark_operation_failed(&state.db, operation, &message).await;
+        let result = lifecycle_step(state, tenant_id, step).await;
+        let operation = sqlx::query_scalar::<_, Uuid>("SELECT id FROM operations WHERE tenant_id=$1 AND kind=$2 AND status='running' ORDER BY created_at DESC LIMIT 1")
+            .bind(tenant_id).bind(flow.operation_kind).fetch_optional(&state.db).await.ok().flatten();
+        let note = match result {
+            Ok(note) => note,
+            Err(_) => {
+                let exhausted = attempts + 1 >= LIFECYCLE_MAX_ATTEMPTS;
+                let message = if exhausted {
+                    format!("{step} failed; {}.", flow.exhausted)
+                } else {
+                    format!("{step} failed; retrying.")
+                };
+                let _ = sqlx::query(&format!("UPDATE {table} SET status='failed',error=$1,finished_at=now(),updated_at=now() WHERE tenant_id=$2 AND step=$3"))
+                    .bind(&message).bind(tenant_id).bind(step).execute(&state.db).await;
+                if let Some(operation) = operation {
+                    release_event(&state.db, operation, &message).await;
+                    if exhausted {
+                        mark_operation_failed(&state.db, operation, &message).await;
+                    }
                 }
+                return;
             }
-            return;
-        }
-        let _ = sqlx::query("UPDATE deprovisioning_steps SET status='succeeded',finished_at=now(),updated_at=now() WHERE tenant_id=$1 AND step=$2")
+        };
+        let _ = sqlx::query(&format!("UPDATE {table} SET status='succeeded',finished_at=now(),updated_at=now() WHERE tenant_id=$1 AND step=$2"))
             .bind(tenant_id).bind(step).execute(&state.db).await;
         if let Some(operation) = operation {
-            let _ = sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,$2)")
-                .bind(operation)
-                .bind(format!("{step} completed."))
-                .execute(&state.db)
-                .await;
+            release_event(
+                &state.db,
+                operation,
+                &note.unwrap_or_else(|| format!("{step} completed.")),
+            )
+            .await;
         }
     }
-    let _ = sqlx::query("UPDATE tenants SET lifecycle_state='retained',updated_at=now() WHERE id=$1 AND lifecycle_state='deprovisioning'")
-        .bind(tenant_id).execute(&state.db).await;
-    let _ = sqlx::query("UPDATE operations SET status='succeeded',finished_at=now() WHERE id=(SELECT id FROM operations WHERE tenant_id=$1 AND kind='tenant_deprovision' AND status='running' ORDER BY created_at DESC LIMIT 1)")
-        .bind(tenant_id).execute(&state.db).await;
+    let finished = if flow.done_state == "purged" {
+        "UPDATE tenants SET lifecycle_state=$1,purged_at=now(),updated_at=now() WHERE id=$2 AND lifecycle_state=$3"
+    } else {
+        "UPDATE tenants SET lifecycle_state=$1,updated_at=now() WHERE id=$2 AND lifecycle_state=$3"
+    };
+    let _ = sqlx::query(finished)
+        .bind(flow.done_state)
+        .bind(tenant_id)
+        .bind(flow.running_state)
+        .execute(&state.db)
+        .await;
+    let _ = sqlx::query("UPDATE operations SET status='succeeded',finished_at=now() WHERE id=(SELECT id FROM operations WHERE tenant_id=$1 AND kind=$2 AND status='running' ORDER BY created_at DESC LIMIT 1)")
+        .bind(tenant_id).bind(flow.operation_kind).execute(&state.db).await;
+}
+
+/// Run one step of a lifecycle flow. A step that deliberately left something in
+/// place says why, and that note replaces its "completed" event.
+async fn lifecycle_step(state: &Shared, tenant_id: Uuid, step: &str) -> Result<Option<String>> {
+    match step {
+        "unrender" => unrender_tenant(state, tenant_id).await.map(|()| None),
+        "reload" => reload_provisioned_runtime(state, tenant_id)
+            .await
+            .map(|()| None),
+        "offline" => verify_tenant_offline(state, tenant_id).await.map(|()| None),
+        "cloudflare" => purge_cloudflare_hostnames(state, tenant_id).await,
+        "database" => purge_tenant_database(state, tenant_id).await,
+        "media" => purge_tenant_media(state, tenant_id).await,
+        "redis" => purge_tenant_redis(state, tenant_id).await,
+        "configuration" => purge_tenant_configuration(state, tenant_id).await,
+        _ => anyhow::bail!("unknown lifecycle step"),
+    }
+}
+
+async fn purge_tenant(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PurgeConfirmation>,
+) -> Result<StatusCode, ApiError> {
+    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let mut tx = s.db.begin().await?;
+    let domain = sqlx::query_scalar::<_, String>(
+        "SELECT domain FROM tenants WHERE id=$1 AND lifecycle_state='retained' FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| {
+        ApiError(
+            StatusCode::CONFLICT,
+            "Only a retained tenant can be purged.".into(),
+        )
+    })?;
+    if !body.confirm_domain.trim().eq_ignore_ascii_case(&domain) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Type the tenant's domain to confirm the purge.".into(),
+        ));
+    }
+    sqlx::query("UPDATE tenants SET lifecycle_state='purging',updated_at=now() WHERE id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("INSERT INTO purge_steps(tenant_id,step) SELECT $1,unnest(ARRAY['cloudflare','database','media','redis','configuration']) ON CONFLICT (tenant_id,step) DO UPDATE SET status='pending',attempts=0,error=NULL,started_at=NULL,finished_at=NULL,updated_at=now()")
+        .bind(id).execute(&mut *tx).await?;
+    let operation_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) SELECT $1,t.id,t.runtime_id,'tenant_purge','running',$2,jsonb_build_object('domain',t.domain),now() FROM tenants t WHERE t.id=$3")
+        .bind(operation_id).bind(operator_id).bind(id).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Purge confirmed; the tenant''s data is being destroyed.')")
+        .bind(operation_id).execute(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Remove the tenant's Cloudflare for SaaS hostnames, then its domain records,
+/// which frees a customer's own custom domain for use elsewhere. The tenant's
+/// primary domain stays reserved on the tenant row.
+async fn purge_cloudflare_hostnames(state: &Shared, tenant_id: Uuid) -> Result<Option<String>> {
+    let registered = sqlx::query_scalar::<_, String>(
+        "SELECT cloudflare_id FROM tenant_domains WHERE tenant_id=$1 AND cloudflare_id IS NOT NULL",
+    )
+    .bind(tenant_id)
+    .fetch_all(&state.db)
+    .await?;
+    if !registered.is_empty() {
+        let cloudflare = state
+            .cloudflare
+            .as_ref()
+            .context("Cloudflare is not configured")?;
+        for cloudflare_id in registered {
+            anyhow::ensure!(
+                cloudflare_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+                "invalid Cloudflare hostname id"
+            );
+            let response = state
+                .client
+                .delete(format!(
+                    "https://api.cloudflare.com/client/v4/zones/{}/custom_hostnames/{cloudflare_id}",
+                    cloudflare.zone_id
+                ))
+                .bearer_auth(&cloudflare.api_token)
+                .send()
+                .await?;
+            anyhow::ensure!(
+                response.status().is_success() || response.status() == StatusCode::NOT_FOUND,
+                "Cloudflare refused to delete a hostname"
+            );
+            sqlx::query("UPDATE tenant_domains SET cloudflare_id=NULL,updated_at=now() WHERE tenant_id=$1 AND cloudflare_id=$2")
+                .bind(tenant_id).bind(&cloudflare_id).execute(&state.db).await?;
+        }
+    }
+    sqlx::query("DELETE FROM tenant_domains WHERE tenant_id=$1")
+        .bind(tenant_id)
+        .execute(&state.db)
+        .await?;
+    Ok(None)
+}
+
+/// Drop the tenant's database and role — only if they are the ones provisioning
+/// created for exactly this tenant. An imported tenant's database is left alone.
+async fn purge_tenant_database(state: &Shared, tenant_id: Uuid) -> Result<Option<String>> {
+    let Some(database_url) = sqlx::query_scalar::<_, String>(
+        "SELECT database_url FROM tenant_configuration WHERE tenant_id=$1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await?
+    else {
+        return Ok(Some("database has no configuration left to purge.".into()));
+    };
+    let Some((role, database)) = provisioned_database_names(tenant_id, &database_url) else {
+        return Ok(Some(
+            "database was not created by provisioning for this tenant; it was left in place."
+                .into(),
+        ));
+    };
+    let mut admin_url = url::Url::parse(&state.provision_database_url)?;
+    admin_url.set_path("/postgres");
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(admin_url.as_str())
+        .await?;
+    // Both names are derived from the tenant id above, never from stored text.
+    let dropped = async {
+        // Dropping a database takes the privileges of its owner. A superuser has
+        // them; an account with CREATEROLE can take them by granting itself the
+        // tenant's role, which PostgreSQL 16 gave it ADMIN OPTION on.
+        let can_drop_as_superuser = sqlx::query_scalar::<_, bool>(
+            "SELECT rolsuper FROM pg_roles WHERE rolname=current_user",
+        )
+        .fetch_one(&admin)
+        .await?;
+        let role_exists =
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=$1)")
+                .bind(&role)
+                .fetch_one(&admin)
+                .await?;
+        if !can_drop_as_superuser && role_exists {
+            sqlx::query(&format!("GRANT {role} TO CURRENT_USER"))
+                .execute(&admin)
+                .await?;
+        }
+        sqlx::query(&format!("DROP DATABASE IF EXISTS {database} WITH (FORCE)"))
+            .execute(&admin)
+            .await?;
+        sqlx::query(&format!("DROP ROLE IF EXISTS {role}"))
+            .execute(&admin)
+            .await
+    }
+    .await;
+    admin.close().await;
+    dropped?;
+    Ok(None)
+}
+
+/// The role and database provisioning created for this tenant, if `database_url`
+/// names exactly those. Names are derived from the tenant id, never taken from
+/// the stored URL, so they are safe to put in DDL.
+fn provisioned_database_names(tenant_id: Uuid, database_url: &str) -> Option<(String, String)> {
+    let compact = tenant_id.simple().to_string();
+    let (role, database) = (format!("eunha_r_{compact}"), format!("eunha_t_{compact}"));
+    let url = url::Url::parse(database_url).ok()?;
+    (url.username() == role && url.path().trim_start_matches('/') == database)
+        .then_some((role, database))
+}
+
+/// Delete every media object under the tenant's own `t/<tenant id>/` prefix.
+/// Media stored anywhere else, such as an imported tenant's dedicated bucket, is
+/// left alone.
+async fn purge_tenant_media(state: &Shared, tenant_id: Uuid) -> Result<Option<String>> {
+    use rusty_s3::{
+        Bucket, Credentials, S3Action, UrlStyle,
+        actions::{DeleteObjects, DeleteObjectsResponse, ListObjectsV2, ObjectIdentifier},
+    };
+    let Some((bucket_name, endpoint, region, access_key_id, secret_access_key, key_prefix)) =
+        sqlx::query_as::<_, (String, Option<String>, String, String, String, String)>(
+            "SELECT b.bucket_name,c.media_storage_endpoint,c.media_storage_region,c.media_storage_access_key_id,c.media_storage_secret_access_key,c.media_storage_key_prefix FROM tenant_configuration c JOIN r2_buckets b ON b.tenant_id=c.tenant_id WHERE c.tenant_id=$1",
+        )
+        .bind(tenant_id)
+        .fetch_optional(&state.db)
+        .await?
+    else {
+        return Ok(Some("media has no configuration left to purge.".into()));
+    };
+    let prefix = format!("t/{tenant_id}");
+    if key_prefix.trim_matches('/') != prefix {
+        return Ok(Some(
+            "media is not under this tenant's own storage prefix; it was left in place.".into(),
+        ));
+    }
+    let endpoint = url::Url::parse(&endpoint.context("media storage has no endpoint")?)?;
+    let bucket = Bucket::new(endpoint, UrlStyle::Path, bucket_name, region)?;
+    let credentials = Credentials::new(access_key_id, secret_access_key);
+    let objects_prefix = format!("{prefix}/");
+    let expires = Duration::from_secs(300);
+    let mut deleted = 0usize;
+    let mut previous_first: Option<String> = None;
+    loop {
+        let mut list = ListObjectsV2::new(&bucket, Some(&credentials));
+        list.with_prefix(objects_prefix.as_str());
+        list.with_max_keys(1000);
+        let listing = state
+            .client
+            .get(list.sign(expires))
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        let keys: Vec<ObjectIdentifier> = ListObjectsV2::parse_response(&listing)?
+            .contents
+            .into_iter()
+            .map(|object| object.key)
+            // The listing is already prefixed; this only refuses to act on
+            // anything a misbehaving endpoint returns outside it.
+            .filter(|key| key.starts_with(&objects_prefix))
+            .map(ObjectIdentifier::new)
+            .collect();
+        let Some(first) = keys.first().map(|object| object.key.clone()) else {
+            break;
+        };
+        anyhow::ensure!(
+            previous_first.as_deref() != Some(first.as_str()),
+            "media objects are not being deleted"
+        );
+        previous_first = Some(first);
+        let mut delete = DeleteObjects::new(&bucket, Some(&credentials), keys.iter());
+        delete.set_quiet(true);
+        let url = delete.sign(expires);
+        let (body, content_md5) = delete.body_with_md5();
+        let response = state
+            .client
+            .post(url)
+            .header("Content-MD5", content_md5)
+            .body(body)
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        anyhow::ensure!(
+            DeleteObjectsResponse::parse(&response)?.errors.is_empty(),
+            "some media objects could not be deleted"
+        );
+        deleted += keys.len();
+    }
+    Ok(Some(format!("media completed; {deleted} objects deleted.")))
+}
+
+/// Delete the tenant's Redis keys under its own prefix. They are cache and
+/// coordination state under a prefix nothing else uses, so a Redis that refuses
+/// is noted rather than blocking the purge.
+async fn purge_tenant_redis(state: &Shared, tenant_id: Uuid) -> Result<Option<String>> {
+    let Some((redis_url, coordination_url, key_prefix)) =
+        sqlx::query_as::<_, (String, Option<String>, String)>(
+            "SELECT redis_url,redis_coordination_url,redis_key_prefix FROM tenant_configuration WHERE tenant_id=$1",
+        )
+        .bind(tenant_id)
+        .fetch_optional(&state.db)
+        .await?
+    else {
+        return Ok(Some("redis has no configuration left to purge.".into()));
+    };
+    if key_prefix != tenant_redis_key_prefix(tenant_id) {
+        return Ok(Some(
+            "redis keys are not under this tenant's own prefix; they were left in place.".into(),
+        ));
+    }
+    let mut urls = vec![redis_url];
+    urls.extend(coordination_url.filter(|url| !urls.contains(url)));
+    let pattern = format!("{key_prefix}:*");
+    let mut deleted = 0usize;
+    for url in urls {
+        match delete_redis_keys(&url, &pattern).await {
+            Ok(count) => deleted += count,
+            Err(error) => {
+                // The error names the command that failed, never the URL.
+                return Ok(Some(format!(
+                    "redis keys could not all be removed ({:?}); they can be cleared by hand with the pattern {pattern}.",
+                    error.kind()
+                )));
+            }
+        }
+    }
+    Ok(Some(format!("redis completed; {deleted} keys deleted.")))
+}
+
+async fn delete_redis_keys(url: &str, pattern: &str) -> redis::RedisResult<usize> {
+    let client = redis::Client::open(url)?;
+    let mut connection = client.get_multiplexed_async_connection().await?;
+    let mut cursor: u64 = 0;
+    let mut deleted = 0usize;
+    loop {
+        let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(pattern)
+            .arg("COUNT")
+            .arg(1000)
+            .query_async(&mut connection)
+            .await?;
+        if !keys.is_empty() {
+            let removed: usize = redis::cmd("DEL")
+                .arg(&keys)
+                .query_async(&mut connection)
+                .await?;
+            deleted += removed;
+        }
+        if next == 0 {
+            return Ok(deleted);
+        }
+        cursor = next;
+    }
+}
+
+/// Discard the tenant's configuration and remaining secrets. The tenant row
+/// stays as a purged record that keeps its domain reserved.
+async fn purge_tenant_configuration(state: &Shared, tenant_id: Uuid) -> Result<Option<String>> {
+    let mut tx = state.db.begin().await?;
+    sqlx::query("DELETE FROM tenant_configuration WHERE tenant_id=$1")
+        .bind(tenant_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "UPDATE r2_buckets SET lifecycle_state='deleted',updated_at=now() WHERE tenant_id=$1",
+    )
+    .bind(tenant_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE tenants SET vapid_private_key=NULL,vapid_public_key=NULL,updated_at=now() WHERE id=$1")
+        .bind(tenant_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(None)
 }
 
 /// Remove the tenant's runtime configuration so the runtime stops serving it on
@@ -3511,6 +3942,18 @@ async fn check_tenant(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (operator_id, _) = operator(&headers, &s.db).await?;
     let row = sqlx::query_as::<_, (String,String)>("SELECT t.domain,r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1").bind(id).fetch_optional(&s.db).await?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Tenant not found".into()))?;
+    let served = sqlx::query_scalar::<_, bool>(
+        "SELECT lifecycle_state NOT IN ('deprovisioning','retained','purging','purged') FROM tenants WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&s.db)
+    .await?;
+    if !served {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "A deprovisioned tenant is not served, so there is nothing to check.".into(),
+        ));
+    }
     let op = Uuid::new_v4();
     sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,requested_by,started_at) VALUES($1,$2,'health_check','running',$3,now())").bind(op).bind(id).bind(operator_id).execute(&s.db).await?;
     let url = format!("http://{}/api/v2/instance", row.1);
@@ -3672,7 +4115,7 @@ async fn render_tenant(
     ) = row;
     if matches!(
         tenant.lifecycle_state.as_str(),
-        "deprovisioning" | "retained" | "purged"
+        "deprovisioning" | "retained" | "purging" | "purged"
     ) {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -3851,6 +4294,30 @@ mod tests {
         printed_password, redact_connection_url, tenant_redis_key_prefix,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn purge_drops_only_the_database_provisioning_created() {
+        let tenant = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
+        let other = Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap();
+        let provisioned = super::tenant_database_url(
+            "postgres://admin:pw@db.internal:5432/postgres",
+            tenant,
+            "pw",
+        )
+        .unwrap();
+        eprintln!("{provisioned}");
+        let compact = tenant.simple().to_string();
+        assert_eq!(
+            super::provisioned_database_names(tenant, &provisioned),
+            Some((format!("eunha_r_{compact}"), format!("eunha_t_{compact}")))
+        );
+        assert_eq!(super::provisioned_database_names(other, &provisioned), None);
+        assert_eq!(
+            super::provisioned_database_names(tenant, "postgres://legacy:pw@localhost/eunha"),
+            None
+        );
+        assert_eq!(super::provisioned_database_names(tenant, "not a url"), None);
+    }
 
     #[test]
     fn account_commands_print_their_password_after_ok() {
