@@ -206,7 +206,9 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                           {tenant.lifecycle_state}
                         </Badge>
                       )}
-                      {tenant.desired_state !== "running" && (
+                      {/* A deleted tenant's lifecycle badge already says it is going or has gone offline. */}
+                      {tenant.desired_state !== "running" &&
+                        !["deprovisioning", "retained", "purged"].includes(tenant.lifecycle_state) && (
                         <Badge variant="outline" className="text-muted-foreground">
                           Desired: {tenant.desired_state}
                         </Badge>
