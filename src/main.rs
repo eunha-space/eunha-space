@@ -653,7 +653,7 @@ async fn main() -> Result<()> {
         .with_state(state);
     let bind = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:60001".into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
-    tracing::info!(%bind, "eunha.space control plane listening");
+    tracing::info!(%bind, "eunha space control plane listening");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -799,7 +799,7 @@ async fn customer_register(
             }
         })?;
     if let Err(error) =
-        send_customer_link(&s, id, &body.email, "Verify your eunha.space email").await
+        send_customer_link(&s, id, &body.email, "Verify your eunha space email").await
     {
         sqlx::query("DELETE FROM customers WHERE id=$1")
             .bind(id)
@@ -835,7 +835,7 @@ async fn send_customer_link(
         mail.public_url.trim_end_matches('/'),
         token
     );
-    let response=s.client.post("https://api.resend.com/emails").bearer_auth(&mail.api_key).json(&serde_json::json!({"from":mail.from,"to":[email],"subject":subject,"text":format!("Use this secure link to continue to eunha.space:\n\n{url}\n\nThis link expires in 30 minutes.")})).send().await;
+    let response=s.client.post("https://api.resend.com/emails").bearer_auth(&mail.api_key).json(&serde_json::json!({"from":mail.from,"to":[email],"subject":subject,"text":format!("Use this secure link to continue to eunha space:\n\n{url}\n\nThis link expires in 30 minutes.")})).send().await;
     if matches!(response,Ok(response) if response.status().is_success()) {
         Ok(())
     } else {
@@ -886,7 +886,7 @@ async fn customer_login(
         ));
     };
     if body.password.is_none() {
-        send_customer_link(&s, id, &body.email, "Your eunha.space sign-in link").await?;
+        send_customer_link(&s, id, &body.email, "Your eunha space sign-in link").await?;
         return Ok(StatusCode::ACCEPTED.into_response());
     }
     let hash = hash.ok_or_else(|| {

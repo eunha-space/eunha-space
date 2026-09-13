@@ -1,6 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Activity, CircleAlert, HardDrive, LogOut, RefreshCw, Rocket, Server, X } from "lucide-react";
-import { ApiError, api, errorMessage, type Operation, type Runtime, type Tenant } from "@/api";
+import {
+  Activity,
+  CircleAlert,
+  HardDrive,
+  LogOut,
+  RefreshCw,
+  Rocket,
+  Server,
+  X,
+} from "lucide-react";
+import {
+  api,
+  ApiError,
+  errorMessage,
+  type Operation,
+  type Runtime,
+  type Tenant,
+} from "@/api";
 import { relativeTime } from "@/format";
 import { Instances } from "@/Instances";
 import { Login } from "@/Login";
@@ -59,7 +75,12 @@ export function App() {
         setError("");
       } else {
         const message = errorMessage(failure);
-        setSession((current) => (current.state === "loading" ? { state: "error", message } : current));
+        setSession((
+          current,
+        ) => (current.state === "loading"
+          ? { state: "error", message }
+          : current)
+        );
         setError(message);
       }
     } finally {
@@ -95,7 +116,10 @@ export function App() {
       setBusy(key);
       setError("");
       try {
-        await api(path, { method: "POST", body: body ? JSON.stringify(body) : undefined });
+        await api(path, {
+          method: "POST",
+          body: body ? JSON.stringify(body) : undefined,
+        });
         await load({ manual: true });
         return true;
       } catch (failure) {
@@ -114,7 +138,8 @@ export function App() {
         <div className="grid justify-items-center gap-3">
           <Mark />
           <p className="text-muted-foreground flex items-center gap-2 text-sm">
-            <Spinner label="Loading" className="size-4" /> Loading the control plane…
+            <Spinner label="Loading" className="size-4" />{" "}
+            Loading the control plane…
           </p>
         </div>
       </div>
@@ -126,8 +151,12 @@ export function App() {
       <div className="grid min-h-screen place-items-center p-4">
         <div className="grid justify-items-center gap-3 text-center">
           <Mark />
-          <h1 className="text-2xl font-semibold tracking-tight">Control plane unreachable</h1>
-          <p className="text-muted-foreground max-w-prose text-sm">{session.message}</p>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            Control plane unreachable
+          </h1>
+          <p className="text-muted-foreground max-w-prose text-sm">
+            {session.message}
+          </p>
           <Button onClick={() => void load({ manual: true })}>
             <RefreshCw />
             Try again
@@ -152,7 +181,8 @@ export function App() {
     { id: "releases", label: "Releases", icon: Rocket },
     { id: "operations", label: "Operations", icon: Activity },
   ];
-  const heading = sections.find((section) => section.id === view)?.label ?? "Tenants";
+  const heading = sections.find((section) => section.id === view)?.label ??
+    "Tenants";
 
   return (
     <TooltipProvider delay={200}>
@@ -161,11 +191,16 @@ export function App() {
           <div className="flex items-center gap-3">
             <Mark className="size-10" />
             <div className="hidden flex-col md:flex">
-              <strong className="leading-tight">eunha.space</strong>
-              <span className="text-muted-foreground text-sm">Control plane</span>
+              <strong className="leading-tight">eunha space</strong>
+              <span className="text-muted-foreground text-sm">
+                Control plane
+              </span>
             </div>
           </div>
-          <nav aria-label="Console sections" className="flex gap-1 md:mt-8 md:grid">
+          <nav
+            aria-label="Console sections"
+            className="flex gap-1 md:mt-8 md:grid"
+          >
             {sections.map((section) => (
               <Button
                 key={section.id}
@@ -176,7 +211,10 @@ export function App() {
                 title={section.label}
                 onClick={(event) => {
                   // Let modified clicks fall through to the browser.
-                  if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+                  if (
+                    event.metaKey || event.ctrlKey || event.shiftKey ||
+                    event.button !== 0
+                  ) return;
                   event.preventDefault();
                   navigate(section.id);
                 }}
@@ -218,13 +256,22 @@ export function App() {
         >
           <header className="mb-6 flex flex-wrap items-center justify-between gap-4">
             <div>
-              <p className="text-primary mb-1 text-xs font-extrabold tracking-[0.18em]">RUNTIME FLEET</p>
-              <h1 className="text-3xl font-semibold tracking-tight">{heading}</h1>
+              <p className="text-primary mb-1 text-xs font-extrabold tracking-[0.18em]">
+                RUNTIME FLEET
+              </p>
+              <h1 className="text-3xl font-semibold tracking-tight">
+                {heading}
+              </h1>
             </div>
             <div className="flex items-center gap-2">
               <p className="text-muted-foreground flex items-center gap-1.5 text-sm whitespace-nowrap">
-                <span className="bg-primary size-1.5 animate-pulse rounded-full" aria-hidden="true" />
-                {updatedAt ? `Updated ${relativeTime(updatedAt, now)}` : "Awaiting first update"}
+                <span
+                  className="bg-primary size-1.5 animate-pulse rounded-full"
+                  aria-hidden="true"
+                />
+                {updatedAt
+                  ? `Updated ${relativeTime(updatedAt, now)}`
+                  : "Awaiting first update"}
               </p>
               <Button
                 variant="outline"
@@ -234,7 +281,9 @@ export function App() {
                 aria-label="Refresh now"
                 title="Refresh now"
               >
-                <RefreshCw className={refreshing ? "animate-spin" : undefined} />
+                <RefreshCw
+                  className={refreshing ? "animate-spin" : undefined}
+                />
               </Button>
             </div>
           </header>
@@ -257,12 +306,20 @@ export function App() {
           )}
 
           {view === "tenants" && (
-            <Tenants tenants={tenants} runtimes={runtimes} busy={busy} act={act} />
+            <Tenants
+              tenants={tenants}
+              runtimes={runtimes}
+              busy={busy}
+              act={act}
+            />
           )}
-          {view === "instances" && <Instances runtimes={runtimes} tenants={tenants} />}
-          {view === "releases" && <Releases runtimes={runtimes} busy={busy} act={act} />}
+          {view === "instances" && (
+            <Instances runtimes={runtimes} tenants={tenants} />
+          )}
+          {view === "releases" && (
+            <Releases runtimes={runtimes} busy={busy} act={act} />
+          )}
           {view === "operations" && <Operations operations={operations} />}
-
         </main>
       </div>
     </TooltipProvider>

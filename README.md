@@ -1,4 +1,4 @@
-# eunha.space
+# eunha space
 
 The control plane for hosted Eunha instances. PostgreSQL's typed tenant,
 configuration, and R2-resource rows are authoritative; runtime TOML files are
@@ -94,7 +94,7 @@ refuses the action rather than attempting to reach into a remote filesystem.
 
 ## Runtime releases
 
-Eunha code is released once per shared runtime, never per tenant. eunha.space
+Eunha code is released once per shared runtime, never per tenant. eunha space
 builds an immutable bundle from its sibling `../eunha` checkout, including the
 release binary and built frontend, then transfers that bundle over SSH to the
 runtime host. Runtime hosts need neither a source checkout nor build tooling.
