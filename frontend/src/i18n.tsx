@@ -69,6 +69,7 @@ const ko: Record<string, string> = {
   "Your admin account is created when setup finishes.":
     "설정이 끝나면 관리자 계정이 만들어집니다.",
   Username: "사용자명",
+  "Sign-in email": "로그인 이메일",
   "Sign-in page": "로그인 페이지",
   "Create password": "비밀번호 만들기",
   "Reset password": "비밀번호 재설정",

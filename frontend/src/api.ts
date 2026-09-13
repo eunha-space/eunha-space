@@ -86,6 +86,8 @@ export type CustomerTenantDetail = {
   > & {
     /** The instance's Owner account; null for instances created without one. */
     owner_username: string | null;
+    /** What the owner signs in to Eunha with. */
+    owner_email: string | null;
     owner_ready: boolean;
     /** When the customer area last issued a password for the Owner. */
     owner_password_issued_at: string | null;

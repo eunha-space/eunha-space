@@ -140,6 +140,7 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
                 tenantId={detail.tenant.id}
                 domain={detail.tenant.domain}
                 username={detail.tenant.owner_username}
+                email={detail.tenant.owner_email ?? ""}
                 ready={ready && detail.tenant.owner_ready}
                 passwordIssued={detail.tenant.owner_password_issued_at !== null}
                 waitingForDomain={customDomains.some((domain) =>
@@ -265,13 +266,14 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
   );
 }
 
-type IssuedPassword = { username: string; password: string };
+type IssuedPassword = { username: string; email: string; password: string };
 
 function AdminAccount(
-  { tenantId, domain, username, ready, passwordIssued, waitingForDomain }: {
+  { tenantId, domain, username, email, ready, passwordIssued, waitingForDomain }: {
     tenantId: string;
     domain: string;
     username: string;
+    email: string;
     ready: boolean;
     passwordIssued: boolean;
     waitingForDomain: boolean;
@@ -341,7 +343,13 @@ function AdminAccount(
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
-        <div className="grid gap-4 sm:grid-cols-2">
+        <div className="grid gap-4 sm:grid-cols-3">
+          <div className="grid gap-1">
+            <span className="text-muted-foreground text-xs">
+              {t("Sign-in email")}
+            </span>
+            <code className="break-all">{email}</code>
+          </div>
           <div className="grid gap-1">
             <span className="text-muted-foreground text-xs">{t("Username")}</span>
             <code className="break-all">@{username}</code>
@@ -365,7 +373,13 @@ function AdminAccount(
           <div className="bg-muted/60 grid gap-3 rounded-md p-3 text-sm">
             <div className="grid gap-1">
               <span className="text-muted-foreground text-xs">
-                {t("New password")} · @{issued.username}
+                {t("Sign-in email")}
+              </span>
+              <code className="break-all select-all">{issued.email}</code>
+            </div>
+            <div className="grid gap-1">
+              <span className="text-muted-foreground text-xs">
+                {t("New password")}
               </span>
               <div className="flex flex-wrap items-center gap-2">
                 <code className="flex-1 break-all select-all">

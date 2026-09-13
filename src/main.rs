@@ -239,6 +239,9 @@ struct CustomerTenantInfo {
     #[serde(with = "time::serde::rfc3339")]
     updated_at: OffsetDateTime,
     owner_username: Option<String>,
+    /// The owner signs in to Eunha with this email, which was the customer's
+    /// when the account was created.
+    owner_email: Option<String>,
     owner_ready: bool,
     #[serde(with = "time::serde::rfc3339::option")]
     owner_password_issued_at: Option<OffsetDateTime>,
@@ -1072,7 +1075,7 @@ async fn customer_tenant_detail(
     Path(id): Path<Uuid>,
 ) -> Result<Json<CustomerTenantDetail>, ApiError> {
     let (customer_id, _) = customer(&headers, &s.db).await?;
-    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.deletion_scheduled_for FROM tenants t WHERE t.id=$1 AND t.customer_id=$2 AND t.lifecycle_state <> 'purged'")
+    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,CASE WHEN t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds' THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,CASE WHEN t.owner_username IS NOT NULL THEN c.email END owner_email,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.deletion_scheduled_for FROM tenants t JOIN customers c ON c.id=t.customer_id WHERE t.id=$1 AND t.customer_id=$2 AND t.lifecycle_state <> 'purged'")
         .bind(id)
         .bind(customer_id)
         .fetch_optional(&s.db)
@@ -2359,7 +2362,7 @@ async fn customer_reset_owner_password(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let (customer_id, _) = customer(&headers, &s.db).await?;
+    let (customer_id, email) = customer(&headers, &s.db).await?;
     let owner = sqlx::query_as::<_, (Option<String>, bool, Uuid)>(
         "SELECT t.owner_username,t.lifecycle_state='ready' AND EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded'),t.runtime_id FROM tenants t WHERE t.id=$1 AND t.customer_id=$2",
     )
@@ -2406,7 +2409,7 @@ async fn customer_reset_owner_password(
         .await?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
-        Json(serde_json::json!({ "username": username, "password": password })),
+        Json(serde_json::json!({ "username": username, "email": email, "password": password })),
     )
         .into_response())
 }
