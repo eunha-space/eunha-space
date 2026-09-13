@@ -21,6 +21,9 @@ export function CustomerApp() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [signup, setSignup] = useState(false);
   const [sent, setSent] = useState(false);
+  const [verified] = useState(
+    () => new URLSearchParams(location.search).get("verified") === "1",
+  );
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [subdomain, setSubdomain] = useState("");
@@ -36,11 +39,9 @@ export function CustomerApp() {
   useEffect(() => {
     const token = new URLSearchParams(location.search).get("token");
     if (location.pathname === "/verify" && token) {
-      api(`/customer/verify?token=${encodeURIComponent(token)}`).then(() => {
-        history.replaceState({}, "", "/");
-        setSignup(false);
-        setSent(false);
-      }).catch((e) => setError(errorMessage(e)));
+      void api(`/customer/verify?token=${encodeURIComponent(token)}`)
+        .then(() => location.replace(`${location.origin}/?verified=1`))
+        .catch((e) => setError(errorMessage(e)));
     }
     load().catch(() => {});
   }, []);
@@ -117,6 +118,13 @@ export function CustomerApp() {
           </CardHeader>
           {!sent && (
             <CardContent>
+              {verified && (
+                <Alert className="mb-4">
+                  <AlertDescription>
+                    Email verified. Sign in to continue.
+                  </AlertDescription>
+                </Alert>
+              )}
               <form onSubmit={authenticate} className="grid gap-4">
                 <div className="grid gap-2">
                   <Label htmlFor="email">Email</Label>
