@@ -34,7 +34,7 @@ const ko: Record<string, string> = {
   "No instances yet.": "아직 인스턴스가 없습니다.",
   "Eunha hostname": "호스트명",
   Name: "이름",
-  "Custom domain (optional)": "사용자 도메인 (선택)",
+  "Custom domain (optional)": "커스텀 도메인 (선택)",
   "Point it to customers.eunha.space after creation.":
     "생성 후 customers.eunha.space를 가리키도록 설정하세요.",
   "Use a password with at least 14 characters.":
