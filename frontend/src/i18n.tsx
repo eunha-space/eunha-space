@@ -37,8 +37,6 @@ const ko: Record<string, string> = {
   "Custom domain (optional)": "사용자 도메인 (선택)",
   "Point it to customers.eunha.space after creation.":
     "생성 후 customers.eunha.space를 가리키도록 설정하세요.",
-  "Provisioning continues safely in the background.":
-    "프로비저닝은 백그라운드에서 안전하게 계속됩니다.",
   "Use a password with at least 14 characters.":
     "14자 이상의 비밀번호를 사용하세요.",
   "Control plane": "제어판",

@@ -366,9 +366,6 @@ export function CustomerApp() {
           <Card>
             <CardHeader>
               <CardTitle>{t("Your instances")}</CardTitle>
-              <CardDescription>
-                {t("Provisioning continues safely in the background.")}
-              </CardDescription>
             </CardHeader>
             <CardContent className="grid gap-3">
               {tenants.length === 0
