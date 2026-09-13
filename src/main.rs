@@ -2026,7 +2026,14 @@ const PURGE: LifecycleFlow = LifecycleFlow {
     operation_kind: "tenant_purge",
     running_state: "purging",
     done_state: "purged",
-    steps: &["cloudflare", "database", "media", "redis", "configuration"],
+    steps: &[
+        "offline",
+        "cloudflare",
+        "database",
+        "media",
+        "redis",
+        "configuration",
+    ],
     exhausted: "an operator needs to finish removing the tenant's data",
 };
 
@@ -2141,6 +2148,14 @@ async fn run_lifecycle_flow(state: &Shared, tenant_id: Uuid, flow: &LifecycleFlo
 async fn lifecycle_step(state: &Shared, tenant_id: Uuid, step: &str) -> Result<Option<String>> {
     match step {
         "unrender" => unrender_tenant(state, tenant_id).await.map(|()| None),
+        // Purging a tenant that is still served takes it offline in one step,
+        // so a retry removes a configuration that an in-flight provisioning or
+        // domain step rendered again after the first attempt.
+        "offline" if purging(state, tenant_id).await? => {
+            unrender_tenant(state, tenant_id).await?;
+            reload_provisioned_runtime(state, tenant_id).await?;
+            verify_tenant_offline(state, tenant_id).await.map(|()| None)
+        }
         "reload" => reload_provisioned_runtime(state, tenant_id)
             .await
             .map(|()| None),
@@ -2154,6 +2169,16 @@ async fn lifecycle_step(state: &Shared, tenant_id: Uuid, step: &str) -> Result<O
     }
 }
 
+async fn purging(state: &Shared, tenant_id: Uuid) -> Result<bool> {
+    Ok(
+        sqlx::query_scalar::<_, String>("SELECT lifecycle_state FROM tenants WHERE id=$1")
+            .bind(tenant_id)
+            .fetch_one(&state.db)
+            .await?
+            == "purging",
+    )
+}
+
 async fn purge_tenant(
     State(s): State<Shared>,
     headers: HeaderMap,
@@ -2162,8 +2187,10 @@ async fn purge_tenant(
 ) -> Result<StatusCode, ApiError> {
     let (operator_id, _) = operator(&headers, &s.db).await?;
     let mut tx = s.db.begin().await?;
-    let domain = sqlx::query_scalar::<_, String>(
-        "SELECT domain FROM tenants WHERE id=$1 AND lifecycle_state='retained' FOR UPDATE",
+    // A tenant already on its way offline finishes that first; anything else,
+    // served or not, can be purged.
+    let (domain, retained) = sqlx::query_as::<_, (String, bool)>(
+        "SELECT domain,lifecycle_state='retained' FROM tenants WHERE id=$1 AND lifecycle_state IN ('provisioning','ready','failed','retained') FOR UPDATE",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
@@ -2171,7 +2198,7 @@ async fn purge_tenant(
     .ok_or_else(|| {
         ApiError(
             StatusCode::CONFLICT,
-            "Only a retained tenant can be purged.".into(),
+            "This tenant is already being deprovisioned or purged.".into(),
         )
     })?;
     if !body.confirm_domain.trim().eq_ignore_ascii_case(&domain) {
@@ -2180,12 +2207,17 @@ async fn purge_tenant(
             "Type the tenant's domain to confirm the purge.".into(),
         ));
     }
-    sqlx::query("UPDATE tenants SET lifecycle_state='purging',updated_at=now() WHERE id=$1")
+    sqlx::query("UPDATE tenants SET lifecycle_state='purging',desired_state='deprovisioning',observed_state='disabled',observed_at=now(),observation_error=NULL,deletion_scheduled_for=NULL,updated_at=now() WHERE id=$1")
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO purge_steps(tenant_id,step) SELECT $1,unnest(ARRAY['cloudflare','database','media','redis','configuration']) ON CONFLICT (tenant_id,step) DO UPDATE SET status='pending',attempts=0,error=NULL,started_at=NULL,finished_at=NULL,updated_at=now()")
+    sqlx::query("INSERT INTO purge_steps(tenant_id,step) SELECT $1,unnest(ARRAY['offline','cloudflare','database','media','redis','configuration']) ON CONFLICT (tenant_id,step) DO UPDATE SET status='pending',attempts=0,error=NULL,started_at=NULL,finished_at=NULL,updated_at=now()")
         .bind(id).execute(&mut *tx).await?;
+    if retained {
+        // Deprovisioning already took it offline and confirmed it.
+        sqlx::query("UPDATE purge_steps SET status='succeeded',finished_at=now() WHERE tenant_id=$1 AND step='offline'")
+            .bind(id).execute(&mut *tx).await?;
+    }
     let operation_id = Uuid::new_v4();
     sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) SELECT $1,t.id,t.runtime_id,'tenant_purge','running',$2,jsonb_build_object('domain',t.domain),now() FROM tenants t WHERE t.id=$3")
         .bind(operation_id).bind(operator_id).bind(id).execute(&mut *tx).await?;
@@ -2587,7 +2619,7 @@ async fn fail_provisioning(db: &PgPool, tenant_id: Uuid, step: &str) {
     let message = format!("{step} failed; retry is safe.");
     let _ = sqlx::query("UPDATE provisioning_steps SET status='failed',error=$1,finished_at=now(),updated_at=now() WHERE tenant_id=$2 AND step=$3")
         .bind(&message).bind(tenant_id).bind(step).execute(db).await;
-    let _ = sqlx::query("UPDATE tenants SET lifecycle_state='failed',observed_state='unhealthy',observation_error=$1,observed_at=now(),updated_at=now() WHERE id=$2")
+    let _ = sqlx::query("UPDATE tenants SET lifecycle_state='failed',observed_state='unhealthy',observation_error=$1,observed_at=now(),updated_at=now() WHERE id=$2 AND lifecycle_state='provisioning'")
         .bind(&message).bind(tenant_id).execute(db).await;
     let _ = sqlx::query("UPDATE operations SET status='failed',error=$1,finished_at=now() WHERE id=(SELECT id FROM operations WHERE tenant_id=$2 AND kind='tenant_provision' AND status='running' ORDER BY created_at DESC LIMIT 1)")
         .bind(&message).bind(tenant_id).execute(db).await;
@@ -2597,6 +2629,16 @@ async fn provision_tenant(state: &Shared, tenant_id: Uuid) {
     for step in [
         "database", "migrate", "render", "reload", "health", "routing", "owner",
     ] {
+        // A purge can start while provisioning is under way; stop between steps
+        // rather than render a tenant that is being destroyed.
+        match sqlx::query_scalar::<_, String>("SELECT lifecycle_state FROM tenants WHERE id=$1")
+            .bind(tenant_id)
+            .fetch_one(&state.db)
+            .await
+        {
+            Ok(lifecycle) if lifecycle == "provisioning" => {}
+            _ => return,
+        }
         let ready = match step {
             "routing" => tenant_routing_ready(&state.db, tenant_id).await,
             "owner" => tenant_identity_settled(&state.db, tenant_id).await,
@@ -2640,7 +2682,7 @@ async fn provision_tenant(state: &Shared, tenant_id: Uuid) {
             return;
         }
     }
-    let _ = sqlx::query("UPDATE tenants SET lifecycle_state='ready',observed_state='healthy',observed_at=now(),observation_error=NULL,updated_at=now() WHERE id=$1")
+    let _ = sqlx::query("UPDATE tenants SET lifecycle_state='ready',observed_state='healthy',observed_at=now(),observation_error=NULL,updated_at=now() WHERE id=$1 AND lifecycle_state='provisioning'")
         .bind(tenant_id).execute(&state.db).await;
     let _ = sqlx::query(
         "UPDATE r2_buckets SET lifecycle_state='ready',updated_at=now() WHERE tenant_id=$1",

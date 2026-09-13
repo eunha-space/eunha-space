@@ -276,7 +276,6 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                         >
                           Restore
                         </ActionButton>
-                        <PurgeDialog tenant={tenant} busy={busy === `purge-${tenant.id}`} act={act} />
                       </>
                     )}
                     {tenant.lifecycle_state !== "purging" && tenant.lifecycle_state !== "purged" && (
@@ -284,6 +283,9 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                         <DomainsDialog tenant={tenant} busy={busy} act={act} />
                         <TenantConfigDialog tenantId={tenant.id} domain={tenant.domain} />
                       </>
+                    )}
+                    {(!isOffline(tenant) || tenant.lifecycle_state === "retained") && (
+                      <PurgeDialog tenant={tenant} busy={busy === `purge-${tenant.id}`} act={act} />
                     )}
                     {!isOffline(tenant) && (
                       <>
@@ -338,7 +340,10 @@ function PurgeDialog({ tenant, busy, act }: { tenant: Tenant; busy: boolean; act
         <DialogHeader>
           <DialogTitle>Purge {tenant.domain}?</DialogTitle>
           <DialogDescription>
-            This permanently destroys the tenant: its Cloudflare hostnames, database and role, media, Redis keys and configuration.
+            {tenant.lifecycle_state === "retained"
+              ? "This permanently destroys the tenant: "
+              : "This takes the tenant offline immediately, with no grace period for its customer, and permanently destroys it: "}
+            its Cloudflare hostnames, database and role, media, Redis keys and configuration.
             It cannot be restored afterwards. The domain stays reserved so it is never reused.
           </DialogDescription>
         </DialogHeader>

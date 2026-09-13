@@ -78,8 +78,13 @@ automatically. Retained tenants are ignored by domain reconciliation, health
 checks, operator renders and runtime-release health checks.
 
 Operators can **Restore** a retained tenant without checking the customer's
-instance limit, or **Purge** it after typing its domain. Purging runs as
-durable, retried steps. It deletes the tenant's Cloudflare for SaaS hostnames
+instance limit. They can **Purge** any tenant that is not already being
+deprovisioned or purged, whether it is ready, failed, stuck provisioning or
+retained, after typing its domain. Purging runs as durable, retried steps. A
+tenant that was not retained is first taken offline in a single step that
+removes its runtime file, reloads the runtime and confirms the domain is no
+longer served. Its customer gets no grace period, and provisioning stops before
+its next step. The purge then deletes the tenant's Cloudflare for SaaS hostnames
 and domain records, which frees a customer's custom domain for use elsewhere.
 It drops the tenant's database and role, deletes its media under `t/<tenant id>/`
 and its Redis keys under its own prefix, and discards its configuration and
