@@ -175,6 +175,10 @@ struct CustomerCredentials {
 #[derive(Deserialize)]
 struct NewCustomerPassword {
     password: String,
+    /// Proof of the old password, required unless the session came from an
+    /// email link or the account has no password yet.
+    #[serde(default)]
+    current_password: Option<String>,
 }
 #[derive(Deserialize)]
 struct VerificationQuery {
@@ -874,6 +878,21 @@ async fn customer(headers: &HeaderMap, db: &PgPool) -> Result<(Uuid, String), Ap
         .bind(token_hash(token)).fetch_optional(db).await?.ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "Session expired".into()))
 }
 
+/// Whether this session was established by following an email link, and so
+/// already carries the proof a password reset needs.
+async fn customer_email_link_session(headers: &HeaderMap, db: &PgPool) -> Result<bool, ApiError> {
+    let Some(token) = customer_token(headers) else {
+        return Ok(false);
+    };
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT from_email_link FROM customer_sessions WHERE token_hash=$1 AND expires_at>now()",
+    )
+    .bind(token_hash(token))
+    .fetch_optional(db)
+    .await?
+    .unwrap_or(false))
+}
+
 async fn customer_register(
     State(s): State<Shared>,
     Json(mut body): Json<CustomerCredentials>,
@@ -968,7 +987,7 @@ async fn customer_verify(
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    sqlx::query("INSERT INTO customer_sessions(token_hash,customer_id,expires_at) VALUES($1,$2,now()+interval '30 days')").bind(token_hash(&token)).bind(customer_id).execute(&s.db).await?;
+    sqlx::query("INSERT INTO customer_sessions(token_hash,customer_id,expires_at,from_email_link) VALUES($1,$2,now()+interval '30 days',true)").bind(token_hash(&token)).bind(customer_id).execute(&s.db).await?;
     Ok(([(header::SET_COOKIE,format!("eunha_space_customer_session={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000"))],StatusCode::NO_CONTENT).into_response())
 }
 
@@ -1042,6 +1061,32 @@ async fn customer_set_password(
             "Use a password with at least 14 characters.".into(),
         ));
     }
+    let existing =
+        sqlx::query_scalar::<_, Option<String>>("SELECT password_hash FROM customers WHERE id=$1")
+            .bind(id)
+            .fetch_one(&s.db)
+            .await?;
+    // A forgotten password is replaced from an email-link session, which is
+    // itself the proof of ownership; anywhere else, prove the old one.
+    let proved_by_email = customer_email_link_session(&headers, &s.db).await?;
+    if let (Some(existing), false) = (existing, proved_by_email) {
+        let supplied = body.current_password.as_deref().unwrap_or_default();
+        let parsed = PasswordHash::new(&existing).map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Stored credential is invalid".into(),
+            )
+        })?;
+        if Argon2::default()
+            .verify_password(supplied.as_bytes(), &parsed)
+            .is_err()
+        {
+            return Err(ApiError(
+                StatusCode::FORBIDDEN,
+                "That current password is not right.".into(),
+            ));
+        }
+    }
     let salt = SaltString::generate(&mut OsRng);
     let hash = Argon2::default()
         .hash_password(body.password.as_bytes(), &salt)
@@ -1055,6 +1100,13 @@ async fn customer_set_password(
     sqlx::query("UPDATE customers SET password_hash=$1 WHERE id=$2")
         .bind(hash)
         .bind(id)
+        .execute(&s.db)
+        .await?;
+    // A new password ends every other session: whoever reset it keeps theirs,
+    // and anyone signed in with the old one is turned out.
+    sqlx::query("DELETE FROM customer_sessions WHERE customer_id=$1 AND token_hash<>$2")
+        .bind(id)
+        .bind(token_hash(customer_token(&headers).unwrap_or_default()))
         .execute(&s.db)
         .await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1090,8 +1142,10 @@ async fn customer_me(
     .bind(id)
     .fetch_one(&s.db)
     .await?;
+    let requires_current_password =
+        has_password && !customer_email_link_session(&headers, &s.db).await?;
     Ok(Json(
-        serde_json::json!({"email":email,"instance_limit":instance_limit,"has_password":has_password}),
+        serde_json::json!({"email":email,"instance_limit":instance_limit,"has_password":has_password,"requires_current_password":requires_current_password}),
     ))
 }
 async fn customer_tenants(

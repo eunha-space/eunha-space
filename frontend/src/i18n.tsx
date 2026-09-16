@@ -25,6 +25,15 @@ const ko: Record<string, string> = {
   "New here? Create an account": "처음이신가요? 계정 만들기",
   "Set your password": "비밀번호 설정",
   "Set password": "비밀번호 설정",
+  "Change your password": "비밀번호 변경",
+  "Change password": "비밀번호 변경",
+  "Current password": "현재 비밀번호",
+  "A new password of at least 14 characters signs out every other device.":
+    "14자 이상의 새 비밀번호를 설정하면 다른 모든 기기에서 로그아웃됩니다.",
+  "Your password was changed.": "비밀번호가 변경되었습니다.",
+  "That current password is not right.": "현재 비밀번호가 올바르지 않습니다.",
+  "Forgot your password? Sign in with an email link, then set a new one.":
+    "비밀번호를 잊으셨나요? 이메일 링크로 로그인한 뒤 새 비밀번호를 설정하세요.",
   "Your email is verified. Add a password of at least 14 characters for password sign-in.":
     "이메일 인증이 완료되었습니다. 비밀번호 로그인을 위해 14자 이상의 비밀번호를 설정하세요.",
   "Create an instance": "인스턴스 만들기",
