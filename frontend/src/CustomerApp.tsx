@@ -120,7 +120,7 @@ export function CustomerApp() {
     setBusy(true);
     setError("");
     try {
-      await api("/customer/tenants", {
+      const created = await api<{ id: string }>("/customer/tenants", {
         method: "POST",
         body: JSON.stringify({
           subdomain: addressKind === "provided" ? subdomain : "",
@@ -129,14 +129,11 @@ export function CustomerApp() {
           owner_username: ownerUsername,
         }),
       });
-      setSubdomain("");
-      setTitle("");
-      setCustomDomain("");
-      setOwnerUsername("");
-      await load();
+      // A new instance is not usable yet, and its detail page is where the
+      // setup it needs is followed; stay busy until the browser gets there.
+      location.assign(`/instances/${created.id}`);
     } catch (e) {
       setError(errorMessage(e));
-    } finally {
       setBusy(false);
     }
   }
