@@ -23,6 +23,7 @@ const ko: Record<string, string> = {
   "Email me a sign-in link": "이메일로 로그인 링크 받기",
   "Already have an account? Sign in": "이미 계정이 있나요? 로그인",
   "New here? Create an account": "처음이신가요? 계정 만들기",
+  Account: "계정",
   "Set your password": "비밀번호 설정",
   "Set password": "비밀번호 설정",
   "Change your password": "비밀번호 변경",

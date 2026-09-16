@@ -92,6 +92,16 @@ export type CustomerProvisioningStep = {
   updated_at: string;
 };
 
+/** The signed-in customer, as /customer/session/me reports them. */
+export type Customer = {
+  email: string;
+  instance_limit: number | null;
+  has_password: boolean;
+  // False in a session established by an email link, which is itself the
+  // proof a forgotten password needs.
+  requires_current_password: boolean;
+};
+
 export type CustomerTenantDetail = {
   tenant: Pick<
     Tenant,

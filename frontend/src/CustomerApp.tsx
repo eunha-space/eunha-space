@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { CircleAlert, LogOut } from "lucide-react";
+import { CircleAlert, LogOut, UserRound } from "lucide-react";
 import {
   api,
   countsTowardInstanceLimit,
+  type Customer,
   errorMessage,
   instanceAddress,
   instanceStatus,
@@ -25,15 +26,7 @@ import { Spinner } from "@/components/console/status";
 import { useLingui } from "@lingui/react";
 import { LanguageToggle } from "@/i18n";
 import { CustomerInstanceDetail } from "@/CustomerInstanceDetail";
-
-type Customer = {
-  email: string;
-  instance_limit: number | null;
-  has_password: boolean;
-  // False in a session established by an email link, which is itself the
-  // proof a forgotten password needs.
-  requires_current_password: boolean;
-};
+import { CustomerAccount } from "@/CustomerAccount";
 
 export function CustomerApp() {
   const { i18n } = useLingui();
@@ -271,6 +264,14 @@ export function CustomerApp() {
       </main>
     );
   }
+  if (location.pathname === "/account") {
+    return (
+      <main className="mx-auto min-h-screen max-w-2xl p-4 md:py-10">
+        <CustomerHeader customer={customer} onSignOut={signOut} />
+        <CustomerAccount customer={customer} onChanged={load} />
+      </main>
+    );
+  }
   const instanceId = location.pathname.match(/^\/instances\/([^/]+)$/)?.[1];
   if (instanceId) {
     return (
@@ -290,9 +291,19 @@ export function CustomerApp() {
         </Alert>
       )}
       {!customer.has_password && (
-        <div className="mb-6">
-          <PasswordCard customer={customer} onChanged={load} />
-        </div>
+        <Card className="border-primary/40 mb-6">
+          <CardHeader>
+            <CardTitle>{t("Set your password")}</CardTitle>
+            <CardDescription>
+              {t(
+                "Your email is verified. Add a password of at least 14 characters for password sign-in.",
+              )}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button render={<a href="/account" />}>{t("Set password")}</Button>
+          </CardContent>
+        </Card>
       )}
       {customer.has_password && (
         <div className="grid gap-6">
@@ -445,121 +456,9 @@ export function CustomerApp() {
                 ))}
             </CardContent>
           </Card>
-          <PasswordCard customer={customer} onChanged={load} />
         </div>
       )}
     </main>
-  );
-}
-
-function PasswordCard(
-  { customer, onChanged }: { customer: Customer; onChanged: () => Promise<void> },
-) {
-  const { i18n } = useLingui();
-  const t = (message: string) => i18n._(message);
-  const [current, setCurrent] = useState("");
-  const [next, setNext] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [changed, setChanged] = useState(false);
-  const first = !customer.has_password;
-
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
-    setError("");
-    setChanged(false);
-    if (next.length < 14) {
-      setError(t("Use a password with at least 14 characters."));
-      return;
-    }
-    setBusy(true);
-    try {
-      await api("/customer/password", {
-        method: "POST",
-        body: JSON.stringify({
-          password: next,
-          current_password: customer.requires_current_password ? current : null,
-        }),
-      });
-      setCurrent("");
-      setNext("");
-      setChanged(true);
-      await onChanged();
-    } catch (e) {
-      // Server messages are catalog keys too, so they localize like the rest.
-      setError(t(errorMessage(e)));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <Card className={first ? "border-primary/40" : undefined}>
-      <CardHeader>
-        <CardTitle>
-          {first ? t("Set your password") : t("Change your password")}
-        </CardTitle>
-        <CardDescription>
-          {first
-            ? t(
-              "Your email is verified. Add a password of at least 14 characters for password sign-in.",
-            )
-            : t(
-              "A new password of at least 14 characters signs out every other device.",
-            )}
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <form onSubmit={submit} className="grid gap-4">
-          {customer.requires_current_password && (
-            <div className="grid gap-2">
-              <Label htmlFor="current-password">{t("Current password")}</Label>
-              <Input
-                id="current-password"
-                type="password"
-                autoComplete="current-password"
-                value={current}
-                onChange={(e) => setCurrent(e.target.value)}
-                required
-              />
-            </div>
-          )}
-          <div className="grid gap-2">
-            <Label htmlFor="new-password">
-              {first ? t("Password") : t("New password")}
-            </Label>
-            <Input
-              id="new-password"
-              type="password"
-              autoComplete="new-password"
-              value={next}
-              onChange={(e) => setNext(e.target.value)}
-              required
-            />
-          </div>
-          {error && (
-            <Alert variant="destructive">
-              <CircleAlert />
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
-          {changed && (
-            <Alert>
-              <AlertDescription>{t("Your password was changed.")}</AlertDescription>
-            </Alert>
-          )}
-          <div>
-            <Button type="submit" disabled={busy}>
-              {busy
-                ? t("Please wait…")
-                : first
-                ? t("Set password")
-                : t("Change password")}
-            </Button>
-          </div>
-        </form>
-      </CardContent>
-    </Card>
   );
 }
 
@@ -569,6 +468,7 @@ function CustomerHeader(
     onSignOut: () => Promise<void>;
   },
 ) {
+  const { i18n } = useLingui();
   return (
     <header className="mb-8 flex items-center justify-between">
       <div className="flex items-center gap-3">
@@ -581,6 +481,14 @@ function CustomerHeader(
       <div className="flex gap-2">
         <LanguageToggle />
         <ThemeToggle />
+        <Button
+          variant="outline"
+          size="icon"
+          aria-label={i18n._("Account")}
+          render={<a href="/account" />}
+        >
+          <UserRound />
+        </Button>
         <Button variant="outline" size="icon" onClick={() => void onSignOut()}>
           <LogOut />
         </Button>
