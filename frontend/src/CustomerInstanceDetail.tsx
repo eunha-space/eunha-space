@@ -122,6 +122,17 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
     domain.kind === "custom"
   );
   const ready = detail.tenant.lifecycle_state === "ready";
+  // Once every step has succeeded there is nothing left to follow, so the
+  // progress list gives way to a single line and the admin account, which is
+  // what the customer came for, takes the top of the page.
+  const setupDone = ready &&
+    detail.provisioning_steps.every((step) => step.status === "succeeded");
+  const accountReady = ready && detail.tenant.owner_ready;
+  // Nothing provisions until a pending custom domain resolves, so that card
+  // holds the only useful thing to read while it is outstanding.
+  const waitingForDomain = customDomains.some((domain) =>
+    domain.status === "pending"
+  );
   const status = instanceStatus(detail.tenant);
   // A deleted instance is not being served, so setup, domain and admin details
   // would describe something that is not there.
@@ -156,73 +167,44 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
       </div>
 
       <div className="grid gap-6">
-        {!offline && (
-          <>
-            {detail.tenant.owner_username && (
+        {!offline && (() => {
+          const setup = (
+            <InstanceSetup
+              key="setup"
+              steps={detail.provisioning_steps}
+              done={setupDone}
+            />
+          );
+          const domain = customDomains.length > 0
+            ? (
+              <CustomDomainSetup
+                key="domain"
+                tenant={detail.tenant}
+                domains={customDomains}
+              />
+            )
+            : null;
+          const account = accountReady && detail.tenant.owner_username
+            ? (
               <AdminAccount
+                key="account"
                 tenantId={detail.tenant.id}
                 domain={detail.tenant.domain}
                 username={detail.tenant.owner_username}
                 email={detail.tenant.owner_email ?? ""}
-                ready={ready && detail.tenant.owner_ready}
                 passwordIssued={detail.tenant.owner_password_issued_at !== null}
-                waitingForDomain={customDomains.some((domain) =>
-                  domain.status === "pending"
-                )}
               />
-            )}
-            {/* Nothing to say about custom domains to someone who added none. */}
-            {customDomains.length > 0 && (
-              <CustomDomainSetup tenant={detail.tenant} domains={customDomains} />
-            )}
-
-            <Card>
-              <CardHeader>
-                <CardTitle>{t("Instance setup")}</CardTitle>
-                <CardDescription>
-                  {ready
-                    ? t("Your instance is ready to use.")
-                    : t("This page updates automatically while we set things up.")}
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                {detail.provisioning_steps.length === 0 && ready
-                  ? (
-                    <div className="flex items-center gap-3 text-sm">
-                      <Check className="text-success size-5" />
-                      {t("Setup complete")}
-                    </div>
-                  )
-                  : (
-                    <ol className="grid gap-4">
-                      {stepGroups(detail.provisioning_steps).map((group) => {
-                        const status = groupStatus(group.steps);
-                        return (
-                          <li key={group.label} className="flex items-center gap-3">
-                            <StepIcon status={status} />
-                            <span className="flex-1 text-sm font-medium">
-                              {t(group.label)}
-                            </span>
-                            <span className="text-muted-foreground text-xs">
-                              {t(
-                                status === "succeeded"
-                                  ? "Done"
-                                  : status === "running"
-                                  ? "In progress"
-                                  : status === "failed"
-                                  ? "Needs attention"
-                                  : "Waiting",
-                              )}
-                            </span>
-                          </li>
-                        );
-                      })}
-                    </ol>
-                  )}
-              </CardContent>
-            </Card>
-          </>
-        )}
+            )
+            : null;
+          // Whatever the customer needs most goes first: their account once
+          // there is one, their DNS while it holds everything up, otherwise
+          // the progress of the setup they are waiting on.
+          return setupDone
+            ? [account, domain, setup]
+            : waitingForDomain
+            ? [domain, setup, account]
+            : [setup, domain, account];
+        })()}
         <DeleteInstance
           tenant={detail.tenant}
           onChanged={() => setRevision((value) => value + 1)}
@@ -232,17 +214,69 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
   );
 }
 
+function InstanceSetup(
+  { steps, done }: { steps: CustomerProvisioningStep[]; done: boolean },
+) {
+  const { i18n } = useLingui();
+  const t = (message: string) => i18n._(message);
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t("Instance setup")}</CardTitle>
+        {!done && (
+          <CardDescription>
+            {t("This page updates automatically while we set things up.")}
+          </CardDescription>
+        )}
+      </CardHeader>
+      <CardContent>
+        {done
+          ? (
+            <div className="flex items-center gap-3 text-sm">
+              <Check className="text-success size-5" />
+              {t("Setup complete")}
+            </div>
+          )
+          : (
+            <ol className="grid gap-4">
+              {stepGroups(steps).map((group) => {
+                const status = groupStatus(group.steps);
+                return (
+                  <li key={group.label} className="flex items-center gap-3">
+                    <StepIcon status={status} />
+                    <span className="flex-1 text-sm font-medium">
+                      {t(group.label)}
+                    </span>
+                    <span className="text-muted-foreground text-xs">
+                      {t(
+                        status === "succeeded"
+                          ? "Done"
+                          : status === "running"
+                          ? "In progress"
+                          : status === "failed"
+                          ? "Needs attention"
+                          : "Waiting",
+                      )}
+                    </span>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
+      </CardContent>
+    </Card>
+  );
+}
+
 type IssuedPassword = { username: string; email: string; password: string };
 
 function AdminAccount(
-  { tenantId, domain, username, email, ready, passwordIssued, waitingForDomain }: {
+  { tenantId, domain, username, email, passwordIssued }: {
     tenantId: string;
     domain: string;
     username: string;
     email: string;
-    ready: boolean;
     passwordIssued: boolean;
-    waitingForDomain: boolean;
   },
 ) {
   const { i18n } = useLingui();
@@ -288,7 +322,7 @@ function AdminAccount(
   const button = (
     <Button
       variant={passwordIssued ? "outline" : "default"}
-      disabled={!ready || busy}
+      disabled={busy}
       onClick={passwordIssued ? undefined : () => void issue()}
     >
       {busy ? <Spinner label={t("In progress")} /> : <KeyRound />}
@@ -301,11 +335,7 @@ function AdminAccount(
       <CardHeader>
         <CardTitle>{t("Admin account")}</CardTitle>
         <CardDescription>
-          {ready
-            ? t("Sign in to your instance as its owner to manage it.")
-            : waitingForDomain
-            ? t("Your admin account is created after your custom domain is connected.")
-            : t("Your admin account is created when setup finishes.")}
+          {t("Sign in to your instance as its owner to manage it.")}
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
@@ -320,19 +350,17 @@ function AdminAccount(
             <span className="text-muted-foreground text-xs">{t("Username")}</span>
             <code className="break-all">@{username}</code>
           </div>
-          {ready && (
-            <div className="grid gap-1">
-              <span className="text-muted-foreground text-xs">{t("Sign-in page")}</span>
-              <a
-                className="break-all text-sm underline-offset-4 hover:underline"
-                href={loginUrl}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {loginUrl}
-              </a>
-            </div>
-          )}
+          <div className="grid gap-1">
+            <span className="text-muted-foreground text-xs">{t("Sign-in page")}</span>
+            <a
+              className="break-all text-sm underline-offset-4 hover:underline"
+              href={loginUrl}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {loginUrl}
+            </a>
+          </div>
         </div>
 
         {issued && (
@@ -371,7 +399,7 @@ function AdminAccount(
         )}
 
         <div>
-          {passwordIssued && ready && !busy
+          {passwordIssued && !busy
             ? (
               <AlertDialog open={confirming} onOpenChange={setConfirming}>
                 <AlertDialogTrigger render={button} />

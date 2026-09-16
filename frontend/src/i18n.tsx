@@ -66,10 +66,6 @@ const ko: Record<string, string> = {
   "Admin account": "관리자 계정",
   "Sign in to your instance as its owner to manage it.":
     "소유자로 인스턴스에 로그인하여 관리하세요.",
-  "Your admin account is created after your custom domain is connected.":
-    "커스텀 도메인이 연결되면 관리자 계정이 만들어집니다.",
-  "Your admin account is created when setup finishes.":
-    "설정이 끝나면 관리자 계정이 만들어집니다.",
   Username: "사용자명",
   "Sign-in email": "로그인 이메일",
   "Sign-in page": "로그인 페이지",
