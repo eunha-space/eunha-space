@@ -44,15 +44,35 @@ import {
 } from "@/components/ui/card";
 import { Spinner } from "@/components/console/status";
 
-const STEP_LABELS: Record<CustomerProvisioningStep["step"], string> = {
-  database: "Preparing storage",
-  migrate: "Installing the app",
-  render: "Saving your settings",
-  reload: "Starting your instance",
-  health: "Checking availability",
-  routing: "Connecting domains",
-  owner: "Creating your admin account",
-};
+// Provisioning is tracked step by step, but a customer only needs the shape of
+// the wait, not the mechanics — and the routing step in particular reads as
+// homework on an instance whose address we hand out ourselves.
+const STEP_GROUPS: {
+  label: string;
+  steps: CustomerProvisioningStep["step"][];
+}[] = [
+  { label: "Preparing your instance", steps: ["database", "migrate", "render"] },
+  { label: "Starting your instance", steps: ["reload", "health", "routing"] },
+  { label: "Creating your admin account", steps: ["owner"] },
+];
+
+function groupStatus(
+  steps: CustomerProvisioningStep[],
+): CustomerProvisioningStep["status"] {
+  if (steps.some((step) => step.status === "failed")) return "failed";
+  if (steps.every((step) => step.status === "succeeded")) return "succeeded";
+  // Part of a group being done is progress, even while nothing is running.
+  if (steps.some((step) => step.status !== "pending")) return "running";
+  return "pending";
+}
+
+function stepGroups(steps: CustomerProvisioningStep[]) {
+  return STEP_GROUPS.map((group) => ({
+    label: group.label,
+    steps: steps.filter((step) => group.steps.includes(step.step)),
+    // An instance provisioned without an owner has no owner step at all.
+  })).filter((group) => group.steps.length > 0);
+}
 
 export function CustomerInstanceDetail({ id }: { id: string }) {
   const { i18n } = useLingui();
@@ -151,7 +171,10 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
                 )}
               />
             )}
-            <CustomDomainSetup tenant={detail.tenant} domains={customDomains} />
+            {/* Nothing to say about custom domains to someone who added none. */}
+            {customDomains.length > 0 && (
+              <CustomDomainSetup tenant={detail.tenant} domains={customDomains} />
+            )}
 
             <Card>
               <CardHeader>
@@ -172,25 +195,28 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
                   )
                   : (
                     <ol className="grid gap-4">
-                      {detail.provisioning_steps.map((step) => (
-                        <li key={step.step} className="flex items-center gap-3">
-                          <StepIcon status={step.status} />
-                          <span className="flex-1 text-sm font-medium">
-                            {t(STEP_LABELS[step.step])}
-                          </span>
-                          <span className="text-muted-foreground text-xs">
-                            {t(
-                              step.status === "succeeded"
-                                ? "Done"
-                                : step.status === "running"
-                                ? "In progress"
-                                : step.status === "failed"
-                                ? "Needs attention"
-                                : "Waiting",
-                            )}
-                          </span>
-                        </li>
-                      ))}
+                      {stepGroups(detail.provisioning_steps).map((group) => {
+                        const status = groupStatus(group.steps);
+                        return (
+                          <li key={group.label} className="flex items-center gap-3">
+                            <StepIcon status={status} />
+                            <span className="flex-1 text-sm font-medium">
+                              {t(group.label)}
+                            </span>
+                            <span className="text-muted-foreground text-xs">
+                              {t(
+                                status === "succeeded"
+                                  ? "Done"
+                                  : status === "running"
+                                  ? "In progress"
+                                  : status === "failed"
+                                  ? "Needs attention"
+                                  : "Waiting",
+                              )}
+                            </span>
+                          </li>
+                        );
+                      })}
                     </ol>
                   )}
               </CardContent>
@@ -562,11 +588,6 @@ function CustomDomainSetup(
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-5">
-        {domains.length === 0 && (
-          <p className="text-muted-foreground text-sm">
-            {t("No custom domain was added for this instance.")}
-          </p>
-        )}
         {domains.map((domain) => (
           <section key={domain.hostname} className="grid gap-3">
             <div className="flex items-center justify-between gap-3">

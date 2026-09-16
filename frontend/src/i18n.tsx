@@ -36,8 +36,6 @@ const ko: Record<string, string> = {
   Ready: "사용 가능",
   "Setting up": "설정 중",
   "Custom domain setup": "커스텀 도메인 설정",
-  "No custom domain was added for this instance.":
-    "이 인스턴스에 추가된 커스텀 도메인이 없습니다.",
   Connected: "연결됨",
   "Waiting for DNS": "DNS 설정 대기 중",
   "Your custom domain is connected. Keep this CNAME record at your DNS provider; without it, your instance can't be reached at this domain.":
@@ -51,12 +49,8 @@ const ko: Record<string, string> = {
   "This page updates automatically while we set things up.":
     "설정이 진행되는 동안 이 페이지는 자동으로 업데이트됩니다.",
   "Setup complete": "설정 완료",
-  "Preparing storage": "저장 공간 준비",
-  "Installing the app": "앱 설치",
-  "Saving your settings": "설정 저장",
+  "Preparing your instance": "인스턴스 준비",
   "Starting your instance": "인스턴스 시작",
-  "Checking availability": "사용 가능 여부 확인",
-  "Connecting domains": "도메인 연결",
   "Creating your admin account": "관리자 계정 만들기",
   "Admin username": "관리자 사용자명",
   "Letters, numbers, and underscores.": "영문, 숫자, 밑줄(_)만 사용할 수 있습니다.",
