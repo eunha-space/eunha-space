@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Json as SqlJson};
 use std::{
+    collections::HashMap,
     path::{Component, Path as FsPath, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -57,6 +58,10 @@ struct AppState {
     cloudflare: Option<CloudflareConfig>,
     provided_domain_suffixes: Vec<String>,
     customer_email: Option<CustomerEmailConfig>,
+    /// One reload at a time per runtime: a second launchd signal that arrives
+    /// while the first is still settling fails, and both would be re-reading
+    /// the same directory anyway.
+    runtime_reloads: Arc<tokio::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
 }
 #[derive(Clone)]
 struct CustomerEmailConfig {
@@ -678,6 +683,7 @@ async fn main() -> Result<()> {
         client: reqwest::Client::builder()
             .timeout(Duration::from_secs(4))
             .build()?,
+        runtime_reloads: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     });
     if let Err(error) = rename_legacy_tenant_files(&state).await {
         tracing::error!(error = %format!("{error:#}"), "could not rename tenant configuration files");
@@ -3020,8 +3026,37 @@ async fn finish_provisioning_step(db: &PgPool, tenant_id: Uuid, step: &str) -> R
     Ok(())
 }
 
-async fn fail_provisioning(db: &PgPool, tenant_id: Uuid, step: &str) {
-    let message = format!("{step} failed; retry is safe.");
+/// The runtime rejects its whole tenants directory when the pools its tenants
+/// declare exceed what Postgres will accept, so a tenant that does not fit is
+/// turned away here rather than after its database exists.
+fn connection_budget_error(declared: i64, accepted: i64) -> Option<String> {
+    (declared > accepted).then(|| {
+        format!(
+            "this server is full: its instances would open {declared} database connections and it accepts {accepted}"
+        )
+    })
+}
+
+async fn runtime_connection_budget(db: &PgPool, tenant_id: Uuid) -> Result<()> {
+    // Tenants being deleted no longer have configuration on the runtime, so
+    // they are not counted; a failed one still does.
+    let (declared, accepted) = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT (SELECT COALESCE(SUM(c.database_pool_max_connections),0) FROM tenants peer JOIN tenant_configuration c ON c.tenant_id=peer.id WHERE peer.runtime_id=t.runtime_id AND peer.lifecycle_state NOT IN ('deprovisioning','retained','purging','purged')),current_setting('max_connections')::bigint-current_setting('superuser_reserved_connections')::bigint FROM tenants t WHERE t.id=$1",
+    )
+    .bind(tenant_id)
+    .fetch_one(db)
+    .await?;
+    match connection_budget_error(declared, accepted) {
+        Some(message) => anyhow::bail!(message),
+        None => Ok(()),
+    }
+}
+
+async fn fail_provisioning(db: &PgPool, tenant_id: Uuid, step: &str, reason: Option<&str>) {
+    let message = match reason {
+        Some(reason) => format!("{step} failed: {reason}; retry is safe."),
+        None => format!("{step} failed; retry is safe."),
+    };
     let _ = sqlx::query("UPDATE provisioning_steps SET status='failed',error=$1,finished_at=now(),updated_at=now() WHERE tenant_id=$2 AND step=$3")
         .bind(&message).bind(tenant_id).bind(step).execute(db).await;
     let _ = sqlx::query("UPDATE tenants SET lifecycle_state='failed',observed_state='unhealthy',observation_error=$1,observed_at=now(),updated_at=now() WHERE id=$2 AND lifecycle_state='provisioning'")
@@ -3045,15 +3080,18 @@ async fn provision_tenant(state: &Shared, tenant_id: Uuid) {
             _ => return,
         }
         let ready = match step {
-            "database" => custom_domain_validated(&state.db, tenant_id).await,
+            "database" => match runtime_connection_budget(&state.db, tenant_id).await {
+                Ok(()) => custom_domain_validated(&state.db, tenant_id).await,
+                Err(error) => Err(error),
+            },
             "routing" => tenant_routing_ready(&state.db, tenant_id).await,
             _ => Ok(true),
         };
         match ready {
             Ok(true) => {}
             Ok(false) => return,
-            Err(_) => {
-                fail_provisioning(&state.db, tenant_id, step).await;
+            Err(error) => {
+                fail_provisioning(&state.db, tenant_id, step, Some(&error.to_string())).await;
                 return;
             }
         }
@@ -3076,8 +3114,8 @@ async fn provision_tenant(state: &Shared, tenant_id: Uuid) {
             "owner" => create_tenant_owner(state, tenant_id).await,
             _ => unreachable!(),
         };
-        if result.is_err() {
-            fail_provisioning(&state.db, tenant_id, step).await;
+        if let Err(error) = result {
+            fail_provisioning(&state.db, tenant_id, step, Some(&error.to_string())).await;
             return;
         }
         if finish_provisioning_step(&state.db, tenant_id, step)
@@ -3405,15 +3443,17 @@ async fn render_provisioned_tenant(state: &Shared, tenant_id: Uuid) -> Result<()
     Ok(())
 }
 
-async fn reload_provisioned_runtime(state: &Shared, tenant_id: Uuid) -> Result<()> {
-    let (service_label, router_enabled, tenant_directory) = sqlx::query_as::<_, (String, bool, String)>(
-        "SELECT r.service_label,r.router_enabled,r.tenant_directory FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
-    )
-    .bind(tenant_id)
-    .fetch_one(&state.db)
-    .await?;
-    let service_label =
-        active_runtime_label(&service_label, router_enabled, &tenant_directory).await?;
+/// The lock that serialises reloads of one runtime, shared by provisioning and
+/// by an operator's render.
+async fn runtime_reload_lock(state: &Shared, runtime_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+    let mut locks = state.runtime_reloads.lock().await;
+    locks.entry(runtime_id).or_default().clone()
+}
+
+/// Ask the runtime process behind an already-resolved launchd label to re-read
+/// its tenants directory. It applies what changed in place, so the tenants it
+/// already serves keep serving.
+async fn signal_runtime_reload(service_label: &str) -> Result<()> {
     let uid = tokio::process::Command::new("id")
         .arg("-u")
         .output()
@@ -3429,6 +3469,43 @@ async fn reload_provisioned_runtime(state: &Shared, tenant_id: Uuid) -> Result<(
         .output()
         .await?;
     anyhow::ensure!(output.status.success(), "launchd reload failed");
+    Ok(())
+}
+
+/// Whether the runtime is dispatching a hostname at all. A runtime that
+/// rejects its tenants directory goes on serving what it had and answers 421
+/// for everything else, so a delivered signal is not yet a reload. Any other
+/// answer means the hostname is dispatched; whether it is well is the health
+/// step's business.
+async fn runtime_dispatches_host(state: &Shared, bind_address: &str, domain: &str) -> bool {
+    let url = format!("http://{bind_address}/api/v2/instance");
+    for _ in 0..15 {
+        if let Ok(response) = state.client.get(&url).header("Host", domain).send().await
+            && response.status().as_u16() != 421
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    false
+}
+
+async fn reload_provisioned_runtime(state: &Shared, tenant_id: Uuid) -> Result<()> {
+    let (runtime_id, service_label, router_enabled, tenant_directory, bind_address, domain) = sqlx::query_as::<_, (Uuid, String, bool, String, String, String)>(
+        "SELECT r.id,r.service_label,r.router_enabled,r.tenant_directory,r.bind_address,t.domain FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
+    )
+    .bind(tenant_id)
+    .fetch_one(&state.db)
+    .await?;
+    let service_label =
+        active_runtime_label(&service_label, router_enabled, &tenant_directory).await?;
+    let lock = runtime_reload_lock(state, runtime_id).await;
+    let _guard = lock.lock().await;
+    signal_runtime_reload(&service_label).await?;
+    anyhow::ensure!(
+        runtime_dispatches_host(state, &bind_address, &domain).await,
+        "the runtime did not adopt this instance; its log says why it rejected the reload"
+    );
     Ok(())
 }
 
@@ -3482,20 +3559,30 @@ async fn healthcheck_url(
     domain: &str,
 ) -> Result<()> {
     let url = format!("http://{bind_address}/api/v2/instance");
+    // A misdirect is a different fault from an unwell tenant: the runtime is
+    // answering, it just has no configuration for this hostname.
+    let mut misdirected = false;
     for _ in 0..30 {
-        if let Ok(response) = state.client.get(&url).header("Host", host).send().await
-            && response.status().is_success()
-            && response
-                .json::<serde_json::Value>()
-                .await
-                .ok()
-                .and_then(|body| body.get("domain")?.as_str().map(str::to_owned))
-                .is_some_and(|served_domain| served_domain.eq_ignore_ascii_case(domain))
-        {
-            return Ok(());
+        if let Ok(response) = state.client.get(&url).header("Host", host).send().await {
+            if response.status().as_u16() == 421 {
+                misdirected = true;
+            } else if response.status().is_success()
+                && response
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|body| body.get("domain")?.as_str().map(str::to_owned))
+                    .is_some_and(|served_domain| served_domain.eq_ignore_ascii_case(domain))
+            {
+                return Ok(());
+            }
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+    anyhow::ensure!(
+        !misdirected,
+        "the runtime is not serving this hostname, so it never adopted the instance's configuration"
+    );
     anyhow::bail!("tenant did not become healthy")
 }
 async fn operations(
@@ -4557,8 +4644,8 @@ async fn render_tenant(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (operator_id, _) = operator(&headers, &s.db).await?;
-    let row = sqlx::query_as::<_, (SqlJson<StoredTenant>, SqlJson<StoredConfig>, String, String, String, String, String, bool, i64)>(
-        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,i.address,r.tenant_directory,r.service_label,r.bind_address,r.router_enabled,t.config_revision FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
+    let row = sqlx::query_as::<_, (SqlJson<StoredTenant>, SqlJson<StoredConfig>, String, String, String, String, String, bool, i64, Uuid)>(
+        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,i.address,r.tenant_directory,r.service_label,r.bind_address,r.router_enabled,t.config_revision,r.id FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
     )
     .bind(id)
     .fetch_optional(&s.db)
@@ -4574,6 +4661,7 @@ async fn render_tenant(
         bind_address,
         router_enabled,
         revision,
+        runtime_id,
     ) = row;
     if matches!(
         tenant.lifecycle_state.as_str(),
@@ -4582,6 +4670,22 @@ async fn render_tenant(
         return Err(ApiError(
             StatusCode::CONFLICT,
             "A deprovisioned tenant is not rendered; restore it first.".into(),
+        ));
+    }
+    // Before the first provisioning step there is no tenant database to point
+    // configuration at, and a runtime handed such a tenant loads a hostname it
+    // cannot serve. For a tenant bringing its own domain that step waits on
+    // the domain, which is what makes this read as a domain check. A tenant
+    // already serving is past all of this, steps or no steps: the ones that
+    // predate provisioning have none to show.
+    if !sqlx::query_scalar::<_, bool>("SELECT t.lifecycle_state='ready' OR EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='database' AND p.status='succeeded') FROM tenants t WHERE t.id=$1")
+        .bind(id)
+        .fetch_one(&s.db)
+        .await?
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "This instance has not finished its first setup step yet; wait for its domain to connect.".into(),
         ));
     }
     let domain = tenant.domain.clone();
@@ -4678,35 +4782,35 @@ async fn render_tenant(
             "Could not activate the rendered configuration.".into(),
         ));
     }
-    let uid = match tokio::process::Command::new("id").arg("-u").output().await {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_owned()
-        }
-        _ => {
-            mark_operation_failed(
-                &s.db,
-                op,
-                "The service account could not be identified after rendering.",
-            )
-            .await;
-            return Err(ApiError(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Configuration rendered, but the service could not be restarted.".into(),
-            ));
-        }
-    };
-    let launch_target = format!("gui/{uid}/{service_label}");
-    if !matches!(tokio::process::Command::new("launchctl").args(["kickstart", "-k", &launch_target]).output().await, Ok(output) if output.status.success())
-    {
+    // A reload applies this tenant's change in place, leaving every other
+    // tenant on the runtime serving; the lock keeps a second render from
+    // signalling while this one is still settling.
+    let lock = runtime_reload_lock(&s, runtime_id).await;
+    let _guard = lock.lock().await;
+    if let Err(error) = signal_runtime_reload(&service_label).await {
         mark_operation_failed(
             &s.db,
             op,
-            "Configuration rendered, but launchd could not restart the instance.",
+            &format!("Configuration rendered, but the runtime could not be reloaded: {error}"),
         )
         .await;
         return Err(ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Configuration rendered, but the instance could not be restarted.".into(),
+            "Configuration rendered, but the runtime could not be reloaded.".into(),
+        ));
+    }
+    if !runtime_dispatches_host(&s, &bind_address, &domain).await {
+        sqlx::query("UPDATE tenants SET observed_state='unhealthy',observed_at=now(),observation_error='The runtime did not adopt this configuration.',updated_at=now() WHERE id=$1")
+            .bind(id).execute(&s.db).await?;
+        mark_operation_failed(
+            &s.db,
+            op,
+            "Configuration rendered, but the runtime did not adopt it; its log says why it rejected the reload.",
+        )
+        .await;
+        return Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Configuration rendered, but the runtime did not adopt it.".into(),
         ));
     }
     let health_url = format!("http://{bind_address}/api/v2/instance");
@@ -4731,12 +4835,13 @@ async fn render_tenant(
         mark_operation_failed(
             &s.db,
             op,
-            "Configuration rendered and restarted, but the tenant did not become healthy.",
+            "Configuration rendered and reloaded, but the tenant did not become healthy.",
         )
         .await;
         return Err(ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "Configuration rendered, but the tenant did not become healthy after restart.".into(),
+            "Configuration rendered, but the tenant did not become healthy after the reload."
+                .into(),
         ));
     }
     let checksum = format!("{:x}", Sha256::digest(rendered_config.as_bytes()));
@@ -4752,10 +4857,25 @@ async fn render_tenant(
 #[cfg(test)]
 mod tests {
     use super::{
-        DomainDnsTargetError, REDACTED, domain_reconcile_error_message, is_valid_owner_username,
-        printed_password, redact_connection_url, tenant_redis_key_prefix,
+        DomainDnsTargetError, REDACTED, connection_budget_error, domain_reconcile_error_message,
+        is_valid_owner_username, printed_password, redact_connection_url, tenant_redis_key_prefix,
     };
     use uuid::Uuid;
+
+    #[test]
+    fn connection_budget_allows_what_postgres_accepts() {
+        assert_eq!(connection_budget_error(80, 97), None);
+        // The edge is inclusive: a runtime may declare exactly what is left.
+        assert_eq!(connection_budget_error(97, 97), None);
+        assert_eq!(connection_budget_error(0, 0), None);
+    }
+
+    #[test]
+    fn connection_budget_names_both_numbers_when_full() {
+        let message = connection_budget_error(100, 97).expect("100 does not fit in 97");
+        assert!(message.contains("100"), "{message}");
+        assert!(message.contains("97"), "{message}");
+    }
 
     #[test]
     fn tenant_files_are_named_by_tenant_id() {
