@@ -49,7 +49,7 @@ export function StatusBadge({ status }: { status: string }) {
 
 export function EmptyState({ icon, children }: { icon: ReactNode; children: ReactNode }) {
   return (
-    <div className="text-muted-foreground grid justify-items-center gap-2 p-12 text-center text-sm [&_svg]:size-6 [&_svg]:opacity-70">
+    <div className="text-muted-foreground grid justify-items-center gap-2 p-8 text-center text-sm [&_svg]:size-6 [&_svg]:opacity-70">
       {icon}
       <p>{children}</p>
     </div>

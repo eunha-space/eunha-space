@@ -12,6 +12,7 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Skeleton } from "@/components/ui/skeleton";
 
 /**
@@ -37,14 +38,16 @@ export function TenantConfigDialog({ tenantId, domain }: { tenantId: string; dom
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger
-        render={
-          <Button variant="outline">
+      <Tooltip>
+        <TooltipTrigger render={<span className="inline-flex" />}>
+          <DialogTrigger
+            render={<Button variant="outline" size="icon-sm" aria-label="Config" />}
+          >
             <FileCog />
-            Config
-          </Button>
-        }
-      />
+          </DialogTrigger>
+        </TooltipTrigger>
+        <TooltipContent>Config</TooltipContent>
+      </Tooltip>
       <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle className="flex flex-wrap items-center gap-2">

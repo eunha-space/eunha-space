@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { ExternalLink, HardDrive, Inbox, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
+import { useMemo, useState, type ReactNode } from "react";
+import { ExternalLink, FileCog, Globe, HardDrive, HeartPulse, Inbox, Plus, PowerOff, RefreshCw, RotateCcw, RotateCw, Trash2 } from "lucide-react";
 import { api, instanceAddress, isOffline, pendingRender, type Runtime, type Tenant, type TenantDomain } from "@/api";
 import { absoluteTime, relativeTime } from "@/format";
 import { Badge } from "@/components/ui/badge";
@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Switch } from "@/components/ui/switch";
 import { ActionButton } from "@/components/console/action-button";
 import { ChipFilter, SearchField } from "@/components/console/filters";
@@ -24,6 +25,42 @@ type Props = {
 };
 
 const NEEDS_ATTENTION = new Set(["unhealthy", "unknown"]);
+
+/**
+ * One column track shared by the header and every row, so the inventory reads
+ * as a table: the labels are printed once at the top instead of beside each
+ * value. Below `xl` the metadata folds into a wrapping strip and carries its
+ * own inline labels again.
+ */
+// Every track is content-independent: each row is its own grid, so a track
+// that sized to its content would leave a row with fewer actions or a longer
+// domain out of step with the rest of the column.
+const COLUMNS = cn(
+  "grid items-center gap-x-3 gap-y-1 grid-cols-[0.625rem_1fr]",
+  "xl:grid-cols-[0.625rem_minmax(0,1.6fr)_minmax(0,1.1fr)_minmax(0,0.6fr)_minmax(0,0.9fr)_minmax(0,1.1fr)_12rem]",
+);
+
+const HEADINGS = ["Instance", "Runtime", "Config", "State", "Lifecycle"];
+
+function Cell({ label, children, title }: { label: string; children: ReactNode; title?: string }) {
+  return (
+    <div className="min-w-0 truncate text-xs" title={title}>
+      <span className="text-muted-foreground mr-1 text-[10px] tracking-[0.08em] uppercase xl:hidden">
+        {label}
+      </span>
+      {children}
+    </div>
+  );
+}
+
+/** Row badges stay on the name line, so they are sized to sit in it. */
+function RowBadge({ className, title, children }: { className?: string; title?: string; children: ReactNode }) {
+  return (
+    <Badge variant="outline" className={cn("px-1.5 py-0 text-[10px] font-normal", className)} title={title}>
+      {children}
+    </Badge>
+  );
+}
 
 
 function matches(tenant: Tenant, filter: string): boolean {
@@ -98,17 +135,17 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
             aria-pressed={filter === key}
             onClick={() => setFilter(key)}
             className={cn(
-              "hover:bg-muted/60 focus-visible:ring-ring/50 cursor-pointer p-5 text-left transition-colors focus-visible:ring-3 focus-visible:outline-none",
+              "hover:bg-muted/60 focus-visible:ring-ring/50 cursor-pointer px-4 py-2.5 text-left transition-colors focus-visible:ring-3 focus-visible:outline-none",
               "border-border border-b md:border-b-0",
               index % 2 === 0 && "border-r",
               (index === 1 || index === 2) && "md:border-r",
               filter === key && "bg-accent/60 shadow-[inset_0_2px_0_var(--primary)]",
             )}
           >
-            <span className="text-muted-foreground block text-sm">{label}</span>
+            <span className="text-muted-foreground block text-xs">{label}</span>
             <strong
               className={cn(
-                "mt-0.5 block text-3xl font-semibold tabular-nums",
+                "block text-xl font-semibold tabular-nums",
                 key === "attention" && counts.attention > 0 && "text-destructive",
               )}
             >
@@ -119,14 +156,14 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
       </Card>
 
       <Card className="gap-0 overflow-hidden p-0">
-        <CardHeader className="flex flex-col gap-4 p-5 xl:flex-row xl:items-start xl:justify-between">
+        <CardHeader className="flex flex-col gap-3 px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
           <div>
-            <CardTitle>Tenant inventory</CardTitle>
-            <CardDescription>
+            <CardTitle className="text-base">Tenant inventory</CardTitle>
+            <CardDescription className="text-xs">
               Showing {visible.length} of {tenants.length} tenants.
             </CardDescription>
           </div>
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2">
             <CreateTenantDialog runtimes={runtimes} busy={busy === "create-tenant"} act={act} />
             <div className="flex items-center gap-2">
               <Switch
@@ -158,6 +195,19 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
           </div>
         </CardHeader>
         <Separator />
+        {visible.length > 0 && (
+          <div
+            className={cn(
+              COLUMNS,
+              "text-muted-foreground border-border hidden border-b px-4 py-1.5 text-[10px] tracking-[0.08em] uppercase xl:grid",
+            )}
+            aria-hidden
+          >
+            <span />
+            {HEADINGS.map((heading) => <span key={heading}>{heading}</span>)}
+            <span className="justify-self-end">Actions</span>
+          </div>
+        )}
         {visible.length === 0 ? (
           <EmptyState icon={<Inbox />}>
             {tenants.length === 0
@@ -168,7 +218,7 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
           groups.map(([host, hostTenants]) => (
             <section key={host || "all"}>
               {groupByInstance && (
-                <div className="bg-muted/50 border-border flex items-center gap-2 border-y px-5 py-2 first:border-t-0">
+                <div className="bg-muted/50 border-border flex items-center gap-2 border-y px-4 py-1.5 first:border-t-0">
                   <HardDrive className="text-muted-foreground size-3.5" />
                   <h3 className="font-mono text-xs font-semibold">{host}</h3>
                   <span className="text-muted-foreground text-xs">
@@ -180,131 +230,105 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                 <div
                   key={tenant.id}
                   className={cn(
-                    "hover:bg-muted/40 grid items-center gap-4 p-5 transition-colors",
-                    "grid-cols-[auto_1fr] xl:grid-cols-[auto_minmax(10rem,16rem)_minmax(0,1fr)_auto]",
+                    COLUMNS,
+                    "hover:bg-muted/40 px-4 py-2 transition-colors",
                     index > 0 && "border-border border-t",
                   )}
                 >
                   <StatusDot state={tenant.observed_state} />
-                  <div className="min-w-0">
-                    <h3 className="truncate font-semibold" title={instanceAddress(tenant)}>
+                  <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                    <h3 className="truncate text-sm font-semibold" title={instanceAddress(tenant)}>
                       {instanceAddress(tenant)}
                     </h3>
-                    <p className="text-muted-foreground mt-0.5 truncate text-sm" title={tenant.title}>
+                    <span className="text-muted-foreground truncate text-xs" title={tenant.title}>
                       {tenant.title}
-                    </p>
-                    <div className="mt-1.5 flex flex-wrap gap-1.5 empty:hidden">
-                      {pendingRender(tenant) && (
-                        <Badge
-                          variant="outline"
-                          className="border-pending/40 bg-pending/10 text-pending"
-                        >
-                          Pending render
-                        </Badge>
-                      )}
-                      {tenant.lifecycle_state !== "ready" && (
-                        <Badge variant="outline" className={tenant.lifecycle_state === "failed" ? "text-destructive" : "text-pending"}>
-                          {tenant.lifecycle_state}
-                        </Badge>
-                      )}
-                      {tenant.purge_scheduled_for && (
-                        <Badge variant="outline" className="text-destructive" title={absoluteTime(tenant.purge_scheduled_for)}>
-                          purges {relativeTime(tenant.purge_scheduled_for)}
-                        </Badge>
-                      )}
-                      {/* A deleted tenant's lifecycle badge already says it is going or has gone offline. */}
-                      {tenant.desired_state !== "running" &&
-                        !isOffline(tenant) && (
-                        <Badge variant="outline" className="text-muted-foreground">
-                          Desired: {tenant.desired_state}
-                        </Badge>
-                      )}
-                    </div>
-                  </div>
-                  <dl className="col-span-2 grid grid-cols-2 gap-4 sm:grid-cols-3 xl:col-span-1">
-                    <div className="min-w-0">
-                      <dt className="text-muted-foreground text-xs tracking-[0.08em] uppercase">
-                        Runtime
-                      </dt>
-                      <dd className="mt-0.5 text-sm break-words">
-                        {tenant.runtime_name}
-                        <span className="text-muted-foreground"> · {tenant.bind_address}</span>
-                      </dd>
-                    </div>
-                    <div className="min-w-0">
-                      <dt className="text-muted-foreground text-xs tracking-[0.08em] uppercase">
-                        Config
-                      </dt>
-                      <dd className="mt-0.5 text-sm break-words">
-                        revision {tenant.config_revision}
-                        {pendingRender(tenant) && (
-                          <span className="text-pending">
-                            {" "}
-                            · rendered {tenant.rendered_revision ?? "—"}
-                          </span>
-                        )}
-                      </dd>
-                    </div>
-                    <div className="min-w-0">
-                      <dt className="text-muted-foreground text-xs tracking-[0.08em] uppercase">
-                        State
-                      </dt>
-                      <dd className="mt-0.5 text-sm break-words">
-                        {tenant.observed_state}
-                        <span
-                          className="text-muted-foreground"
-                          title={absoluteTime(tenant.updated_at)}
-                        >
-                          {" "}
-                          · {relativeTime(tenant.updated_at)}
-                        </span>
-                      </dd>
-                    </div>
-                    {tenant.temporal_workflow_id && (
-                      <div className="min-w-0">
-                        <dt className="text-muted-foreground text-xs tracking-[0.08em] uppercase">
-                          Lifecycle
-                        </dt>
-                        <dd
-                          className="mt-0.5 truncate font-mono text-sm"
-                          title={tenant.temporal_workflow_id}
-                        >
-                          <LifecycleExecution tenant={tenant} />
-                          {tenant.temporal_dispatch_attempts && tenant.temporal_dispatch_attempts > 1 && (
-                            <span className="text-muted-foreground">
-                              {" "}· dispatch {tenant.temporal_dispatch_attempts}
-                            </span>
-                          )}
-                        </dd>
-                      </div>
+                    </span>
+                    {pendingRender(tenant) && (
+                      <RowBadge className="border-pending/40 bg-pending/10 text-pending">
+                        Pending render
+                      </RowBadge>
                     )}
-                  </dl>
-                  <div className="col-span-2 flex flex-wrap gap-2 xl:col-span-1 xl:justify-end">
+                    {tenant.lifecycle_state !== "ready" && (
+                      <RowBadge className={tenant.lifecycle_state === "failed" ? "text-destructive" : "text-pending"}>
+                        {tenant.lifecycle_state}
+                      </RowBadge>
+                    )}
+                    {tenant.purge_scheduled_for && (
+                      <RowBadge className="text-destructive" title={absoluteTime(tenant.purge_scheduled_for)}>
+                        purges {relativeTime(tenant.purge_scheduled_for)}
+                      </RowBadge>
+                    )}
+                    {/* A deleted tenant's lifecycle badge already says it is going or has gone offline. */}
+                    {tenant.desired_state !== "running" && !isOffline(tenant) && (
+                      <RowBadge className="text-muted-foreground">
+                        Desired: {tenant.desired_state}
+                      </RowBadge>
+                    )}
+                  </div>
+                  {/* Wide screens align these against the column header; narrow
+                      ones fold them into one wrapping strip under the name. */}
+                  <div className="max-xl:col-span-2 max-xl:flex max-xl:flex-wrap max-xl:gap-x-4 max-xl:gap-y-0.5 xl:contents">
+                    <Cell label="Runtime">
+                      {tenant.runtime_name}
+                      <span className="text-muted-foreground"> · {tenant.bind_address}</span>
+                    </Cell>
+                    <Cell label="Config">
+                      rev {tenant.config_revision}
+                      {pendingRender(tenant) && (
+                        <span className="text-pending"> · rendered {tenant.rendered_revision ?? "—"}</span>
+                      )}
+                    </Cell>
+                    <Cell label="State">
+                      {tenant.observed_state}
+                      <span className="text-muted-foreground" title={absoluteTime(tenant.updated_at)}>
+                        {" "}· {relativeTime(tenant.updated_at)}
+                      </span>
+                    </Cell>
+                    <Cell label="Lifecycle" title={tenant.temporal_workflow_id ?? undefined}>
+                      {tenant.temporal_workflow_id
+                        ? (
+                          <>
+                            <LifecycleExecution tenant={tenant} />
+                            {tenant.temporal_dispatch_attempts && tenant.temporal_dispatch_attempts > 1 && (
+                              <span className="text-muted-foreground">
+                                {" "}· dispatch {tenant.temporal_dispatch_attempts}
+                              </span>
+                            )}
+                          </>
+                        )
+                        : <span className="text-muted-foreground">—</span>}
+                    </Cell>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1 max-xl:col-span-2 xl:flex-nowrap xl:justify-end">
                     {tenant.lifecycle_state === "failed" && (
-                      <ActionButton busy={busy === `retry-${tenant.id}`} onClick={() => act(`/tenants/${tenant.id}/retry`, `retry-${tenant.id}`)}>
+                      <ActionButton
+                        iconOnly
+                        icon={<RotateCw />}
+                        busy={busy === `retry-${tenant.id}`}
+                        onClick={() => act(`/tenants/${tenant.id}/retry`, `retry-${tenant.id}`)}
+                      >
                         Retry provisioning
                       </ActionButton>
                     )}
                     {tenant.lifecycle_state === "retained" && (
-                      <>
-                        <ActionButton
-                          icon={<RotateCcw />}
-                          busy={busy === `restore-${tenant.id}`}
-                          confirm={{
-                            title: `Restore ${instanceAddress(tenant)}?`,
-                            description: "The tenant is migrated to its runtime's release, rendered and served again with its retained data. The customer's instance limit is not checked.",
-                            action: "Restore",
-                          }}
-                          onClick={() => act(`/tenants/${tenant.id}/restore`, `restore-${tenant.id}`)}
-                        >
-                          Restore
-                        </ActionButton>
-                      </>
+                      <ActionButton
+                        iconOnly
+                        icon={<RotateCcw />}
+                        busy={busy === `restore-${tenant.id}`}
+                        confirm={{
+                          title: `Restore ${instanceAddress(tenant)}?`,
+                          description: "The tenant is migrated to its runtime's release, rendered and served again with its retained data. The customer's instance limit is not checked.",
+                          action: "Restore",
+                        }}
+                        onClick={() => act(`/tenants/${tenant.id}/restore`, `restore-${tenant.id}`)}
+                      >
+                        Restore
+                      </ActionButton>
                     )}
                     {["provisioning", "ready", "failed"].includes(tenant.lifecycle_state) && (
                       <ActionButton
-                        icon={<Trash2 />}
-                        variant="outline"
+                        iconOnly
+                        icon={<PowerOff />}
                         busy={busy === `deprovision-${tenant.id}`}
                         confirm={{
                           title: `Take ${instanceAddress(tenant)} offline?`,
@@ -328,14 +352,17 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                     {!isOffline(tenant) && (
                       <>
                         <ActionButton
-                          icon={<RefreshCw />}
+                          iconOnly
+                          icon={<HeartPulse />}
                           busy={busy === `check-${tenant.id}`}
                           onClick={() => act(`/tenants/${tenant.id}/check`, `check-${tenant.id}`)}
                         >
                           Check
                         </ActionButton>
                         <ActionButton
+                          iconOnly
                           variant="default"
+                          icon={<RefreshCw />}
                           busy={busy === `render-${tenant.id}`}
                           confirm={{
                             title: `Render and restart ${tenant.domain}?`,
@@ -396,9 +423,14 @@ function PurgeDialog({ tenant, busy, act }: { tenant: Tenant; busy: boolean; act
         if (!next) setConfirmation("");
       }}
     >
-      <DialogTrigger render={<Button variant="destructive" />}>
-        <Trash2 /> Purge
-      </DialogTrigger>
+      <Tooltip>
+        <TooltipTrigger render={<span className="inline-flex" />}>
+          <DialogTrigger render={<Button variant="destructive" size="icon-sm" aria-label="Purge" />}>
+            <Trash2 />
+          </DialogTrigger>
+        </TooltipTrigger>
+        <TooltipContent>Purge</TooltipContent>
+      </Tooltip>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Purge {address}?</DialogTitle>
@@ -492,7 +524,14 @@ function DomainsDialog({ tenant, busy, act }: { tenant: Tenant; busy: string; ac
     }
   }
   return <Dialog open={open} onOpenChange={(next) => { setOpen(next); if (next) void refresh(); }}>
-    <DialogTrigger render={<Button variant="outline" />}>Domains</DialogTrigger>
+    <Tooltip>
+      <TooltipTrigger render={<span className="inline-flex" />}>
+        <DialogTrigger render={<Button variant="outline" size="icon-sm" aria-label="Domains" />}>
+          <Globe />
+        </DialogTrigger>
+      </TooltipTrigger>
+      <TooltipContent>Domains</TooltipContent>
+    </Tooltip>
     <DialogContent>
       <DialogHeader><DialogTitle>Domains for {tenant.domain}</DialogTitle><DialogDescription>Tenant routing and Cloudflare certificates. Custom domains are chosen only when a customer creates an instance. Adopting an existing primary domain does not change its ActivityPub identity.</DialogDescription></DialogHeader>
       <div className="grid gap-3">{domains.map((domain) => <div key={domain.id} className="bg-muted/50 rounded-md p-3 text-sm">

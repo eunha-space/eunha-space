@@ -43,10 +43,10 @@ export function Operations({ operations }: { operations: Operation[] }) {
 
   return (
     <Card className="gap-0 overflow-hidden p-0">
-      <CardHeader className="flex flex-col gap-4 p-5 lg:flex-row lg:items-start lg:justify-between">
+      <CardHeader className="flex flex-col gap-3 px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <CardTitle>Operations</CardTitle>
-          <CardDescription>
+          <CardTitle className="text-base">Operations</CardTitle>
+          <CardDescription className="text-xs">
             The 50 most recent releases, configuration renders, and health checks. Select a row to
             read its log.
           </CardDescription>

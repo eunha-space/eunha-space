@@ -33,8 +33,19 @@ type Props = {
   /** When present, the action runs only after the operator confirms it. */
   confirm?: Confirmation;
   className?: string;
+  /**
+   * Shows the icon alone and moves `children` into the tooltip and the
+   * accessible name, so a dense row of actions costs a column of icons
+   * instead of a column of sentences. Requires `icon`.
+   */
+  iconOnly?: boolean;
   children: ReactNode;
 };
+
+/** The accessible name for an icon-only action, from its label children. */
+function label(children: ReactNode): string | undefined {
+  return typeof children === "string" ? children : undefined;
+}
 
 export function ActionButton({
   onClick,
@@ -46,29 +57,41 @@ export function ActionButton({
   icon,
   confirm,
   className,
+  iconOnly = false,
   children,
 }: Props) {
   const [open, setOpen] = useState(false);
 
-  const button = (
+  const bare = (
     <Button
       variant={variant}
-      size={size}
+      size={iconOnly && size === "default" ? "icon-sm" : size}
       className={className}
       disabled={busy || disabled}
       onClick={confirm ? undefined : onClick}
+      aria-label={iconOnly ? label(children) : undefined}
     >
       {busy ? <Spinner label="Working" /> : icon}
-      {children}
+      {iconOnly ? null : children}
     </Button>
   );
+
+  // The label has to stay reachable once it leaves the button face.
+  const button = iconOnly && !disabled
+    ? (
+      <Tooltip>
+        <TooltipTrigger render={bare} />
+        <TooltipContent>{children}</TooltipContent>
+      </Tooltip>
+    )
+    : bare;
 
   // A disabled button emits no pointer events, so the tooltip needs a live wrapper.
   if (disabled && !busy && disabledReason) {
     return (
       <Tooltip>
         <TooltipTrigger render={<span tabIndex={0} className="inline-flex cursor-not-allowed" />}>
-          {button}
+          {bare}
         </TooltipTrigger>
         <TooltipContent>{disabledReason}</TooltipContent>
       </Tooltip>
@@ -77,9 +100,21 @@ export function ActionButton({
 
   if (!confirm || disabled || busy) return button;
 
+  // A confirming action opens a dialog, so its tooltip hangs off a wrapper
+  // rather than the trigger itself.
+  const trigger = <AlertDialogTrigger render={bare} />;
   return (
     <AlertDialog open={open} onOpenChange={setOpen}>
-      <AlertDialogTrigger render={button} />
+      {iconOnly
+        ? (
+          <Tooltip>
+            <TooltipTrigger render={<span className="inline-flex" />}>
+              {trigger}
+            </TooltipTrigger>
+            <TooltipContent>{children}</TooltipContent>
+          </Tooltip>
+        )
+        : trigger}
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>{confirm.title}</AlertDialogTitle>

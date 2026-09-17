@@ -23,9 +23,9 @@ export function Releases({ runtimes, busy, act }: Props) {
 
   return (
     <Card className="gap-0 overflow-hidden p-0">
-      <CardHeader className="p-5">
-        <CardTitle>Runtime releases</CardTitle>
-        <CardDescription>
+      <CardHeader className="px-4 py-3">
+        <CardTitle className="text-base">Runtime releases</CardTitle>
+        <CardDescription className="text-xs">
           Eunha ships once per shared runtime, never per tenant. The control plane serializes the
           fleet, so only one runtime deploys at a time.
         </CardDescription>
@@ -40,10 +40,10 @@ export function Releases({ runtimes, busy, act }: Props) {
           const logOpen = openLog === runtime.id;
           return (
             <div key={runtime.id} className={cn(index > 0 && "border-border border-t")}>
-              <div className="grid items-center gap-4 p-5 lg:grid-cols-[minmax(11rem,1fr)_minmax(14rem,1.4fr)_auto_auto]">
+              <div className="grid items-center gap-3 px-4 py-3 lg:grid-cols-[minmax(11rem,1fr)_minmax(14rem,1.4fr)_auto_auto]">
                 <div className="min-w-0">
-                  <h3 className="font-semibold">{runtime.name}</h3>
-                  <p className="text-muted-foreground mt-0.5 text-sm break-words">
+                  <h3 className="text-sm font-semibold">{runtime.name}</h3>
+                  <p className="text-muted-foreground mt-0.5 text-xs break-words">
                     {runtime.instance_name} ({runtime.instance_address}) · {runtime.tenant_count} tenant
                     {runtime.tenant_count === 1 ? "" : "s"}
                   </p>
@@ -54,9 +54,9 @@ export function Releases({ runtimes, busy, act }: Props) {
                     {shortRef(runtime.deployed_ref)}
                   </p>
                 </div>
-                <div className="grid min-w-0 justify-items-start gap-1.5">
+                <div className="grid min-w-0 justify-items-start gap-1">
                   <StatusBadge status={status} />
-                  <p className="text-muted-foreground text-sm break-words">
+                  <p className="text-muted-foreground text-xs break-words">
                     {lastLine || "No release activity recorded."}
                   </p>
                   {runtime.release_operation_id && (
@@ -83,7 +83,7 @@ export function Releases({ runtimes, busy, act }: Props) {
                       })
                     }
                   />
-                  <Label htmlFor={`auto-${runtime.id}`} className="text-muted-foreground">
+                  <Label htmlFor={`auto-${runtime.id}`} className="text-muted-foreground text-xs">
                     Auto deploy
                   </Label>
                 </div>

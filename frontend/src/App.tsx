@@ -190,10 +190,10 @@ export function App() {
 
   return (
     <TooltipProvider delay={200}>
-      <div className="min-h-screen md:grid md:grid-cols-[15rem_1fr]">
-        <aside className="bg-sidebar border-border flex items-center gap-3 border-b p-3 md:fixed md:h-screen md:w-60 md:flex-col md:items-stretch md:gap-0 md:border-r md:border-b-0 md:p-5">
+      <div className="min-h-screen md:grid md:grid-cols-[13rem_1fr]">
+        <aside className="bg-sidebar border-border flex items-center gap-3 border-b p-3 md:fixed md:h-screen md:w-52 md:flex-col md:items-stretch md:gap-0 md:border-r md:border-b-0 md:p-4">
           <div className="flex items-center gap-3">
-            <Mark className="size-10" />
+            <Mark className="size-8" />
             <div className="hidden flex-col md:flex">
               <strong className="leading-tight">eunha space</strong>
               <span className="text-muted-foreground text-sm">
@@ -203,7 +203,7 @@ export function App() {
           </div>
           <nav
             aria-label="Console sections"
-            className="flex gap-1 md:mt-8 md:grid"
+            className="flex gap-1 md:mt-5 md:grid"
           >
             {sections.map((section) => (
               <Button
@@ -235,7 +235,7 @@ export function App() {
               </Button>
             ))}
           </nav>
-          <div className="ml-auto flex items-center gap-2 md:mt-auto md:ml-0 md:justify-between md:border-t md:pt-4">
+          <div className="ml-auto flex items-center gap-2 md:mt-auto md:ml-0 md:justify-between md:border-t md:pt-3">
             <span className="text-muted-foreground hidden truncate text-sm md:inline">
               {session.username}
             </span>
@@ -256,15 +256,15 @@ export function App() {
         </aside>
 
         <main
-          className="mx-auto w-full max-w-[92rem] p-4 md:col-start-2 md:px-8 md:py-8"
+          className="mx-auto w-full max-w-[110rem] p-3 md:col-start-2 md:px-6 md:py-5"
           aria-busy={refreshing}
         >
-          <header className="mb-6 flex flex-wrap items-center justify-between gap-4">
+          <header className="mb-3 flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-primary mb-1 text-xs font-extrabold tracking-[0.18em]">
+              <p className="text-primary text-[10px] font-extrabold tracking-[0.18em]">
                 RUNTIME FLEET
               </p>
-              <h1 className="text-3xl font-semibold tracking-tight">
+              <h1 className="text-xl font-semibold tracking-tight">
                 {heading}
               </h1>
             </div>
@@ -294,7 +294,7 @@ export function App() {
           </header>
 
           {error && (
-            <Alert variant="destructive" className="mb-4">
+            <Alert variant="destructive" className="mb-3">
               <CircleAlert />
               <AlertDescription>{error}</AlertDescription>
               <AlertAction>
