@@ -48,7 +48,9 @@ export function TenantConfigDialog({ tenantId, domain }: { tenantId: string; dom
         </TooltipTrigger>
         <TooltipContent>Config</TooltipContent>
       </Tooltip>
-      <DialogContent className="sm:max-w-3xl">
+      {/* The body is the only part that grows, so the dialog stays on screen
+          however long the file is. */}
+      <DialogContent className="max-h-[calc(100vh-4rem)] grid-rows-[auto_minmax(0,1fr)] sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle className="flex flex-wrap items-center gap-2">
             <span className="font-mono">{config?.file_name ?? `${domain} configuration`}</span>
@@ -65,6 +67,9 @@ export function TenantConfigDialog({ tenantId, domain }: { tenantId: string; dom
             never reach this page.
           </DialogDescription>
         </DialogHeader>
+        {/* A grid child defaults to min-width:auto, which let the longest line
+            push the panel out past the dialog; a rendered file wraps rather
+            than scrolling sideways. */}
         {error ? (
           <p className="text-destructive text-sm">{error}</p>
         ) : !config ? (
@@ -75,8 +80,8 @@ export function TenantConfigDialog({ tenantId, domain }: { tenantId: string; dom
             <Skeleton className="h-4 w-1/3" />
           </div>
         ) : (
-          <ScrollArea className="bg-muted/40 max-h-[60vh] rounded-lg border">
-            <pre className="p-4 font-mono text-xs leading-relaxed">{config.toml}</pre>
+          <ScrollArea className="bg-muted/40 min-h-0 min-w-0 rounded-lg border">
+            <pre className="p-4 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap">{config.toml}</pre>
           </ScrollArea>
         )}
       </DialogContent>
