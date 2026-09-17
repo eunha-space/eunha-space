@@ -57,6 +57,10 @@ struct AppState {
     db: PgPool,
     client: reqwest::Client,
     provision_database_url: String,
+    /// Where tenants reach PostgreSQL, when that is not where the control plane
+    /// provisions it. Roles and databases are created directly; tenant traffic
+    /// goes through the pooler. Unset means both go to the same place.
+    tenant_pooler_address: Option<String>,
     cloudflare: Option<CloudflareConfig>,
     provided_domain_suffixes: Vec<String>,
     customer_email: Option<CustomerEmailConfig>,
@@ -707,6 +711,9 @@ async fn main() -> Result<()> {
         db,
         provision_database_url: std::env::var("CONTROL_PROVISION_DATABASE_URL")
             .unwrap_or(database_url),
+        tenant_pooler_address: std::env::var("CONTROL_TENANT_POOLER_ADDRESS")
+            .ok()
+            .filter(|address| !address.trim().is_empty()),
         cloudflare: match (
             std::env::var("CLOUDFLARE_ZONE_ID"),
             std::env::var("CLOUDFLARE_API_TOKEN"),
@@ -1294,7 +1301,12 @@ fn random_hex(bytes: usize) -> String {
     value.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn tenant_database_url(admin_url: &str, tenant_id: Uuid, password: &str) -> Result<String> {
+fn tenant_database_url(
+    admin_url: &str,
+    tenant_id: Uuid,
+    password: &str,
+    pooler_address: Option<&str>,
+) -> Result<String> {
     let compact = tenant_id.simple().to_string();
     let mut url = url::Url::parse(admin_url).context("invalid provisioning database URL")?;
     url.set_username(&format!("eunha_r_{compact}"))
@@ -1302,6 +1314,16 @@ fn tenant_database_url(admin_url: &str, tenant_id: Uuid, password: &str) -> Resu
     url.set_password(Some(password))
         .map_err(|_| anyhow::anyhow!("invalid provisioning database password"))?;
     url.set_path(&format!("/eunha_t_{compact}"));
+    if let Some(address) = pooler_address {
+        let (host, port) = address
+            .rsplit_once(':')
+            .context("tenant pooler address needs host:port")?;
+        let port: u16 = port.parse().context("invalid tenant pooler port")?;
+        url.set_host(Some(host))
+            .map_err(|_| anyhow::anyhow!("invalid tenant pooler host"))?;
+        url.set_port(Some(port))
+            .map_err(|_| anyhow::anyhow!("invalid tenant pooler port"))?;
+    }
     Ok(url.to_string())
 }
 
@@ -1489,13 +1511,18 @@ async fn create_tenant_inner(
     let tenant_id = Uuid::new_v4();
     let operation_id = Uuid::new_v4();
     let password = random_hex(24);
-    let database_url = tenant_database_url(&s.provision_database_url, tenant_id, &password)
-        .map_err(|_| {
-            ApiError(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "The provisioning database is not configured.".into(),
-            )
-        })?;
+    let database_url = tenant_database_url(
+        &s.provision_database_url,
+        tenant_id,
+        &password,
+        s.tenant_pooler_address.as_deref(),
+    )
+    .map_err(|_| {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The provisioning database is not configured.".into(),
+        )
+    })?;
     let (vapid_private, vapid_public) = generate_vapid_keypair().map_err(|_| {
         ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3462,6 +3489,16 @@ async fn create_tenant_database(state: &Shared, tenant_id: Uuid) -> Result<()> {
             .execute(&admin)
             .await?;
     }
+    // Eunha keeps its own tables in the `eunha` schema and finds them through
+    // `search_path`. Setting that on the role rather than on each connection is
+    // what makes a pooled connection safe: behind a transaction pooler a server
+    // connection is handed to clients that never ran `SET search_path`, and one
+    // opened after them never ran it at all.
+    sqlx::query(&format!(
+        "ALTER ROLE {role} SET search_path TO eunha, public"
+    ))
+    .execute(&admin)
+    .await?;
     if !sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)")
         .bind(database)
         .fetch_one(&admin)
@@ -5048,6 +5085,25 @@ mod tests {
     }
 
     #[test]
+    fn tenant_url_points_at_the_pooler_while_names_stay_intact() {
+        let tenant = Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap();
+        let compact = tenant.simple().to_string();
+        let pooled = super::tenant_database_url(
+            "postgres://admin:pw@db.internal:5432/postgres",
+            tenant,
+            "pw",
+            Some("127.0.0.1:6432"),
+        )
+        .unwrap();
+        assert!(pooled.contains("@127.0.0.1:6432/"), "{pooled}");
+        // Purge still recognises its own role and database through the pooler.
+        assert_eq!(
+            super::provisioned_database_names(tenant, &pooled),
+            Some((format!("eunha_r_{compact}"), format!("eunha_t_{compact}")))
+        );
+    }
+
+    #[test]
     fn purge_drops_only_the_database_provisioning_created() {
         let tenant = Uuid::parse_str("44444444-4444-4444-4444-444444444444").unwrap();
         let other = Uuid::parse_str("55555555-5555-5555-5555-555555555555").unwrap();
@@ -5055,6 +5111,7 @@ mod tests {
             "postgres://admin:pw@db.internal:5432/postgres",
             tenant,
             "pw",
+            None,
         )
         .unwrap();
         eprintln!("{provisioned}");
