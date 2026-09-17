@@ -124,6 +124,10 @@ struct TenantSummary {
     /// A custom domain released because it never validated; the tenant's own
     /// `domain` is then a placeholder.
     abandoned_custom_domain: Option<String>,
+    temporal_workflow_id: Option<String>,
+    temporal_workflow_kind: Option<String>,
+    temporal_dispatch_attempts: Option<i32>,
+    lifecycle_step: Option<String>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -1219,7 +1223,7 @@ async fn tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     operator(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain FROM tenants t JOIN runtimes r ON r.id=t.runtime_id ORDER BY t.domain").fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain,d.workflow_id temporal_workflow_id,d.workflow_kind temporal_workflow_kind,d.attempts temporal_dispatch_attempts,CASE WHEN t.lifecycle_state='provisioning' THEN (SELECT step FROM provisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,array_position(ARRAY['database','migrate','render','reload','health','routing','owner'],step) LIMIT 1) WHEN t.lifecycle_state IN ('deprovisioning','retained','purging') THEN (SELECT step FROM deprovisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,step LIMIT 1) END lifecycle_step FROM tenants t JOIN runtimes r ON r.id=t.runtime_id LEFT JOIN LATERAL (SELECT workflow_id,workflow_kind,attempts FROM temporal_dispatches WHERE tenant_id=t.id ORDER BY created_at DESC LIMIT 1) d ON true ORDER BY t.domain").fetch_all(&s.db).await?))
 }
 
 fn random_hex(bytes: usize) -> String {

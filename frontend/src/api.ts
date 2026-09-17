@@ -23,6 +23,11 @@ export type Tenant = {
   purge_scheduled_for: string | null;
   /** A custom domain released because it never validated; `domain` is then a placeholder. */
   abandoned_custom_domain: string | null;
+  /** Durable Temporal execution metadata; no workflow payloads or secrets are exposed. */
+  temporal_workflow_id: string | null;
+  temporal_workflow_kind: "provision" | "deprovision" | "purge" | null;
+  temporal_dispatch_attempts: number | null;
+  lifecycle_step: string | null;
 };
 
 /** The address to show for an instance, including one whose domain was released. */

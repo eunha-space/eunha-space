@@ -260,6 +260,26 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                         </span>
                       </dd>
                     </div>
+                    {tenant.temporal_workflow_id && (
+                      <div className="min-w-0">
+                        <dt className="text-muted-foreground text-xs tracking-[0.08em] uppercase">
+                          Lifecycle
+                        </dt>
+                        <dd
+                          className="mt-0.5 truncate font-mono text-sm"
+                          title={tenant.temporal_workflow_id}
+                        >
+                          {tenant.lifecycle_step
+                            ? `${tenant.temporal_workflow_kind} · ${tenant.lifecycle_step}`
+                            : tenant.temporal_workflow_kind}
+                          {tenant.temporal_dispatch_attempts && tenant.temporal_dispatch_attempts > 1 && (
+                            <span className="text-muted-foreground">
+                              {" "}· dispatch {tenant.temporal_dispatch_attempts}
+                            </span>
+                          )}
+                        </dd>
+                      </div>
+                    )}
                   </dl>
                   <div className="col-span-2 flex flex-wrap gap-2 xl:col-span-1 xl:justify-end">
                     {tenant.lifecycle_state === "failed" && (
