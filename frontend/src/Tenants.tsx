@@ -289,7 +289,8 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                         ? (
                           <>
                             <LifecycleExecution tenant={tenant} />
-                            {tenant.temporal_dispatch_attempts && tenant.temporal_dispatch_attempts > 1 && (
+                            {/* A plain `&&` on the count would print a literal 0. */}
+                            {(tenant.temporal_dispatch_attempts ?? 0) > 1 && (
                               <span className="text-muted-foreground">
                                 {" "}· dispatch {tenant.temporal_dispatch_attempts}
                               </span>
