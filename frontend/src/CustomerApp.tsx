@@ -28,7 +28,6 @@ import { LanguageToggle } from "@/i18n";
 import { CustomerInstanceDetail } from "@/CustomerInstanceDetail";
 import { CustomerAccount } from "@/CustomerAccount";
 import { CustomerCreateInstance } from "@/CustomerCreateInstance";
-import { instanceUsage } from "@/format";
 
 export function CustomerApp() {
   const { i18n } = useLingui();
@@ -277,15 +276,13 @@ export function CustomerApp() {
         <Card>
           <CardHeader>
             <CardTitle>{t("Your instances")}</CardTitle>
-            <CardDescription>
-              {i18n._(
-                instanceUsage(
-                  i18n.locale,
-                  activeInstances,
-                  customer.instance_limit,
-                ),
-              )}
-            </CardDescription>
+            {customer.instance_limit != null && (
+              <CardDescription>
+                {i18n.locale === "ko"
+                  ? `${customer.instance_limit}개 중 ${activeInstances}개 사용 중입니다.`
+                  : `${activeInstances} of ${customer.instance_limit} used.`}
+              </CardDescription>
+            )}
             {!reachedInstanceLimit && (
               <CardAction>
                 <Button render={<a href="/instances/new" />}>
