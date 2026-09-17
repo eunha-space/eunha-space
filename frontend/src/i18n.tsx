@@ -39,6 +39,8 @@ const ko: Record<string, string> = {
     "이메일 인증이 완료되었습니다. 비밀번호 로그인을 위해 14자 이상의 비밀번호를 설정하세요.",
   "Create an instance": "인스턴스 만들기",
   "Create instance": "인스턴스 만들기",
+  "You are using every instance your account allows. Delete one to make room for another.":
+    "계정에서 허용하는 인스턴스를 모두 사용 중입니다. 새로 만들려면 하나를 삭제하세요.",
   "Creating…": "생성 중…",
   "Your instances": "내 인스턴스",
   "No instances yet.": "아직 인스턴스가 없습니다.",

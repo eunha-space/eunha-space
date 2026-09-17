@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CircleAlert, LogOut, UserRound } from "lucide-react";
+import { CircleAlert, LogOut, Plus, UserRound } from "lucide-react";
 import {
   api,
   countsTowardInstanceLimit,
@@ -9,11 +9,11 @@ import {
   instanceStatus,
   type Tenant,
 } from "@/api";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
@@ -27,6 +27,8 @@ import { useLingui } from "@lingui/react";
 import { LanguageToggle } from "@/i18n";
 import { CustomerInstanceDetail } from "@/CustomerInstanceDetail";
 import { CustomerAccount } from "@/CustomerAccount";
+import { CustomerCreateInstance } from "@/CustomerCreateInstance";
+import { instanceUsage } from "@/format";
 
 export function CustomerApp() {
   const { i18n } = useLingui();
@@ -42,16 +44,6 @@ export function CustomerApp() {
   );
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [addressKind, setAddressKind] = useState<"provided" | "custom">(
-    "provided",
-  );
-  const [subdomain, setSubdomain] = useState("");
-  const [title, setTitle] = useState("");
-  const [customDomain, setCustomDomain] = useState("");
-  const [dnsCheck, setDnsCheck] = useState<
-    { hostname: string; points_to_target: boolean | null; target: string } | null
-  >(null);
-  const [ownerUsername, setOwnerUsername] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   async function load() {
@@ -106,41 +98,6 @@ export function CustomerApp() {
       setError(errorMessage(e));
     } finally {
       setBusy(false);
-    }
-  }
-  async function create(event: React.FormEvent) {
-    event.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      const created = await api<{ id: string }>("/customer/tenants", {
-        method: "POST",
-        body: JSON.stringify({
-          subdomain: addressKind === "provided" ? subdomain : "",
-          title,
-          custom_domain: addressKind === "custom" ? customDomain : null,
-          owner_username: ownerUsername,
-        }),
-      });
-      // A new instance is not usable yet, and its detail page is where the
-      // setup it needs is followed; stay busy until the browser gets there.
-      location.assign(`/instances/${created.id}`);
-    } catch (e) {
-      setError(errorMessage(e));
-      setBusy(false);
-    }
-  }
-  async function checkDns() {
-    const hostname = customDomain.trim();
-    if (!hostname.includes(".")) return;
-    try {
-      const result = await api<
-        { points_to_target: boolean | null; target: string }
-      >(`/customer/dns-check?hostname=${encodeURIComponent(hostname)}`);
-      setDnsCheck({ hostname, ...result });
-    } catch {
-      // Only a hint; the domain is still validated when the instance is created.
-      setDnsCheck(null);
     }
   }
   async function signOut() {
@@ -272,6 +229,17 @@ export function CustomerApp() {
       </main>
     );
   }
+  if (location.pathname === "/instances/new" && customer.has_password) {
+    return (
+      <main className="mx-auto min-h-screen max-w-2xl p-4 md:py-10">
+        <CustomerHeader customer={customer} onSignOut={signOut} />
+        <CustomerCreateInstance
+          customer={customer}
+          activeInstances={activeInstances}
+        />
+      </main>
+    );
+  }
   const instanceId = location.pathname.match(/^\/instances\/([^/]+)$/)?.[1];
   if (instanceId) {
     return (
@@ -306,157 +274,47 @@ export function CustomerApp() {
         </Card>
       )}
       {customer.has_password && (
-        <div className="grid gap-6">
-          {!reachedInstanceLimit && <Card>
-            <CardHeader>
-              <CardTitle>{t("Create an instance")}</CardTitle>
-              <CardDescription>
-                {customer.instance_limit == null
-                  ? t("No instance limit.")
-                  : i18n.locale === "ko"
-                  ? `${customer.instance_limit}개 중 ${activeInstances}개 사용 중입니다.`
-                  : `${activeInstances} of ${customer.instance_limit} used.`}
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form onSubmit={create} className="grid gap-4">
-                <div className="grid gap-2">
-                  <Label>{t("Address")}</Label>
-                  <ToggleGroup
-                    variant="outline"
-                    size="sm"
-                    // Base UI keeps single-select state as an array and clears it
-                    // when the pressed item is pressed again; keep the choice.
-                    value={[addressKind]}
-                    onValueChange={(next) =>
-                      setAddressKind(
-                        (next[0] as "provided" | "custom" | undefined) ??
-                          addressKind,
-                      )}
-                  >
-                    <ToggleGroupItem value="provided">
-                      {t("eunha space address")}
-                    </ToggleGroupItem>
-                    <ToggleGroupItem value="custom">
-                      {t("My own domain")}
-                    </ToggleGroupItem>
-                  </ToggleGroup>
-                </div>
-                {addressKind === "provided" && (
-                  <div className="grid gap-2">
-                    <Label htmlFor="subdomain">{t("Eunha hostname")}</Label>
-                    <Input
-                      id="subdomain"
-                      placeholder="example"
-                      pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
-                      value={subdomain}
-                      onChange={(e) =>
-                        setSubdomain(e.target.value.toLowerCase())}
-                      required
-                    />
-                    <span className="text-muted-foreground text-xs">
-                      {subdomain || "example"}.eunha.space
-                    </span>
-                  </div>
-                )}
-                {addressKind === "custom" && (
-                <div className="grid gap-2">
-                  <Label htmlFor="domain">{t("Custom domain")}</Label>
-                  <Input
-                    id="domain"
-                    placeholder="social.example.com"
-                    required
-                    value={customDomain}
-                    onChange={(e) => {
-                      setCustomDomain(e.target.value.toLowerCase());
-                      setDnsCheck(null);
-                    }}
-                    onBlur={() => void checkDns()}
-                  />
-                  <span className="text-muted-foreground text-xs">
-                    {t(
-                      "Before creating, add a CNAME record pointing it to customers.eunha.space. A custom domain can only be chosen now; it cannot be added or changed later.",
-                    )}
-                  </span>
-                  {dnsCheck?.hostname === customDomain &&
-                    dnsCheck.points_to_target === false && (
-                    <span className="text-pending text-xs">
-                      {t(
-                        "We can't see that CNAME record yet. You can still create the instance; setup keeps trying for 7 days, then deletes the instance.",
-                      )}
-                    </span>
-                  )}
-                  {dnsCheck?.hostname === customDomain &&
-                    dnsCheck.points_to_target === true && (
-                    <span className="text-success text-xs">
-                      {t("The CNAME record is in place.")}
-                    </span>
-                  )}
-                </div>
-                )}
-                <div className="grid gap-2">
-                  <Label htmlFor="title">{t("Instance name")}</Label>
-                  <Input
-                    id="title"
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    required
-                  />
-                </div>
-                <div className="grid gap-2">
-                  <Label htmlFor="owner">{t("Admin username")}</Label>
-                  <Input
-                    id="owner"
-                    placeholder="admin"
-                    pattern="[A-Za-z0-9_]{1,30}"
-                    maxLength={30}
-                    autoComplete="off"
-                    value={ownerUsername}
-                    onChange={(e) => setOwnerUsername(e.target.value)}
-                    required
-                  />
-                  <span className="text-muted-foreground text-xs">
-                    @{ownerUsername || "admin"}
-                    {" · "}
-                    {t("Letters, numbers, and underscores.")}
-                  </span>
-                </div>
-
-                <Button
-                  type="submit"
-                  disabled={busy}
-                >
-                  {busy ? t("Creating…") : t("Create instance")}
+        <Card>
+          <CardHeader>
+            <CardTitle>{t("Your instances")}</CardTitle>
+            <CardDescription>
+              {i18n._(
+                instanceUsage(
+                  i18n.locale,
+                  activeInstances,
+                  customer.instance_limit,
+                ),
+              )}
+            </CardDescription>
+            {!reachedInstanceLimit && (
+              <CardAction>
+                <Button render={<a href="/instances/new" />}>
+                  <Plus /> {t("Create an instance")}
                 </Button>
-              </form>
-            </CardContent>
-          </Card>}
-          <Card>
-            <CardHeader>
-              <CardTitle>{t("Your instances")}</CardTitle>
-            </CardHeader>
-            <CardContent className="grid gap-3">
-              {tenants.length === 0
-                ? (
+              </CardAction>
+            )}
+          </CardHeader>
+          <CardContent className="grid gap-3">
+            {tenants.length === 0
+              ? (
+                <p className="text-muted-foreground text-sm">
+                  {t("No instances yet.")}
+                </p>
+              )
+              : tenants.map((t) => (
+                <a
+                  key={t.id}
+                  href={`/instances/${t.id}`}
+                  className="bg-muted/50 hover:bg-muted rounded-md p-3 transition-colors"
+                >
+                  <strong>{t.title}</strong>
                   <p className="text-muted-foreground text-sm">
-                    {t("No instances yet.")}
+                    {instanceAddress(t)} · {i18n._(instanceStatus(t))}
                   </p>
-                )
-                : tenants.map((t) => (
-                  <a
-                    key={t.id}
-                    href={`/instances/${t.id}`}
-                    className="bg-muted/50 hover:bg-muted rounded-md p-3 transition-colors"
-                  >
-                    <strong>{t.title}</strong>
-                    <p className="text-muted-foreground text-sm">
-                      {instanceAddress(t)} · {i18n._(instanceStatus(t))}
-                    </p>
-                  </a>
-                ))}
-            </CardContent>
-          </Card>
-        </div>
+                </a>
+              ))}
+          </CardContent>
+        </Card>
       )}
     </main>
   );

@@ -44,3 +44,18 @@ export function humanize(value: string): string {
 export function shortRef(ref: string | null): string {
   return ref ? ref.slice(0, 12) : "not recorded";
 }
+
+/**
+ * How much of a customer's instance allowance is used, as a message to hand to
+ * i18n. The counted form is built per locale because it has no catalog entry.
+ */
+export function instanceUsage(
+  locale: string,
+  used: number,
+  limit: number | null | undefined,
+): string {
+  if (limit == null) return "No instance limit.";
+  return locale === "ko"
+    ? `${limit}개 중 ${used}개 사용 중입니다.`
+    : `${used} of ${limit} used.`;
+}
