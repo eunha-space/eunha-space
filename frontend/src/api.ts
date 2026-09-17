@@ -25,6 +25,8 @@ export type Tenant = {
   abandoned_custom_domain: string | null;
   /** Durable Temporal execution metadata; no workflow payloads or secrets are exposed. */
   temporal_workflow_id: string | null;
+  /** The operator-only Temporal UI link for that execution, when one is configured. */
+  temporal_workflow_url: string | null;
   temporal_workflow_kind: "provision" | "deprovision" | "purge" | null;
   temporal_dispatch_attempts: number | null;
   lifecycle_step: string | null;

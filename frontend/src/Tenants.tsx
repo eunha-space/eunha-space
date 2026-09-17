@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { HardDrive, Inbox, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
+import { ExternalLink, HardDrive, Inbox, Plus, RefreshCw, RotateCcw, Trash2 } from "lucide-react";
 import { api, instanceAddress, isOffline, pendingRender, type Runtime, type Tenant, type TenantDomain } from "@/api";
 import { absoluteTime, relativeTime } from "@/format";
 import { Badge } from "@/components/ui/badge";
@@ -269,9 +269,7 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                           className="mt-0.5 truncate font-mono text-sm"
                           title={tenant.temporal_workflow_id}
                         >
-                          {tenant.lifecycle_step
-                            ? `${tenant.temporal_workflow_kind} · ${tenant.lifecycle_step}`
-                            : tenant.temporal_workflow_kind}
+                          <LifecycleExecution tenant={tenant} />
                           {tenant.temporal_dispatch_attempts && tenant.temporal_dispatch_attempts > 1 && (
                             <span className="text-muted-foreground">
                               {" "}· dispatch {tenant.temporal_dispatch_attempts}
@@ -358,6 +356,30 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
         )}
       </Card>
     </div>
+  );
+}
+
+/** The tenant's Temporal execution: what it is doing, and where to watch it.
+ *  The link only opens the execution in the operator's Temporal UI; workflow
+ *  inputs, results and history stay out of this console. */
+function LifecycleExecution({ tenant }: { tenant: Tenant }) {
+  const label = tenant.lifecycle_step
+    ? `${tenant.temporal_workflow_kind} · ${tenant.lifecycle_step}`
+    : tenant.temporal_workflow_kind;
+  // No configured Temporal UI, no link: the service is never public, so there
+  // is no address to guess.
+  if (!tenant.temporal_workflow_url) return <>{label}</>;
+  return (
+    <a
+      className="inline-flex max-w-full items-center gap-1 underline-offset-4 hover:underline"
+      href={tenant.temporal_workflow_url}
+      target="_blank"
+      rel="noreferrer"
+      aria-label={`Open ${label} in the Temporal UI`}
+    >
+      <span className="truncate">{label}</span>
+      <ExternalLink className="size-3 shrink-0" aria-hidden />
+    </a>
   );
 }
 

@@ -25,6 +25,7 @@ it:
 ```sh
 export TEMPORAL_ADDRESS=127.0.0.1:7233
 export TEMPORAL_NAMESPACE=default
+export TEMPORAL_UI_URL=http://127.0.0.1:8080
 cargo run
 ```
 
@@ -54,6 +55,20 @@ Use Temporal timers for the seven-day retained-to-purge delay, but re-check
 `purge_scheduled_for`, lifecycle state, and restoration status in PostgreSQL
 under a row lock before starting any destruction. This preserves the invariant
 that a restore wins over a previously scheduled purge.
+
+## Operator links
+
+`TEMPORAL_UI_URL` is the address of the Temporal UI as the operator reaches it,
+such as `http://100.113.148.66:8080` on the tailnet. With it set, each tenant
+row in `/admin` links its lifecycle to
+`<TEMPORAL_UI_URL>/namespaces/<TEMPORAL_NAMESPACE>/workflows/<workflow id>`,
+which the UI resolves to that execution's latest run, so the link keeps working
+across continue-as-new. The link is built from the stored workflow ID alone:
+the console never reads or renders workflow input, results, or history, and the
+workflow ID is one percent-encoded path segment, so it cannot reach outside the
+configured UI. An unset or non-`http(s)` value disables the links rather than
+guessing an address; the UI is not on the public Internet, and `/admin` is
+operator-only, so nothing about it is exposed to customers.
 
 `docker-compose.production.yml` is for a host with a local PostgreSQL service
 and OrbStack/Docker. It connects through `host.docker.internal`, keeps only the

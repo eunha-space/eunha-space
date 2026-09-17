@@ -42,6 +42,16 @@ stateDiagram-v2
 - Long-running provision workflows use continue-as-new after 240 timed waits,
   preventing unbounded workflow histories.
 
+## Watching an execution
+
+The tenant inventory in `/admin` shows the durable workflow kind and the step
+it is waiting on, taken from PostgreSQL. When `TEMPORAL_UI_URL` is configured,
+that summary also links to the execution in the Temporal UI for history and
+timers. The link is the only thing the console borrows from Temporal: workflow
+input, activity results, and history stay in the Temporal UI, behind its own
+private network, and never pass through this API. PostgreSQL remains the record
+an operator acts on.
+
 ## Retention and destructive purge
 
 Deprovisioning is deliberately non-destructive. A tenant reaches `retained`

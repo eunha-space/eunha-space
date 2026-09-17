@@ -60,6 +60,7 @@ struct AppState {
     cloudflare: Option<CloudflareConfig>,
     provided_domain_suffixes: Vec<String>,
     customer_email: Option<CustomerEmailConfig>,
+    temporal_ui: Option<TemporalUiConfig>,
     /// One reload at a time per runtime: a second launchd signal that arrives
     /// while the first is still settling fails, and both would be re-reading
     /// the same directory anyway.
@@ -71,6 +72,31 @@ struct CustomerEmailConfig {
     from: String,
     public_url: String,
 }
+/// The operator-reachable Temporal Web UI, from `TEMPORAL_UI_URL`. The UI is
+/// never published to the Internet, so an unset variable just leaves the admin
+/// console without lifecycle links rather than guessing an address.
+#[derive(Clone)]
+struct TemporalUiConfig {
+    base: url::Url,
+    namespace: String,
+}
+
+impl TemporalUiConfig {
+    /// A workflow ID alone is enough: the UI redirects to that execution's
+    /// latest run, so the link survives the provision workflow's
+    /// continue-as-new. It carries no workflow input, result, or history.
+    fn workflow_url(&self, workflow_id: &str) -> Option<String> {
+        let mut url = self.base.clone();
+        url.path_segments_mut().ok()?.pop_if_empty().extend([
+            "namespaces",
+            &self.namespace,
+            "workflows",
+            workflow_id,
+        ]);
+        Some(url.into())
+    }
+}
+
 #[derive(Clone)]
 struct CloudflareConfig {
     zone_id: String,
@@ -125,6 +151,10 @@ struct TenantSummary {
     /// `domain` is then a placeholder.
     abandoned_custom_domain: Option<String>,
     temporal_workflow_id: Option<String>,
+    /// Where an operator can watch that execution, when a Temporal UI is
+    /// configured. Derived, never selected from the database.
+    #[sqlx(default)]
+    temporal_workflow_url: Option<String>,
     temporal_workflow_kind: Option<String>,
     temporal_dispatch_attempts: Option<i32>,
     lifecycle_step: Option<String>,
@@ -631,6 +661,26 @@ fn typed_toml(
     })
 }
 
+/// `TEMPORAL_UI_URL` is an operator convenience, not a dependency: anything
+/// that is not an absolute `http`/`https` address is refused with a warning so
+/// the console never renders a link that cannot be trusted or resolved.
+fn temporal_ui_config() -> Option<TemporalUiConfig> {
+    let configured = std::env::var("TEMPORAL_UI_URL").ok()?;
+    let base = match url::Url::parse(configured.trim()) {
+        Ok(base) if matches!(base.scheme(), "http" | "https") && base.has_host() => base,
+        _ => {
+            tracing::warn!(
+                "TEMPORAL_UI_URL is not an absolute http(s) address; tenant lifecycle links are disabled"
+            );
+            return None;
+        }
+    };
+    Some(TemporalUiConfig {
+        base,
+        namespace: std::env::var("TEMPORAL_NAMESPACE").unwrap_or_else(|_| "default".into()),
+    })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -686,6 +736,7 @@ async fn main() -> Result<()> {
                 public_url: std::env::var("EUNHA_SPACE_PUBLIC_URL")
                     .unwrap_or_else(|_| "https://eunha.space".into()),
             }),
+        temporal_ui: temporal_ui_config(),
         client: reqwest::Client::builder()
             .timeout(Duration::from_secs(4))
             .build()?,
@@ -1223,7 +1274,18 @@ async fn tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     operator(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain,d.workflow_id temporal_workflow_id,d.workflow_kind temporal_workflow_kind,d.attempts temporal_dispatch_attempts,CASE WHEN t.lifecycle_state='provisioning' THEN (SELECT step FROM provisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,array_position(ARRAY['database','migrate','render','reload','health','routing','owner'],step) LIMIT 1) WHEN t.lifecycle_state IN ('deprovisioning','retained','purging') THEN (SELECT step FROM deprovisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,step LIMIT 1) END lifecycle_step FROM tenants t JOIN runtimes r ON r.id=t.runtime_id LEFT JOIN LATERAL (SELECT workflow_id,workflow_kind,attempts FROM temporal_dispatches WHERE tenant_id=t.id ORDER BY created_at DESC LIMIT 1) d ON true ORDER BY t.domain").fetch_all(&s.db).await?))
+    let mut tenants: Vec<TenantSummary> = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '90 seconds') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain,d.workflow_id temporal_workflow_id,d.workflow_kind temporal_workflow_kind,d.attempts temporal_dispatch_attempts,CASE WHEN t.lifecycle_state='provisioning' THEN (SELECT step FROM provisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,array_position(ARRAY['database','migrate','render','reload','health','routing','owner'],step) LIMIT 1) WHEN t.lifecycle_state IN ('deprovisioning','retained','purging') THEN (SELECT step FROM deprovisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,step LIMIT 1) END lifecycle_step FROM tenants t JOIN runtimes r ON r.id=t.runtime_id LEFT JOIN LATERAL (SELECT workflow_id,workflow_kind,attempts FROM temporal_dispatches WHERE tenant_id=t.id ORDER BY created_at DESC LIMIT 1) d ON true ORDER BY t.domain")
+        .fetch_all(&s.db)
+        .await?;
+    if let Some(ui) = &s.temporal_ui {
+        for tenant in &mut tenants {
+            tenant.temporal_workflow_url = tenant
+                .temporal_workflow_id
+                .as_deref()
+                .and_then(|workflow_id| ui.workflow_url(workflow_id));
+        }
+    }
+    Ok(Json(tenants))
 }
 
 fn random_hex(bytes: usize) -> String {
@@ -4910,6 +4972,35 @@ mod tests {
         let message = connection_budget_error(100, 97).expect("100 does not fit in 97");
         assert!(message.contains("100"), "{message}");
         assert!(message.contains("97"), "{message}");
+    }
+
+    #[test]
+    fn temporal_links_stay_inside_the_configured_ui() {
+        let ui = |base: &str| super::TemporalUiConfig {
+            base: url::Url::parse(base).unwrap(),
+            namespace: "eunha-space".into(),
+        };
+        assert_eq!(
+            ui("http://127.0.0.1:8080/").workflow_url("tenant-provision-v3-abc"),
+            Some(
+                "http://127.0.0.1:8080/namespaces/eunha-space/workflows/tenant-provision-v3-abc"
+                    .into()
+            )
+        );
+        // A UI mounted under a path keeps it, with or without a trailing slash.
+        assert_eq!(
+            ui("https://ops.example.com/temporal").workflow_url("w"),
+            Some("https://ops.example.com/temporal/namespaces/eunha-space/workflows/w".into())
+        );
+        // The workflow ID is one path segment, so a stored ID can never walk
+        // out of the namespace or smuggle a query string into the link.
+        assert_eq!(
+            ui("http://127.0.0.1:8080").workflow_url("../../evil?x=1"),
+            Some(
+                "http://127.0.0.1:8080/namespaces/eunha-space/workflows/..%2F..%2Fevil%3Fx=1"
+                    .into()
+            )
+        );
     }
 
     #[test]
