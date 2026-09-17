@@ -13,3 +13,6 @@ run = "cd frontend && pnpm install --frozen-lockfile && pnpm run build"
 depends = ["frontend"]
 run = "cargo build --release"
 
+[tasks.temporal]
+description = "Run the local Temporal service used for workflow development"
+run = "docker compose --env-file ops/temporal/.env.dev -f ops/temporal/docker-compose.dev.yml up"

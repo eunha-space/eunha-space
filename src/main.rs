@@ -36,6 +36,8 @@ use tower_http::{
 };
 use uuid::Uuid;
 
+mod temporal;
+
 // SQLx embeds the complete migration set in this binary at compile time.
 
 #[derive(Parser)]
@@ -691,9 +693,32 @@ async fn main() -> Result<()> {
     tokio::spawn(health_reconciler(state.clone()));
     tokio::spawn(release_recovery_reconciler(state.clone()));
     tokio::spawn(automatic_release_reconciler(state.clone()));
-    tokio::spawn(provisioning_reconciler(state.clone()));
+    if std::env::var_os("TEMPORAL_ADDRESS").is_some() {
+        let worker_state = state.clone();
+        if let Err(error) = std::thread::Builder::new()
+            .name("temporal-worker".into())
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build();
+                match runtime {
+                Ok(runtime) => runtime.block_on(async move {
+                    if let Err(error) = temporal::run_worker(worker_state).await {
+                        tracing::error!(error = %format!("{error:#}"), "Temporal worker stopped");
+                    }
+                }),
+                Err(error) => tracing::error!(error = %error, "could not start Temporal runtime"),
+            }
+            })
+        {
+            tracing::error!(error = %error, "could not spawn Temporal worker thread");
+        }
+        tokio::spawn(temporal::provisioning_dispatcher(state.clone()));
+        tokio::spawn(temporal::lifecycle_dispatcher(state.clone()));
+    } else {
+        tracing::warn!("Temporal is not configured; tenant lifecycle work will remain queued");
+    }
     tokio::spawn(domain_reconciler(state.clone()));
-    tokio::spawn(deprovisioning_reconciler(state.clone()));
     let api = Router::new()
         .route("/session", post(login).delete(logout))
         .route("/session/me", get(me))
@@ -727,6 +752,7 @@ async fn main() -> Result<()> {
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/tenants/{id}/check", post(check_tenant))
         .route("/tenants/{id}/retry", post(retry_provisioning))
+        .route("/tenants/{id}/deprovision", post(deprovision_tenant))
         .route("/tenants/{id}/restore", post(restore_tenant))
         .route("/tenants/{id}/purge", post(purge_tenant))
         .route("/tenants/{id}/domains", get(tenant_domains))
@@ -1470,6 +1496,7 @@ async fn create_tenant_inner(
         .bind(tenant_id).bind(owner_username.is_some()).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Tenant reserved; provisioning queued.')")
         .bind(operation_id).execute(&mut *tx).await?;
+    enqueue_temporal_dispatch(&mut tx, tenant_id, "provision").await?;
     tx.commit().await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -1502,6 +1529,7 @@ async fn retry_provisioning(
         .bind(operation_id).bind(operator_id).bind(id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Provisioning retry queued.')")
         .bind(operation_id).execute(&mut *tx).await?;
+    enqueue_temporal_dispatch(&mut tx, id, "provision").await?;
     tx.commit().await?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -1639,7 +1667,7 @@ async fn expire_custom_domains(state: &Shared) {
                     .bind(tenant_id).bind(&message).execute(&mut *tx).await?;
                 sqlx::query("UPDATE operations SET status='failed',error=$2,finished_at=now() WHERE tenant_id=$1 AND kind='tenant_provision' AND status='running'")
                     .bind(tenant_id).bind(&message).execute(&mut *tx).await?;
-                begin_deprovisioning(&mut tx, tenant_id, None).await?;
+                begin_deprovisioning(&mut tx, tenant_id, None, None).await?;
             }
             Ok::<_, sqlx::Error>(())
         }
@@ -1933,7 +1961,7 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
     if unserved && primary_id == id && kind == "custom" {
         // The domain has validated; setup can now begin under it and checks the
         // tenant's health itself.
-        finish_domain(&state.db, id).await?;
+        finish_domain(state, id).await?;
         return Ok(());
     }
     if unserved && kind == "provided" {
@@ -1942,12 +1970,12 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
     }
     if primary_id == id {
         healthcheck_provisioned_tenant(state, tenant_id).await?;
-        finish_domain(&state.db, id).await?;
+        finish_domain(state, id).await?;
         return Ok(());
     }
     if kind == "provided" {
         healthcheck_host(state, tenant_id, &hostname).await?;
-        finish_domain(&state.db, id).await?;
+        finish_domain(state, id).await?;
         return Ok(());
     }
     let has_identity = if primary_kind == "custom" {
@@ -1982,7 +2010,7 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
         render_provisioned_tenant(state, tenant_id).await?;
         reload_provisioned_runtime(state, tenant_id).await?;
         healthcheck_host(state, tenant_id, &hostname).await?;
-        finish_domain(&state.db, id).await?;
+        finish_domain(state, id).await?;
         return Ok(());
     }
 
@@ -1999,13 +2027,13 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
     if unserved {
         // Provisioning renders, starts and checks the tenant under this domain
         // from the beginning; there is nothing running to move over.
-        finish_domain(&state.db, id).await?;
+        finish_domain(state, id).await?;
         return Ok(());
     }
     render_provisioned_tenant(state, tenant_id).await?;
     reload_provisioned_runtime(state, tenant_id).await?;
     healthcheck_provisioned_tenant(state, tenant_id).await?;
-    finish_domain(&state.db, id).await?;
+    finish_domain(state, id).await?;
     Ok(())
 }
 
@@ -2020,15 +2048,16 @@ async fn schedule_next_domain_check(db: &PgPool, id: Uuid) -> Result<()> {
     Ok(())
 }
 
-async fn finish_domain(db: &PgPool, id: Uuid) -> Result<()> {
-    sqlx::query(
-        "UPDATE tenant_domains SET status='active',error=NULL,updated_at=now() WHERE id=$1",
+async fn finish_domain(state: &Shared, id: Uuid) -> Result<()> {
+    let tenant_id = sqlx::query_scalar::<_, Uuid>(
+        "UPDATE tenant_domains SET status='active',error=NULL,updated_at=now() WHERE id=$1 RETURNING tenant_id",
     )
     .bind(id)
-    .execute(db)
+    .fetch_one(&state.db)
     .await?;
     sqlx::query("UPDATE operations SET status='succeeded',finished_at=now() WHERE id=(SELECT o.id FROM operations o JOIN tenant_domains d ON d.tenant_id=o.tenant_id WHERE d.id=$1 AND o.kind='custom_domain_attach' AND o.status='running' ORDER BY o.created_at DESC LIMIT 1)")
-        .bind(id).execute(db).await?;
+        .bind(id).execute(&state.db).await?;
+    temporal::wake_provisioning(state, tenant_id).await;
     Ok(())
 }
 
@@ -2150,8 +2179,9 @@ async fn customer_delete_instance(
             "This instance is already deleted.".into(),
         ));
     }
-    begin_deprovisioning(&mut tx, id, Some(customer_id)).await?;
+    begin_deprovisioning(&mut tx, id, None, Some(customer_id)).await?;
     tx.commit().await?;
+    temporal::wake_provisioning(&s, id).await;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -2247,6 +2277,34 @@ async fn restore_tenant(
     Ok(StatusCode::ACCEPTED)
 }
 
+/// Take a tenant offline on an operator's behalf while retaining all tenant
+/// data for the normal restoration window.
+async fn deprovision_tenant(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let mut tx = s.db.begin().await?;
+    let deletable = sqlx::query_scalar::<_, bool>(
+        "SELECT true FROM tenants WHERE id=$1 AND lifecycle_state IN ('provisioning','ready','failed') FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if !deletable {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "This tenant is already deleted or being deleted.".into(),
+        ));
+    }
+    begin_deprovisioning(&mut tx, id, Some(operator_id), None).await?;
+    tx.commit().await?;
+    temporal::wake_provisioning(&s, id).await;
+    Ok(StatusCode::ACCEPTED)
+}
+
 /// Queue a retained tenant to be served again. Its database, owner and routing
 /// survive, so it only needs its schema brought up to the runtime's release and
 /// its configuration served.
@@ -2314,6 +2372,7 @@ async fn queue_restore(
         .bind(operation_id).bind(operator_id).bind(customer_id).bind(tenant_id).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Restore queued; retained data is served again once the instance is healthy.')")
         .bind(operation_id).execute(&mut **tx).await?;
+    enqueue_temporal_dispatch(tx, tenant_id, "provision").await?;
     Ok(())
 }
 
@@ -2323,6 +2382,7 @@ async fn queue_restore(
 async fn begin_deprovisioning(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: Uuid,
+    operator_id: Option<Uuid>,
     customer_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(&format!("UPDATE tenants SET lifecycle_state='deprovisioning',desired_state='deprovisioning',observed_state='disabled',observed_at=now(),observation_error=NULL,purge_scheduled_for=now()+interval '{RETENTION_BEFORE_PURGE}',updated_at=now() WHERE id=$1"))
@@ -2330,10 +2390,23 @@ async fn begin_deprovisioning(
     sqlx::query("INSERT INTO deprovisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['unrender','reload','offline']) ON CONFLICT (tenant_id,step) DO UPDATE SET status='pending',attempts=0,error=NULL,started_at=NULL,finished_at=NULL,updated_at=now()")
         .bind(tenant_id).execute(&mut **tx).await?;
     let operation_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by_customer,started_at) SELECT $1,t.id,t.runtime_id,'tenant_deprovision','running',$2,now() FROM tenants t WHERE t.id=$3")
-        .bind(operation_id).bind(customer_id).bind(tenant_id).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,requested_by_customer,started_at) SELECT $1,t.id,t.runtime_id,'tenant_deprovision','running',$2,$3,now() FROM tenants t WHERE t.id=$4")
+        .bind(operation_id).bind(operator_id).bind(customer_id).bind(tenant_id).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Deprovisioning started; data is retained.')")
         .bind(operation_id).execute(&mut **tx).await?;
+    enqueue_temporal_dispatch(tx, tenant_id, "deprovision").await?;
+    Ok(())
+}
+
+async fn enqueue_temporal_dispatch(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    kind: &str,
+) -> Result<(), sqlx::Error> {
+    let workflow_id = format!("tenant-{kind}-v3-{tenant_id}-{}", Uuid::new_v4());
+    sqlx::query("INSERT INTO temporal_dispatches(id,tenant_id,workflow_kind,workflow_id) VALUES($1,$2,$3,$4) ON CONFLICT (workflow_id) DO NOTHING")
+        .bind(Uuid::new_v4()).bind(tenant_id).bind(kind).bind(workflow_id)
+        .execute(&mut **tx).await?;
     Ok(())
 }
 
@@ -2377,51 +2450,6 @@ const PURGE: LifecycleFlow = LifecycleFlow {
     ],
     exhausted: "an operator needs to finish removing the tenant's data",
 };
-
-async fn deprovisioning_reconciler(state: Shared) {
-    loop {
-        if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM tenants WHERE lifecycle_state='retained' AND purge_scheduled_for <= now() ORDER BY purge_scheduled_for LIMIT 10")
-            .fetch_all(&state.db).await
-        {
-            for id in ids {
-                if let Ok(mut tx) = state.db.begin().await {
-                    // Re-checked under the row lock, so a restore that landed
-                    // after the scan wins.
-                    let due = sqlx::query_scalar::<_, bool>("SELECT true FROM tenants WHERE id=$1 AND lifecycle_state='retained' AND purge_scheduled_for <= now() FOR UPDATE")
-                        .bind(id).fetch_optional(&mut *tx).await.ok().flatten().is_some();
-                    if due
-                        && start_purge(
-                            &mut tx,
-                            id,
-                            None,
-                            None,
-                            true,
-                            &format!("The instance was deleted {RETENTION_BEFORE_PURGE} ago and not restored; its data is being destroyed."),
-                        )
-                        .await
-                        .is_ok()
-                    {
-                        let _ = tx.commit().await;
-                    }
-                }
-            }
-        }
-        for flow in [&DEPROVISION, &PURGE] {
-            if let Ok(ids) = sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM tenants WHERE lifecycle_state=$1 ORDER BY updated_at LIMIT 10",
-            )
-            .bind(flow.running_state)
-            .fetch_all(&state.db)
-            .await
-            {
-                for id in ids {
-                    run_lifecycle_flow(&state, id, flow).await;
-                }
-            }
-        }
-        tokio::time::sleep(Duration::from_secs(3)).await;
-    }
-}
 
 async fn run_lifecycle_flow(state: &Shared, tenant_id: Uuid, flow: &LifecycleFlow) {
     let table = flow.steps_table;
@@ -2602,6 +2630,7 @@ async fn start_purge(
         .bind(reason)
         .execute(&mut **tx)
         .await?;
+    enqueue_temporal_dispatch(tx, tenant_id, "purge").await?;
     Ok(())
 }
 
@@ -2984,16 +3013,6 @@ async fn verify_tenant_offline(state: &Shared, tenant_id: Uuid) -> Result<()> {
     anyhow::bail!("tenant is still served")
 }
 
-async fn provisioning_reconciler(state: Shared) {
-    loop {
-        if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM tenants WHERE lifecycle_state='provisioning' ORDER BY created_at LIMIT 10")
-            .fetch_all(&state.db).await {
-            for id in ids { provision_tenant(&state, id).await; }
-        }
-        tokio::time::sleep(Duration::from_secs(3)).await;
-    }
-}
-
 async fn provisioning_step(state: &Shared, tenant_id: Uuid, step: &str) -> Result<bool> {
     let status = sqlx::query_scalar::<_, String>(
         "SELECT status FROM provisioning_steps WHERE tenant_id=$1 AND step=$2",
@@ -3065,66 +3084,78 @@ async fn fail_provisioning(db: &PgPool, tenant_id: Uuid, step: &str, reason: Opt
         .bind(&message).bind(tenant_id).execute(db).await;
 }
 
-async fn provision_tenant(state: &Shared, tenant_id: Uuid) {
-    for step in [
-        "database", "migrate", "render", "reload", "health", "routing", "owner",
-    ] {
-        // A purge can start while provisioning is under way; stop between steps
-        // rather than render a tenant that is being destroyed.
-        match sqlx::query_scalar::<_, String>("SELECT lifecycle_state FROM tenants WHERE id=$1")
-            .bind(tenant_id)
-            .fetch_one(&state.db)
-            .await
-        {
-            Ok(lifecycle) if lifecycle == "provisioning" => {}
-            _ => return,
-        }
-        let ready = match step {
-            "database" => match runtime_connection_budget(&state.db, tenant_id).await {
-                Ok(()) => custom_domain_validated(&state.db, tenant_id).await,
-                Err(error) => Err(error),
-            },
-            "routing" => tenant_routing_ready(&state.db, tenant_id).await,
-            _ => Ok(true),
-        };
-        match ready {
-            Ok(true) => {}
-            Ok(false) => return,
-            Err(error) => {
-                fail_provisioning(&state.db, tenant_id, step, Some(&error.to_string())).await;
-                return;
-            }
-        }
-        let should_run = match provisioning_step(state, tenant_id, step).await {
-            Ok(value) => value,
-            Err(_) => return,
-        };
-        if !should_run {
-            continue;
-        }
-        let result = match step {
-            "database" => create_tenant_database(state, tenant_id).await,
-            "migrate" => migrate_tenant_database(state, tenant_id).await,
-            "render" => render_provisioned_tenant(state, tenant_id)
-                .await
-                .map(|_| ()),
-            "reload" => reload_provisioned_runtime(state, tenant_id).await,
-            "health" => healthcheck_provisioned_tenant(state, tenant_id).await,
-            "routing" => Ok(()),
-            "owner" => create_tenant_owner(state, tenant_id).await,
-            _ => unreachable!(),
-        };
-        if let Err(error) = result {
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) enum ProvisionStepOutcome {
+    Completed,
+    Wait,
+    Halted,
+    Failed,
+}
+
+pub(crate) async fn provision_tenant_step(
+    state: &Shared,
+    tenant_id: Uuid,
+    step: &str,
+) -> ProvisionStepOutcome {
+    // A purge can start while provisioning is under way; stop between steps
+    // rather than render a tenant that is being destroyed.
+    match sqlx::query_scalar::<_, String>("SELECT lifecycle_state FROM tenants WHERE id=$1")
+        .bind(tenant_id)
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(lifecycle) if lifecycle == "provisioning" => {}
+        _ => return ProvisionStepOutcome::Halted,
+    }
+    let ready = match step {
+        "database" => match runtime_connection_budget(&state.db, tenant_id).await {
+            Ok(()) => custom_domain_validated(&state.db, tenant_id).await,
+            Err(error) => Err(error),
+        },
+        "routing" => tenant_routing_ready(&state.db, tenant_id).await,
+        _ => Ok(true),
+    };
+    match ready {
+        Ok(true) => {}
+        Ok(false) => return ProvisionStepOutcome::Wait,
+        Err(error) => {
             fail_provisioning(&state.db, tenant_id, step, Some(&error.to_string())).await;
-            return;
-        }
-        if finish_provisioning_step(&state.db, tenant_id, step)
-            .await
-            .is_err()
-        {
-            return;
+            return ProvisionStepOutcome::Failed;
         }
     }
+    let should_run = match provisioning_step(state, tenant_id, step).await {
+        Ok(value) => value,
+        Err(_) => return ProvisionStepOutcome::Halted,
+    };
+    if !should_run {
+        return ProvisionStepOutcome::Completed;
+    }
+    let result = match step {
+        "database" => create_tenant_database(state, tenant_id).await,
+        "migrate" => migrate_tenant_database(state, tenant_id).await,
+        "render" => render_provisioned_tenant(state, tenant_id)
+            .await
+            .map(|_| ()),
+        "reload" => reload_provisioned_runtime(state, tenant_id).await,
+        "health" => healthcheck_provisioned_tenant(state, tenant_id).await,
+        "routing" => Ok(()),
+        "owner" => create_tenant_owner(state, tenant_id).await,
+        _ => unreachable!(),
+    };
+    if let Err(error) = result {
+        fail_provisioning(&state.db, tenant_id, step, Some(&error.to_string())).await;
+        return ProvisionStepOutcome::Failed;
+    }
+    if finish_provisioning_step(&state.db, tenant_id, step)
+        .await
+        .is_err()
+    {
+        return ProvisionStepOutcome::Halted;
+    }
+    ProvisionStepOutcome::Completed
+}
+
+pub(crate) async fn finish_provisioning(state: &Shared, tenant_id: Uuid) {
     let _ = sqlx::query("UPDATE tenants SET lifecycle_state='ready',observed_state='healthy',observed_at=now(),observation_error=NULL,updated_at=now() WHERE id=$1 AND lifecycle_state='provisioning'")
         .bind(tenant_id).execute(&state.db).await;
     let _ = sqlx::query(

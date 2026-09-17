@@ -8,3 +8,5 @@
 /releases
 /.env
 /.sites-runtime
+ops/temporal/.env.dev
+ops/temporal/.env.production

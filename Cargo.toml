@@ -9,6 +9,7 @@ argon2 = "0.5"
 axum = "0.8"
 base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
+futures = "0.3"
 p256 = { version = "0.13", features = ["ecdsa", "pem"] }
 redis = { version = "0.27", default-features = false, features = ["tokio-comp"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -20,6 +21,11 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid"
 time = { version = "0.3", features = ["serde"] }
 tokio = { version = "1", features = ["full"] }
 toml = "0.9"
+temporalio-client = "1.0.0"
+temporalio-common = "1.0.0"
+temporalio-macros = "1.0.0"
+temporalio-sdk = "1.0.0"
+temporalio-workflow = "1.0.0"
 tower-http = { version = "0.6", features = ["fs", "trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -283,6 +283,21 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                         </ActionButton>
                       </>
                     )}
+                    {["provisioning", "ready", "failed"].includes(tenant.lifecycle_state) && (
+                      <ActionButton
+                        icon={<Trash2 />}
+                        variant="outline"
+                        busy={busy === `deprovision-${tenant.id}`}
+                        confirm={{
+                          title: `Take ${instanceAddress(tenant)} offline?`,
+                          description: "The tenant is taken offline now. Its database, media, configuration and backups are retained for 7 days and can be restored during that period.",
+                          action: "Take offline",
+                        }}
+                        onClick={() => act(`/tenants/${tenant.id}/deprovision`, `deprovision-${tenant.id}`)}
+                      >
+                        Take offline
+                      </ActionButton>
+                    )}
                     {tenant.lifecycle_state !== "purging" && tenant.lifecycle_state !== "purged" && (
                       <>
                         <DomainsDialog tenant={tenant} busy={busy} act={act} />
