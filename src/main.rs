@@ -61,6 +61,9 @@ struct AppState {
     /// provisions it. Roles and databases are created directly; tenant traffic
     /// goes through the pooler. Unset means both go to the same place.
     tenant_pooler_address: Option<String>,
+    /// Client connections the pooler accepts in total, rendered so a runtime can
+    /// size its tenants' pools against the limit that actually applies.
+    tenant_pooler_client_slots: Option<u64>,
     cloudflare: Option<CloudflareConfig>,
     provided_domain_suffixes: Vec<String>,
     customer_email: Option<CustomerEmailConfig>,
@@ -336,6 +339,14 @@ struct CustomerTenantDetail {
 #[derive(Deserialize, Serialize)]
 struct TenantToml {
     database_url: String,
+    /// The same database through the pooler. Only the runtime's pool uses it;
+    /// `database_url` stays direct so `eunha migrate` keeps its advisory lock.
+    #[serde(default)]
+    pooled_database_url: Option<String>,
+    /// What the pooler accepts in total, so the runtime checks its tenants'
+    /// pools against that rather than PostgreSQL's `max_connections`.
+    #[serde(default)]
+    pooled_client_slots: Option<u64>,
     #[serde(default)]
     database_pool: DatabasePoolToml,
     redis_url: String,
@@ -569,11 +580,22 @@ struct StoredTenant {
 fn required(value: Option<String>, name: &str) -> Result<String> {
     value.with_context(|| format!("typed configuration is missing {name}"))
 }
+impl AppState {
+    /// The pooler tenants should dial, if one is configured, with what it
+    /// accepts. Absent means tenants talk to PostgreSQL directly.
+    fn tenant_pooler(&self) -> Option<(&str, Option<u64>)> {
+        self.tenant_pooler_address
+            .as_deref()
+            .map(|address| (address, self.tenant_pooler_client_slots))
+    }
+}
+
 fn typed_toml(
     tenant: StoredTenant,
     config: StoredConfig,
     bucket: String,
     bind_address: String,
+    pooler: Option<(&str, Option<u64>)>,
 ) -> Result<TenantToml> {
     let smtp = match (
         config.smtp_host,
@@ -601,8 +623,14 @@ fn typed_toml(
             key_derivation_salt: required(s, "active_record_encryption_key_derivation_salt")?,
         }),
     };
+    let pooled_database_url = match pooler {
+        Some((address, _)) => Some(pooled_database_url(&config.database_url, address)?),
+        None => None,
+    };
     Ok(TenantToml {
         database_url: config.database_url,
+        pooled_database_url,
+        pooled_client_slots: pooler.and_then(|(_, slots)| slots),
         database_pool: DatabasePoolToml {
             max_connections: config.database_pool_max_connections,
             min_connections: config.database_pool_min_connections,
@@ -714,6 +742,9 @@ async fn main() -> Result<()> {
         tenant_pooler_address: std::env::var("CONTROL_TENANT_POOLER_ADDRESS")
             .ok()
             .filter(|address| !address.trim().is_empty()),
+        tenant_pooler_client_slots: std::env::var("CONTROL_TENANT_POOLER_CLIENT_SLOTS")
+            .ok()
+            .and_then(|slots| slots.trim().parse().ok()),
         cloudflare: match (
             std::env::var("CLOUDFLARE_ZONE_ID"),
             std::env::var("CLOUDFLARE_API_TOKEN"),
@@ -1301,12 +1332,7 @@ fn random_hex(bytes: usize) -> String {
     value.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn tenant_database_url(
-    admin_url: &str,
-    tenant_id: Uuid,
-    password: &str,
-    pooler_address: Option<&str>,
-) -> Result<String> {
+fn tenant_database_url(admin_url: &str, tenant_id: Uuid, password: &str) -> Result<String> {
     let compact = tenant_id.simple().to_string();
     let mut url = url::Url::parse(admin_url).context("invalid provisioning database URL")?;
     url.set_username(&format!("eunha_r_{compact}"))
@@ -1314,16 +1340,23 @@ fn tenant_database_url(
     url.set_password(Some(password))
         .map_err(|_| anyhow::anyhow!("invalid provisioning database password"))?;
     url.set_path(&format!("/eunha_t_{compact}"));
-    if let Some(address) = pooler_address {
-        let (host, port) = address
-            .rsplit_once(':')
-            .context("tenant pooler address needs host:port")?;
-        let port: u16 = port.parse().context("invalid tenant pooler port")?;
-        url.set_host(Some(host))
-            .map_err(|_| anyhow::anyhow!("invalid tenant pooler host"))?;
-        url.set_port(Some(port))
-            .map_err(|_| anyhow::anyhow!("invalid tenant pooler port"))?;
-    }
+    Ok(url.to_string())
+}
+
+/// The same database reached through the pooler, which is what a tenant's pool
+/// uses. `eunha migrate` keeps the direct URL: sqlx holds a session-scoped
+/// advisory lock across a migration run, and a transaction pooler would hand
+/// the unlock to a different server connection than the lock.
+fn pooled_database_url(direct_url: &str, pooler_address: &str) -> Result<String> {
+    let mut url = url::Url::parse(direct_url).context("invalid tenant database URL")?;
+    let (host, port) = pooler_address
+        .rsplit_once(':')
+        .context("tenant pooler address needs host:port")?;
+    let port: u16 = port.parse().context("invalid tenant pooler port")?;
+    url.set_host(Some(host))
+        .map_err(|_| anyhow::anyhow!("invalid tenant pooler host"))?;
+    url.set_port(Some(port))
+        .map_err(|_| anyhow::anyhow!("invalid tenant pooler port"))?;
     Ok(url.to_string())
 }
 
@@ -1511,18 +1544,13 @@ async fn create_tenant_inner(
     let tenant_id = Uuid::new_v4();
     let operation_id = Uuid::new_v4();
     let password = random_hex(24);
-    let database_url = tenant_database_url(
-        &s.provision_database_url,
-        tenant_id,
-        &password,
-        s.tenant_pooler_address.as_deref(),
-    )
-    .map_err(|_| {
-        ApiError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "The provisioning database is not configured.".into(),
-        )
-    })?;
+    let database_url = tenant_database_url(&s.provision_database_url, tenant_id, &password)
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The provisioning database is not configured.".into(),
+            )
+        })?;
     let (vapid_private, vapid_public) = generate_vapid_keypair().map_err(|_| {
         ApiError(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -3545,7 +3573,13 @@ async fn render_provisioned_tenant(state: &Shared, tenant_id: Uuid) -> Result<()
     );
     let domain = tenant.domain.clone();
     anyhow::ensure!(is_safe_domain(&domain), "invalid tenant domain");
-    let rendered = toml::to_string_pretty(&typed_toml(tenant, config, bucket, bind_address)?)?;
+    let rendered = toml::to_string_pretty(&typed_toml(
+        tenant,
+        config,
+        bucket,
+        bind_address,
+        state.tenant_pooler(),
+    )?)?;
     toml::from_str::<TenantToml>(&rendered)?;
     let directory = PathBuf::from(directory);
     anyhow::ensure!(
@@ -3762,6 +3796,10 @@ fn redact_connection_url(value: &str) -> String {
 
 fn redact_tenant_toml(config: &mut TenantToml) {
     config.database_url = redact_connection_url(&config.database_url);
+    config.pooled_database_url = config
+        .pooled_database_url
+        .as_deref()
+        .map(redact_connection_url);
     config.redis_url = redact_connection_url(&config.redis_url);
     config.redis_coordination_url = config
         .redis_coordination_url
@@ -3814,8 +3852,8 @@ async fn tenant_configuration(
         rendered_revision,
     ) = row;
     let domain = tenant.domain.clone();
-    let mut typed =
-        typed_toml(tenant, config, bucket_name, bind_address).map_err(ApiError::from)?;
+    let mut typed = typed_toml(tenant, config, bucket_name, bind_address, s.tenant_pooler())
+        .map_err(ApiError::from)?;
     redact_tenant_toml(&mut typed);
     let rendered = toml::to_string_pretty(&typed).map_err(ApiError::from)?;
     Ok(Json(TenantConfiguration {
@@ -4863,8 +4901,14 @@ async fn render_tenant(
             "The stored runtime target is invalid.".into(),
         ));
     }
-    let typed =
-        typed_toml(tenant, config, bucket_name, bind_address.clone()).map_err(ApiError::from)?;
+    let typed = typed_toml(
+        tenant,
+        config,
+        bucket_name,
+        bind_address.clone(),
+        s.tenant_pooler(),
+    )
+    .map_err(ApiError::from)?;
     let rendered_config = toml::to_string_pretty(&typed).map_err(ApiError::from)?;
     toml::from_str::<TenantToml>(&rendered_config).map_err(ApiError::from)?;
     let service_label = active_runtime_label(&service_label, router_enabled, &tenant_directory)
@@ -5085,16 +5129,30 @@ mod tests {
     }
 
     #[test]
+    fn the_pooled_url_keeps_everything_but_where_it_dials() {
+        let direct = "postgres://eunha_r_abc:s3cret@localhost:5432/eunha_t_abc";
+        let pooled = super::pooled_database_url(direct, "127.0.0.1:6432").unwrap();
+        assert_eq!(
+            pooled,
+            "postgres://eunha_r_abc:s3cret@127.0.0.1:6432/eunha_t_abc"
+        );
+        // It carries the same password, so operator-facing output has to hide
+        // it exactly as the direct URL's is hidden.
+        let shown = super::redact_connection_url(&pooled);
+        assert!(!shown.contains("s3cret"), "{shown}");
+    }
+
+    #[test]
     fn tenant_url_points_at_the_pooler_while_names_stay_intact() {
         let tenant = Uuid::parse_str("66666666-6666-6666-6666-666666666666").unwrap();
         let compact = tenant.simple().to_string();
-        let pooled = super::tenant_database_url(
+        let direct = super::tenant_database_url(
             "postgres://admin:pw@db.internal:5432/postgres",
             tenant,
             "pw",
-            Some("127.0.0.1:6432"),
         )
         .unwrap();
+        let pooled = super::pooled_database_url(&direct, "127.0.0.1:6432").unwrap();
         assert!(pooled.contains("@127.0.0.1:6432/"), "{pooled}");
         // Purge still recognises its own role and database through the pooler.
         assert_eq!(
@@ -5111,7 +5169,6 @@ mod tests {
             "postgres://admin:pw@db.internal:5432/postgres",
             tenant,
             "pw",
-            None,
         )
         .unwrap();
         eprintln!("{provisioned}");

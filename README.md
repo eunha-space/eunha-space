@@ -28,6 +28,17 @@ while receiving fresh database, encryption, and VAPID credentials plus
 `t/<lowercase-hyphenated-uuid>` media isolation. No provider secret is returned
 by the API or written to an operation event.
 
+`CONTROL_TENANT_POOLER_ADDRESS`, as `host:port`, adds a pooled database URL to
+every rendered tenant file, and `CONTROL_TENANT_POOLER_CLIENT_SLOTS` tells the
+runtime what that pooler accepts in total so it can size its tenants' pools
+against the limit that applies. The stored `database_url` stays pointed at
+PostgreSQL itself: only a runtime's request and queue pool moves, because
+`eunha migrate` holds a session-scoped advisory lock that a transaction pooler
+would break. Unset, tenants connect directly and nothing is rendered. Roles
+provisioned for a pooled deployment carry `search_path` themselves, since a
+pooled connection reaches clients that never ran the `SET` a pool issues on
+connect.
+
 Provisioning is a persisted sequence of database creation, migration, render,
 reload, and health-check steps. Interrupted work resumes after restart. Failed
 work remains retained and can be retried from the tenant inventory; it is never
