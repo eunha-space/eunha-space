@@ -146,19 +146,41 @@ cmd_postgres() {
 
 cmd_restart_postgres() {
   step "Restarting PostgreSQL"
+  local pidfile="$PG_DATA/postmaster.pid"
+  local before after i
+  before="$(head -1 "$pidfile" 2>/dev/null || echo none)"
+  say "postmaster is pid $before"
+
   # A fast shutdown disconnects clients and checkpoints; a plain SIGTERM would
-  # be a smart shutdown, which waits for idle clients that never leave. launchd
-  # KeepAlive brings it back with the new settings.
-  "$PG_BIN/pg_ctl" -D "$PG_DATA" -m fast -w -t 60 stop
-  local i
-  for i in $(seq 1 60); do
-    if "$PG_BIN/pg_isready" -q -h 127.0.0.1; then
-      say "back up after ${i}s"
-      psql_admin -c "SELECT name || ' = ' || current_setting(name) FROM pg_settings WHERE name IN ('max_connections','shared_buffers')" | while read -r line; do say "$line"; done
+  # be a smart shutdown, which waits for idle clients that never leave.
+  #
+  # Do not wait for the stop. launchd's KeepAlive relaunches PostgreSQL as soon
+  # as it exits, sometimes within the same second, and `pg_ctl -w stop` then
+  # sits watching a server that is already back and eventually calls it a
+  # failure. What matters is that a *new* postmaster is serving, so watch for
+  # that instead.
+  "$PG_BIN/pg_ctl" -D "$PG_DATA" -m fast -W stop
+
+  for i in $(seq 1 90); do
+    after="$(head -1 "$pidfile" 2>/dev/null || echo none)"
+    if [ "$after" != none ] && [ "$after" != "$before" ] && "$PG_BIN/pg_isready" -q -h 127.0.0.1; then
+      say "restarted as pid $after after ${i}s"
+      local line
+      while read -r line; do say "$line"; done < <(psql_admin -F' = ' -c "
+        SELECT name, current_setting(name) FROM pg_settings
+        WHERE name IN ('max_connections','shared_buffers') ORDER BY name")
+      local pending
+      pending="$(psql_admin -c "SELECT string_agg(name, ', ' ORDER BY name) FROM pg_settings WHERE pending_restart")"
+      [ -z "$pending" ] || say "still waiting on a restart: $pending"
       return 0
     fi
     sleep 1
   done
+
+  # Nothing brought it back, which means no supervisor is watching it.
+  if [ "$(head -1 "$pidfile" 2>/dev/null || echo none)" = none ]; then
+    fail "PostgreSQL stopped and nothing restarted it; start it with 'brew services start $PG_FORMULA'"
+  fi
   fail "PostgreSQL did not come back; check $BREW_PREFIX/var/log/$PG_FORMULA.log"
 }
 
