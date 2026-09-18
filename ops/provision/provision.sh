@@ -83,21 +83,33 @@ setting_differs() {
 }
 
 # ALTER SYSTEM writes postgresql.auto.conf, which overrides postgresql.conf and
-# cannot accumulate duplicate lines, so re-running this is free. DRY_RUN says
-# what would change and touches nothing.
+# cannot accumulate duplicate lines, so re-running this is free.
+#
+# It runs even when the value is already live, because "already correct" and
+# "declared here" are different things: a setting that matches only because
+# somebody hand-edited postgresql.conf would silently revert the next time that
+# file was tidied. What the report calls a change is the running value moving,
+# not whether the statement ran. DRY_RUN says what would change and touches
+# nothing.
 alter_system() {
   local name="$1" want="$2" current
   current="$(psql_admin -c "SELECT current_setting('$name')")"
-  if ! setting_differs "$name" "$want"; then
-    say "$name already $current"
-    return 0
-  fi
+  local changing=0
+  setting_differs "$name" "$want" && changing=1
   if [ -n "${DRY_RUN:-}" ]; then
-    say "would set $name: $current -> $want"
+    if [ "$changing" -eq 1 ]; then
+      say "would set $name: $current -> $want"
+    else
+      say "$name already $current, would restate it in postgresql.auto.conf"
+    fi
     return 0
   fi
   psql_admin -c "ALTER SYSTEM SET $name = '$want'"
-  say "set $name: $current -> $want"
+  if [ "$changing" -eq 1 ]; then
+    say "set $name: $current -> $want"
+  else
+    say "$name already $current"
+  fi
 }
 
 cmd_packages() {
