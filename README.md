@@ -11,6 +11,12 @@ that still carry the old domain-derived name, such as `seoul-earth.toml`. The
 rename is atomic and leaves the contents unchanged, so the next reload keeps the
 tenant running.
 
+A host is brought to the state this expects with `ops/provision/provision.sh`,
+which installs PostgreSQL, Redis, HAProxy, PgBouncer and cloudflared, tunes
+PostgreSQL for the host's memory, and sets the pooler up. Every step is safe to
+re-run and none of them restart a running service on their own; see
+`ops/provision/README.md`.
+
 ## Development
 
 Set `CONTROL_DATABASE_URL` to a dedicated PostgreSQL database, then:
