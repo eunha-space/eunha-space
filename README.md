@@ -50,6 +50,10 @@ reload, and health-check steps. Interrupted work resumes after restart. Failed
 work remains retained and can be retried from the tenant inventory; it is never
 implicitly deprovisioned or purged.
 
+Connection scaling — what makes a tenant hold a PostgreSQL connection, and the
+three layers that keep a fleet's cost tied to work rather than tenant count — is
+described in [docs/connection-scaling.md](docs/connection-scaling.md).
+
 ## Customer self-service
 
 The public portal at `/` lets customers register, verify their email, and
