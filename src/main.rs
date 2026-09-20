@@ -138,6 +138,14 @@ impl<E: std::fmt::Display> From<E> for ApiError {
     }
 }
 
+/// A tenant as the console lists it.
+///
+/// Two endpoints build this: the operator's inventory, which selects all of it,
+/// and a customer's instance list, which selects only what is theirs to see —
+/// no durable-workflow metadata, no step the fleet is on. The fields the
+/// narrower one leaves out are marked `default`, because sqlx reads a column
+/// that is not in the query as an error rather than as `None`, and an `Option`
+/// field does not change that. Leaving one unmarked breaks customer sign-in.
 #[derive(Serialize, sqlx::FromRow)]
 struct TenantSummary {
     id: Uuid,
@@ -160,14 +168,19 @@ struct TenantSummary {
     /// Whether this tenant is an existing instance that was taken over. Its
     /// database, media and accounts predate the platform, which is what makes
     /// purge refuse to destroy parts of it.
+    #[sqlx(default)]
     imported: bool,
+    #[sqlx(default)]
     temporal_workflow_id: Option<String>,
     /// Where an operator can watch that execution, when a Temporal UI is
     /// configured. Derived, never selected from the database.
     #[sqlx(default)]
     temporal_workflow_url: Option<String>,
+    #[sqlx(default)]
     temporal_workflow_kind: Option<String>,
+    #[sqlx(default)]
     temporal_dispatch_attempts: Option<i32>,
+    #[sqlx(default)]
     lifecycle_step: Option<String>,
 }
 
@@ -1379,7 +1392,7 @@ async fn tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     operator(&headers, &s.db).await?;
-    let mut tenants: Vec<TenantSummary> = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain,EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=t.id) imported,d.workflow_id temporal_workflow_id,d.workflow_kind temporal_workflow_kind,d.attempts temporal_dispatch_attempts,CASE WHEN t.lifecycle_state='provisioning' THEN (SELECT step FROM provisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,array_position(ARRAY['database','migrate','render','reload','health','routing','owner'],step) LIMIT 1) WHEN t.lifecycle_state IN ('deprovisioning','retained','purging') THEN (SELECT step FROM deprovisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,step LIMIT 1) END lifecycle_step FROM tenants t JOIN runtimes r ON r.id=t.runtime_id LEFT JOIN LATERAL (SELECT workflow_id,workflow_kind,attempts FROM temporal_dispatches WHERE tenant_id=t.id ORDER BY created_at DESC LIMIT 1) d ON true ORDER BY t.domain")
+    let mut tenants: Vec<TenantSummary> = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain,EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=t.id) imported,d.workflow_id temporal_workflow_id,d.workflow_kind temporal_workflow_kind,d.attempts temporal_dispatch_attempts,CASE WHEN t.lifecycle_state='provisioning' THEN (SELECT step FROM provisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,array_position(ARRAY['database','migrate','import','render','media','reload','health','routing','owner'],step) LIMIT 1) WHEN t.lifecycle_state IN ('deprovisioning','retained','purging') THEN (SELECT step FROM deprovisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,step LIMIT 1) END lifecycle_step FROM tenants t JOIN runtimes r ON r.id=t.runtime_id LEFT JOIN LATERAL (SELECT workflow_id,workflow_kind,attempts FROM temporal_dispatches WHERE tenant_id=t.id ORDER BY created_at DESC LIMIT 1) d ON true ORDER BY t.domain")
         .fetch_all(&s.db)
         .await?;
     if let Some(ui) = &s.temporal_ui {
