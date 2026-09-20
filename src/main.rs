@@ -157,6 +157,10 @@ struct TenantSummary {
     /// A custom domain released because it never validated; the tenant's own
     /// `domain` is then a placeholder.
     abandoned_custom_domain: Option<String>,
+    /// Whether this tenant is an existing instance that was taken over. Its
+    /// database, media and accounts predate the platform, which is what makes
+    /// purge refuse to destroy parts of it.
+    imported: bool,
     temporal_workflow_id: Option<String>,
     /// Where an operator can watch that execution, when a Temporal UI is
     /// configured. Derived, never selected from the database.
@@ -257,6 +261,67 @@ struct NewTenant {
     registrations_open: bool,
     #[serde(default)]
     approval_required: bool,
+}
+
+/// An existing Mastodon instance taken over rather than created.
+///
+/// Everything creation generates, an import has to be given instead, because
+/// the instance's data already depends on it: the ActiveRecord secrets its
+/// accounts' signing keys are encrypted with, the VAPID keypair its subscribers
+/// already hold, and the storage its attachments are already in. Generating
+/// fresh ones would produce an instance that cannot sign, cannot push, and
+/// cannot show a picture.
+#[derive(Deserialize)]
+struct TenantImport {
+    /// The instance's own domain, which it keeps. Its accounts' ActivityPub
+    /// identity is on it and remote servers know them there, so an import is
+    /// never also a move.
+    domain: String,
+    title: String,
+    runtime_id: Uuid,
+    /// A custom-format `pg_dump` already staged on the runtime host.
+    dump_path: String,
+    /// The instance's `public/system` tree, staged on the runtime host beside
+    /// the dump, to be uploaded into the tenant's storage. Either this or
+    /// `media_storage`: the instance's media either moves here or stays where
+    /// it is, and it cannot do both.
+    media_path: Option<String>,
+    contact_email: Option<String>,
+    /// The account in the dump that speaks for the instance. Recorded, never
+    /// created: an imported instance arrives with its owner.
+    owner_username: Option<String>,
+    /// Mastodon's `ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY` and
+    /// `..._KEY_DERIVATION_SALT`, as the source instance had them.
+    active_record_encryption_primary_key: String,
+    active_record_encryption_key_derivation_salt: String,
+    /// The source's VAPID keypair. Both or neither: without it every Web Push
+    /// subscription the instance has handed out stops working, so a generated
+    /// one is a deliberate choice rather than a default.
+    vapid_private_key: Option<String>,
+    vapid_public_key: Option<String>,
+    /// Where the instance's media already is, for an instance whose storage
+    /// goes on serving it rather than being copied here. Nothing provisions it
+    /// and the purge refuses to delete from it.
+    media_storage: Option<ImportedMediaStorage>,
+    #[serde(default)]
+    registrations_open: bool,
+    #[serde(default)]
+    approval_required: bool,
+}
+
+/// The object storage an imported instance already keeps its media in. It is
+/// the customer's, not ours: nothing provisions it and the purge refuses to
+/// delete from it.
+#[derive(Deserialize)]
+struct ImportedMediaStorage {
+    bucket: String,
+    region: String,
+    endpoint: Option<String>,
+    access_key_id: String,
+    secret_access_key: String,
+    base_url: String,
+    #[serde(default)]
+    key_prefix: String,
 }
 
 #[derive(Deserialize)]
@@ -844,6 +909,7 @@ async fn main() -> Result<()> {
         .route("/customer/tenants/{id}/restore", post(customer_restore))
         .route("/customer/dns-check", get(customer_dns_check))
         .route("/tenants", get(tenants).post(create_tenant))
+        .route("/tenants/import", post(import_tenant))
         .route("/tenants/{id}/check", post(check_tenant))
         .route("/tenants/{id}/retry", post(retry_provisioning))
         .route("/tenants/{id}/deprovision", post(deprovision_tenant))
@@ -1298,7 +1364,7 @@ async fn customer_tenant_detail(
         .bind(id)
         .fetch_all(&s.db)
         .await?;
-    let provisioning_steps = sqlx::query_as("SELECT step,status,updated_at FROM provisioning_steps WHERE tenant_id=$1 ORDER BY array_position(ARRAY['database','migrate','render','reload','health','routing','owner'],step)")
+    let provisioning_steps = sqlx::query_as("SELECT step,status,updated_at FROM provisioning_steps WHERE tenant_id=$1 ORDER BY array_position(ARRAY['database','migrate','import','render','media','reload','health','routing','owner'],step)")
         .bind(id)
         .fetch_all(&s.db)
         .await?;
@@ -1313,7 +1379,7 @@ async fn tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     operator(&headers, &s.db).await?;
-    let mut tenants: Vec<TenantSummary> = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain,d.workflow_id temporal_workflow_id,d.workflow_kind temporal_workflow_kind,d.attempts temporal_dispatch_attempts,CASE WHEN t.lifecycle_state='provisioning' THEN (SELECT step FROM provisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,array_position(ARRAY['database','migrate','render','reload','health','routing','owner'],step) LIMIT 1) WHEN t.lifecycle_state IN ('deprovisioning','retained','purging') THEN (SELECT step FROM deprovisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,step LIMIT 1) END lifecycle_step FROM tenants t JOIN runtimes r ON r.id=t.runtime_id LEFT JOIN LATERAL (SELECT workflow_id,workflow_kind,attempts FROM temporal_dispatches WHERE tenant_id=t.id ORDER BY created_at DESC LIMIT 1) d ON true ORDER BY t.domain")
+    let mut tenants: Vec<TenantSummary> = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain,EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=t.id) imported,d.workflow_id temporal_workflow_id,d.workflow_kind temporal_workflow_kind,d.attempts temporal_dispatch_attempts,CASE WHEN t.lifecycle_state='provisioning' THEN (SELECT step FROM provisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,array_position(ARRAY['database','migrate','render','reload','health','routing','owner'],step) LIMIT 1) WHEN t.lifecycle_state IN ('deprovisioning','retained','purging') THEN (SELECT step FROM deprovisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,step LIMIT 1) END lifecycle_step FROM tenants t JOIN runtimes r ON r.id=t.runtime_id LEFT JOIN LATERAL (SELECT workflow_id,workflow_kind,attempts FROM temporal_dispatches WHERE tenant_id=t.id ORDER BY created_at DESC LIMIT 1) d ON true ORDER BY t.domain")
         .fetch_all(&s.db)
         .await?;
     if let Some(ui) = &s.temporal_ui {
@@ -1626,6 +1692,252 @@ async fn create_tenant_inner(
     ))
 }
 
+/// Take over an existing Mastodon instance.
+///
+/// Creation mints a tenant: a domain nobody has used, an empty database, fresh
+/// secrets, and an Owner account made at the end. An import inherits one, and
+/// almost every difference follows from that. The domain is the customer's own
+/// and already has accounts on it, so it is never a provided hostname and never
+/// renamed. The secrets are the source instance's, because its data is
+/// encrypted with them. There is no owner step, because the owner exists.
+///
+/// The one difference that is not about the data is when it happens. A created
+/// instance provisions nothing until its domain validates, so an abandoned one
+/// leaves nothing behind; an imported instance must be restored, served and
+/// checked *before* its domain moves, because moving its domain is the cutover
+/// and there is no going back from pointing live traffic at an empty server.
+async fn import_tenant(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<TenantImport>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let bad = |message: &str| ApiError(StatusCode::BAD_REQUEST, message.into());
+
+    let domain = body
+        .domain
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if !is_valid_domain(&domain)
+        || s.provided_domain_suffixes
+            .iter()
+            .any(|suffix| domain == *suffix || domain.ends_with(&format!(".{suffix}")))
+    {
+        return Err(bad(
+            "An imported instance keeps its own domain, which cannot be a platform one.",
+        ));
+    }
+    let title = body.title.trim().to_owned();
+    if title.is_empty() || title.len() > 200 {
+        return Err(bad("Enter a title."));
+    }
+    let dump_path = body.dump_path.trim().to_owned();
+    if !is_safe_absolute_path(FsPath::new(&dump_path))
+        || !dump_path
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/'))
+    {
+        return Err(bad(
+            "Give the dump as an absolute path on the runtime host.",
+        ));
+    }
+    let owner_username = body
+        .owner_username
+        .as_deref()
+        .map(str::trim)
+        .filter(|username| !username.is_empty())
+        .map(str::to_owned);
+    if owner_username
+        .as_deref()
+        .is_some_and(|username| !is_valid_owner_username(username))
+    {
+        return Err(bad(
+            "Use up to 30 letters, numbers, and underscores for the admin username.",
+        ));
+    }
+    let encryption_primary = body.active_record_encryption_primary_key.trim().to_owned();
+    let encryption_salt = body
+        .active_record_encryption_key_derivation_salt
+        .trim()
+        .to_owned();
+    if encryption_primary.is_empty() || encryption_salt.is_empty() {
+        return Err(bad(
+            "An imported instance needs the ActiveRecord encryption secrets its accounts' signing keys are encrypted with.",
+        ));
+    }
+    // Generating a keypair here would be silent: the instance would serve, and
+    // only its subscribers would find out, one missed notification at a time.
+    let (vapid_private, vapid_public) = match (body.vapid_private_key, body.vapid_public_key) {
+        (Some(private), Some(public))
+            if !private.trim().is_empty() && !public.trim().is_empty() =>
+        {
+            (private.trim().to_owned(), public.trim().to_owned())
+        }
+        (None, None) => generate_vapid_keypair().map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not generate tenant keys.".into(),
+            )
+        })?,
+        _ => {
+            return Err(bad(
+                "Give both halves of the instance's VAPID keypair, or neither.",
+            ));
+        }
+    };
+    let media_path = body
+        .media_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned);
+    if let Some(path) = &media_path
+        && (!is_safe_absolute_path(FsPath::new(path))
+            || !path.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'/')
+            }))
+    {
+        return Err(bad(
+            "Give the instance's media as an absolute path on the runtime host.",
+        ));
+    }
+    // An instance's media either moves here or stays where it is. Asking for
+    // both would leave two answers to where a file lives and one of them wrong.
+    if media_path.is_some() && body.media_storage.is_some() {
+        return Err(bad(
+            "Either upload the instance's media or point at the storage it already uses, not both.",
+        ));
+    }
+    if let Some(media) = &body.media_storage
+        && (media.bucket.trim().is_empty()
+            || media.region.trim().is_empty()
+            || media.access_key_id.trim().is_empty()
+            || media.secret_access_key.trim().is_empty()
+            || media.base_url.trim().is_empty())
+    {
+        return Err(bad(
+            "Give the bucket, region, credentials and base URL of the instance's existing media storage.",
+        ));
+    }
+
+    let origin_hostname =
+        sqlx::query_scalar::<_, String>("SELECT origin_hostname FROM runtimes WHERE id=$1")
+            .bind(body.runtime_id)
+            .fetch_optional(&s.db)
+            .await?
+            .ok_or_else(|| bad("Select a valid runtime."))?;
+    if !is_valid_domain(&origin_hostname) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "The selected runtime has an invalid Cloudflare origin hostname.".into(),
+        ));
+    }
+    let cname_target = s
+        .cloudflare
+        .as_ref()
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Cloudflare for SaaS is not configured.".into(),
+            )
+        })?
+        .cname_target
+        .clone();
+    // Redis, mail and worker settings are the runtime's, not the instance's:
+    // they describe where it is hosted rather than who it is.
+    let template = sqlx::query_scalar::<_, Uuid>(
+        "SELECT t.id FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.runtime_id=$1 AND t.lifecycle_state='ready' ORDER BY t.created_at LIMIT 1",
+    ).bind(body.runtime_id).fetch_optional(&s.db).await?
+        .ok_or_else(|| ApiError(StatusCode::CONFLICT, "This runtime has no ready tenant to use as its provider template.".into()))?;
+
+    let tenant_id = Uuid::new_v4();
+    let operation_id = Uuid::new_v4();
+    let password = random_hex(24);
+    let database_url = tenant_database_url(&s.provision_database_url, tenant_id, &password)
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The provisioning database is not configured.".into(),
+            )
+        })?;
+    let redis_prefix = tenant_redis_key_prefix(tenant_id);
+    let brings_own_media = body.media_storage.is_some();
+    let media = body.media_storage;
+    let contact_email = body
+        .contact_email
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
+
+    let mut tx = s.db.begin().await?;
+    sqlx::query("INSERT INTO tenants(id,domain,title,runtime_id,desired_state,observed_state,lifecycle_state,contact_email,registrations_open,approval_required,vapid_private_key,vapid_public_key,owner_username) VALUES($1,$2,$3,$4,'running','unknown','provisioning',$5,$6,$7,$8,$9,$10)")
+        .bind(tenant_id).bind(&domain).bind(&title).bind(body.runtime_id)
+        .bind(&contact_email).bind(body.registrations_open).bind(body.approval_required)
+        .bind(vapid_private).bind(vapid_public).bind(&owner_username).execute(&mut *tx).await
+        .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenants_domain_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
+    sqlx::query(r#"INSERT INTO tenant_configuration(
+        tenant_id,database_url,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,
+        redis_url,redis_coordination_url,redis_key_prefix,redis_process_metrics,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,resend_api_key,resend_from,
+        active_record_encryption_primary_key,active_record_encryption_key_derivation_salt,software_update_url,allowed_private_networks,sign_integrity_proofs,
+        media_storage_region,media_storage_endpoint,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url,media_storage_key_prefix,
+        delivery_workers,delivery_batch,delivery_concurrency,inbox_workers,inbox_batch,inbox_concurrency,queue_idle_poll_seconds,process_delivery_concurrency,
+        max_concurrent_requests,process_max_tenants,process_database_connections)
+      SELECT $1,$2,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,
+        redis_url,redis_coordination_url,$3,redis_process_metrics,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,resend_api_key,resend_from,
+        $4,$5,software_update_url,allowed_private_networks,sign_integrity_proofs,
+        CASE WHEN $6 THEN $7 ELSE media_storage_region END,
+        CASE WHEN $6 THEN $8 ELSE media_storage_endpoint END,
+        CASE WHEN $6 THEN $9 ELSE media_storage_access_key_id END,
+        CASE WHEN $6 THEN $10 ELSE media_storage_secret_access_key END,
+        CASE WHEN $6 THEN $11 ELSE media_storage_base_url END,
+        CASE WHEN $6 THEN $12 ELSE $13 END,
+        delivery_workers,delivery_batch,delivery_concurrency,inbox_workers,inbox_batch,inbox_concurrency,queue_idle_poll_seconds,process_delivery_concurrency,
+        max_concurrent_requests,process_max_tenants,process_database_connections FROM tenant_configuration WHERE tenant_id=$14"#)
+        .bind(tenant_id).bind(database_url).bind(redis_prefix).bind(&encryption_primary).bind(&encryption_salt)
+        .bind(brings_own_media)
+        .bind(media.as_ref().map(|m| m.region.trim()))
+        .bind(media.as_ref().and_then(|m| m.endpoint.as_deref().map(str::trim)).filter(|value| !value.is_empty()))
+        .bind(media.as_ref().map(|m| m.access_key_id.trim()))
+        .bind(media.as_ref().map(|m| m.secret_access_key.trim()))
+        .bind(media.as_ref().map(|m| m.base_url.trim().trim_end_matches('/')))
+        .bind(media.as_ref().map(|m| m.key_prefix.trim().trim_matches('/')).unwrap_or_default())
+        .bind(format!("t/{tenant_id}"))
+        .bind(template)
+        .execute(&mut *tx).await
+        .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenant_configuration_media_storage_key_prefix_safe") { bad("That media key prefix is not a usable storage path.") } else { ApiError::from(error) })?;
+    sqlx::query("INSERT INTO r2_buckets(tenant_id,bucket_name,lifecycle_state) SELECT $1,CASE WHEN $2 THEN $3 ELSE bucket_name END,'provisioning' FROM r2_buckets WHERE tenant_id=$4")
+        .bind(tenant_id).bind(brings_own_media).bind(media.as_ref().map(|m| m.bucket.trim())).bind(template)
+        .execute(&mut *tx).await
+        .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("r2_buckets_bucket_name_safe") { bad("That is not a usable bucket name.") } else { ApiError::from(error) })?;
+    sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary,cname_target) VALUES($1,$2,$3,'custom','pending',true,$4)")
+        .bind(Uuid::new_v4()).bind(tenant_id).bind(&domain).bind(&cname_target).execute(&mut *tx).await
+        .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenant_domains_hostname_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
+    sqlx::query("INSERT INTO tenant_imports(tenant_id,dump_path,media_path) VALUES($1,$2,$3)")
+        .bind(tenant_id).bind(&dump_path).bind(&media_path).execute(&mut *tx).await
+        .map_err(|error| match error.as_database_error().and_then(|e| e.constraint()) {
+            Some("tenant_imports_dump_path_absolute") => bad("Give the dump as an absolute path on the runtime host."),
+            Some("tenant_imports_media_path_absolute") => bad("Give the instance's media as an absolute path on the runtime host."),
+            _ => ApiError::from(error),
+        })?;
+    // The same kind as a created tenant's: these are provisioning steps, and
+    // every failure, event and retry path finds the operation by that name. The
+    // detail is what says the instance came from somewhere.
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) VALUES($1,$2,$3,'tenant_provision','running',$4,jsonb_build_object('domain',$5,'imported',true),now())")
+        .bind(operation_id).bind(tenant_id).bind(body.runtime_id).bind(operator_id).bind(&domain).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['database','migrate','import','render'] || CASE WHEN $2 THEN ARRAY['media'] ELSE ARRAY[]::text[] END || ARRAY['reload','health','routing'])")
+        .bind(tenant_id).bind(media_path.is_some()).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,$2)")
+        .bind(operation_id)
+        .bind(format!("Tenant reserved for {domain}; the instance is set up before its domain moves."))
+        .execute(&mut *tx).await?;
+    enqueue_temporal_dispatch(&mut tx, tenant_id, "provision").await?;
+    tx.commit().await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({"id": tenant_id, "operation_id": operation_id})),
+    ))
+}
+
 async fn retry_provisioning(
     State(s): State<Shared>,
     headers: HeaderMap,
@@ -1758,9 +2070,14 @@ async fn domain_reconciler(state: Shared) {
 /// delete the instances still waiting for them. The deletion is the ordinary
 /// one: the instance goes offline and is retained, freeing the customer's slot,
 /// and only an operator's purge destroys its data.
+///
+/// The window exists so that an instance which was never set up leaves nothing
+/// behind. An imported one was set up on its first day — its data is restored,
+/// rendered and served — and is only waiting for an operator and a customer to
+/// agree on a cutover, so the window does not apply to it.
 async fn expire_custom_domains(state: &Shared) {
     let Ok(expired) = sqlx::query_as::<_, (Uuid, Uuid, String)>(&format!(
-        "SELECT d.id,d.tenant_id,d.hostname FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id WHERE d.kind='custom' AND d.status='pending' AND t.lifecycle_state='provisioning' AND d.created_at < now()-interval '{CUSTOM_DOMAIN_SETUP_WINDOW}' ORDER BY d.created_at LIMIT 10"
+        "SELECT d.id,d.tenant_id,d.hostname FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id WHERE d.kind='custom' AND d.status='pending' AND t.lifecycle_state='provisioning' AND NOT EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=t.id) AND d.created_at < now()-interval '{CUSTOM_DOMAIN_SETUP_WINDOW}' ORDER BY d.created_at LIMIT 10"
     ))
     .fetch_all(&state.db)
     .await
@@ -3255,6 +3572,8 @@ pub(crate) async fn provision_tenant_step(
     let result = match step {
         "database" => create_tenant_database(state, tenant_id).await,
         "migrate" => migrate_tenant_database(state, tenant_id).await,
+        "import" => import_tenant_database(state, tenant_id).await,
+        "media" => upload_imported_media(state, tenant_id).await,
         "render" => render_provisioned_tenant(state, tenant_id)
             .await
             .map(|_| ()),
@@ -3308,9 +3627,15 @@ async fn tenant_routing_ready(db: &PgPool, tenant_id: Uuid) -> Result<bool> {
 /// Whether an instance created with a custom domain may be set up. Nothing is
 /// provisioned — no database, no runtime file, no owner — until its domain has
 /// validated, so an instance whose domain never validates leaves nothing behind.
+///
+/// An imported instance is the exception, and for the same reason. Its domain
+/// is already serving somewhere else, so waiting for it would mean waiting for
+/// a cutover onto a server with no data on it. It is set up first and cut over
+/// afterwards; what it leaves behind if its domain never moves is a database
+/// full of the customer's own instance, which is not litter.
 async fn custom_domain_validated(db: &PgPool, tenant_id: Uuid) -> Result<bool> {
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT NOT EXISTS(SELECT 1 FROM tenant_domains WHERE tenant_id=$1 AND kind='custom' AND is_primary AND status<>'active')",
+        "SELECT EXISTS(SELECT 1 FROM tenant_imports WHERE tenant_id=$1) OR NOT EXISTS(SELECT 1 FROM tenant_domains WHERE tenant_id=$1 AND kind='custom' AND is_primary AND status<>'active')",
     )
     .bind(tenant_id)
     .fetch_one(db)
@@ -3559,6 +3884,227 @@ async fn migrate_tenant_database(state: &Shared, tenant_id: Uuid) -> Result<()> 
         .await?;
     anyhow::ensure!(status.success(), "tenant migration failed");
     Ok(())
+}
+
+/// Restore the instance's Mastodon dump into the database the previous steps
+/// created and migrated, with the runtime's own `eunha import-mastodon`.
+///
+/// The runtime's binary does the work for the same reason `migrate` uses it: it
+/// is the thing that knows which Mastodon release this fleet builds, and the
+/// release that matters is the one the tenant will be served by rather than
+/// whatever the control plane happened to be built against. It also refuses
+/// what should be refused — a dump from another release, a database that is not
+/// empty, data belonging to a different instance — so this step's job is to run
+/// it in the right place, as the right role, and keep what it reported.
+///
+/// It connects as the provisioning role rather than the tenant's, because a
+/// data-only restore loads through the schema's foreign keys and only a
+/// superuser may disable those.
+async fn import_tenant_database(state: &Shared, tenant_id: Uuid) -> Result<()> {
+    let (domain, dump_path, database_url, tenant_directory, runtime_host) =
+        sqlx::query_as::<_, (String, String, String, String, String)>(
+            "SELECT t.domain,m.dump_path,c.database_url,r.tenant_directory,i.address FROM tenants t JOIN tenant_imports m ON m.tenant_id=t.id JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id WHERE t.id=$1",
+        )
+        .bind(tenant_id)
+        .fetch_one(&state.db)
+        .await?;
+    let configured_host = std::env::var("CONTROL_RUNTIME_HOST").unwrap_or_default();
+    anyhow::ensure!(
+        !configured_host.is_empty() && configured_host == runtime_host,
+        "runtime is managed elsewhere"
+    );
+    anyhow::ensure!(is_safe_domain(&domain), "invalid tenant domain");
+    let dump = PathBuf::from(&dump_path);
+    anyhow::ensure!(is_safe_absolute_path(&dump), "invalid dump path");
+    anyhow::ensure!(
+        tokio::fs::try_exists(&dump).await.unwrap_or(false),
+        "there is no dump at {dump_path} on this runtime"
+    );
+
+    // The tenant's own database, reached by the role that provisioned it. Only
+    // the path is taken from the tenant's URL; its credentials are not the ones
+    // that may disable a trigger.
+    let tenant_database = url::Url::parse(&database_url)?;
+    let mut admin_url = url::Url::parse(&state.provision_database_url)?;
+    admin_url.set_path(tenant_database.path());
+
+    let runtime_root = PathBuf::from(tenant_directory)
+        .parent()
+        .context("runtime directory has no parent")?
+        .to_path_buf();
+    // However long it takes: a restore is one transaction over the whole of
+    // somebody's server, and killing it halfway is worth nothing extra.
+    let output = tokio::process::Command::new(runtime_root.join("current/eunha"))
+        .arg("import-mastodon")
+        .arg(&dump)
+        .arg("--domain")
+        .arg(&domain)
+        .env("DATABASE_URL", admin_url.as_str())
+        .current_dir(runtime_root.join("current"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{}",
+        import_failure(&String::from_utf8_lossy(&output.stderr))
+    );
+    record_import_evidence(state, tenant_id, &String::from_utf8_lossy(&output.stdout)).await
+}
+
+/// Upload the instance's media into the storage its rendered configuration
+/// names, with the runtime's own `eunha import-media`.
+///
+/// Mastodon stores a file's name rather than its address, so an instance whose
+/// media stayed behind serves rows that point at nothing. The runtime's binary
+/// reads the tenant file the render just wrote, which is the only place the
+/// tenant's bucket and its key prefix are stated together — and the prefix is
+/// the whole of what keeps one instance's objects apart from its neighbours' in
+/// a bucket they share.
+///
+/// A retry asks for each object before sending it. The first attempt does not:
+/// over a whole media library that would be a request per file for nothing.
+async fn upload_imported_media(state: &Shared, tenant_id: Uuid) -> Result<()> {
+    let (domain, media_path, tenant_directory, runtime_host, attempts) =
+        sqlx::query_as::<_, (String, String, String, String, i32)>(
+            "SELECT t.domain,m.media_path,r.tenant_directory,i.address,p.attempts FROM tenants t JOIN tenant_imports m ON m.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id JOIN provisioning_steps p ON p.tenant_id=t.id AND p.step='media' WHERE t.id=$1 AND m.media_path IS NOT NULL",
+        )
+        .bind(tenant_id)
+        .fetch_one(&state.db)
+        .await?;
+    let configured_host = std::env::var("CONTROL_RUNTIME_HOST").unwrap_or_default();
+    anyhow::ensure!(
+        !configured_host.is_empty() && configured_host == runtime_host,
+        "runtime is managed elsewhere"
+    );
+    anyhow::ensure!(is_safe_domain(&domain), "invalid tenant domain");
+    let media = PathBuf::from(&media_path);
+    anyhow::ensure!(is_safe_absolute_path(&media), "invalid media path");
+    anyhow::ensure!(
+        tokio::fs::metadata(&media)
+            .await
+            .map(|entry| entry.is_dir())
+            .unwrap_or(false),
+        "there is no media directory at {media_path} on this runtime"
+    );
+
+    let runtime_root = PathBuf::from(&tenant_directory)
+        .parent()
+        .context("runtime directory has no parent")?
+        .to_path_buf();
+    let mut command = tokio::process::Command::new(runtime_root.join("current/eunha"));
+    command
+        .arg("--tenants")
+        .arg(&tenant_directory)
+        .arg("import-media")
+        .arg(&media)
+        .arg(format!("--instance={domain}"));
+    // The instance's own files only. The rest of a Mastodon media directory is
+    // its cache of what other servers published, which is fetched again when it
+    // is missing and is usually most of the bytes.
+    if attempts > 1 {
+        command.arg("--skip-existing");
+    }
+    let output = command
+        .current_dir(runtime_root.join("current"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    anyhow::ensure!(
+        output.status.success(),
+        "{}",
+        import_failure(&String::from_utf8_lossy(&output.stderr))
+    );
+    record_import_evidence(state, tenant_id, &String::from_utf8_lossy(&output.stdout)).await
+}
+
+/// Keep what an importer reported, and say it where an operator is looking.
+///
+/// The row is the record; the operation event is how it is read at the time it
+/// matters, beside the step that produced it. Merged rather than replaced,
+/// because the restore's evidence and the media's are both what the import is
+/// answerable for.
+async fn record_import_evidence(state: &Shared, tenant_id: Uuid, stdout: &str) -> Result<()> {
+    let report = imported_instance_report(stdout);
+    sqlx::query("UPDATE tenant_imports SET report=COALESCE(report,'{}'::jsonb)||$1::jsonb,updated_at=now() WHERE tenant_id=$2")
+        .bind(SqlJson(&report))
+        .bind(tenant_id)
+        .execute(&state.db)
+        .await?;
+    let Some(fields) = report.as_object().filter(|fields| !fields.is_empty()) else {
+        return Ok(());
+    };
+    let summary = fields
+        .iter()
+        .map(|(key, value)| format!("{key} {}", value.to_string().trim_matches('"')))
+        .collect::<Vec<_>>()
+        .join(", ");
+    sqlx::query("INSERT INTO operation_events(operation_id,message) SELECT id,$2 FROM operations WHERE tenant_id=$1 AND kind='tenant_provision' AND status='running' ORDER BY created_at DESC LIMIT 1")
+        .bind(tenant_id)
+        .bind(format!("Imported: {summary}."))
+        .execute(&state.db)
+        .await?;
+    Ok(())
+}
+
+/// The report an importer prints after `OK`: from the restore, the domain it
+/// proved the data belongs to and the row counts that say the instance arrived
+/// whole; from the media upload, the file counts and the storage prefix they
+/// went under.
+///
+/// Only counts, a domain and a storage prefix are kept. Command output is not a
+/// place for a tenant's secrets to accumulate, and the way to guarantee that is
+/// to decide here what a report may contain rather than to trust what was
+/// printed.
+fn imported_instance_report(stdout: &str) -> serde_json::Value {
+    let mut report = serde_json::Map::new();
+    for line in stdout
+        .lines()
+        .skip_while(|line| line.trim() != "OK")
+        .skip(1)
+    {
+        let Some((key, value)) = line.split_once(": ") else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        if key.is_empty() || key.len() > 40 {
+            continue;
+        }
+        let value = match value.parse::<i64>() {
+            Ok(count) => serde_json::Value::from(count),
+            Err(_) if is_valid_domain(value) || is_safe_storage_prefix(value) => {
+                serde_json::Value::from(value)
+            }
+            Err(_) => continue,
+        };
+        report.insert(key.to_owned(), value);
+    }
+    serde_json::Value::Object(report)
+}
+
+/// Why the importer refused, said as an operator can act on it.
+///
+/// Its own refusals name domains, row counts and schema versions. A connection
+/// string can still reach its output through a driver's error, so anything
+/// URL-shaped is redacted before this becomes a step's error and an operation's.
+fn import_failure(stderr: &str) -> String {
+    let message = stderr
+        .split_whitespace()
+        .map(|word| match word.contains("://") {
+            true => redact_connection_url(word),
+            false => word.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let message = message.trim_start_matches("Error: ").trim();
+    match message.is_empty() {
+        true => "the importer refused the dump and said nothing".to_owned(),
+        false => message.chars().take(1000).collect(),
+    }
 }
 
 async fn render_provisioned_tenant(state: &Shared, tenant_id: Uuid) -> Result<()> {
@@ -4934,6 +5480,20 @@ fn is_safe_absolute_path(path: &FsPath) -> bool {
             .all(|component| !matches!(component, Component::ParentDir))
 }
 
+/// A media storage namespace, as `tenant_configuration` constrains it: the
+/// tenant's own `t/<tenant id>`, or empty for a bucket it does not share.
+fn is_safe_storage_prefix(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('/')
+        && !value.ends_with('/')
+        && value.split('/').all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        })
+}
+
 fn is_git_sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -5306,6 +5866,77 @@ mod tests {
             super::provisioned_database_names(tenant, &pooled),
             Some((format!("eunha_r_{compact}"), format!("eunha_t_{compact}")))
         );
+    }
+
+    /// An import's evidence comes from a command's output, which is the kind of
+    /// place a connection string ends up by accident. Deciding here what a
+    /// report may hold is what keeps that from being stored.
+    #[test]
+    fn an_import_report_keeps_counts_a_domain_and_a_prefix_and_nothing_else() {
+        let report = super::imported_instance_report(
+            "some progress nobody asked for\n\
+             OK\n\
+             domain: seoul.earth\n\
+             users: 12\n\
+             local accounts: 12\n\
+             known accounts: 340219\n\
+             statuses: 88214\n\
+             key prefix: t/44444444-4444-4444-4444-444444444444\n\
+             database_url: postgres://eunha_r_x:hunter2@db.internal/eunha_t_x\n\
+             note: something chatty\n",
+        );
+        assert_eq!(report["domain"], "seoul.earth");
+        assert_eq!(report["users"], 12);
+        assert_eq!(report["known accounts"], 340219);
+        assert_eq!(
+            report["key prefix"],
+            "t/44444444-4444-4444-4444-444444444444"
+        );
+        // Neither the URL nor the free-form line survives the allowlist.
+        assert!(report.get("database_url").is_none());
+        assert!(report.get("note").is_none());
+        // Anything printed before the importer said OK is progress, not result.
+        assert!(report.as_object().is_some_and(|fields| fields.len() == 6));
+    }
+
+    #[test]
+    fn a_report_from_a_command_that_never_succeeded_is_empty() {
+        assert_eq!(
+            super::imported_instance_report("connecting...\nit went wrong\n"),
+            serde_json::json!({})
+        );
+    }
+
+    #[test]
+    fn an_import_failure_keeps_its_reason_and_loses_its_credentials() {
+        let failure = super::import_failure(
+            "Error: could not connect to postgres://eunha_r_x:hunter2@db.internal/eunha_t_x\n",
+        );
+        assert!(failure.starts_with("could not connect to postgres://eunha_r_x:"));
+        assert!(!failure.contains("hunter2"));
+        assert_eq!(
+            super::import_failure("the dump holds other.example, not seoul.earth"),
+            "the dump holds other.example, not seoul.earth"
+        );
+        assert_eq!(
+            super::import_failure("   \n"),
+            "the importer refused the dump and said nothing"
+        );
+    }
+
+    #[test]
+    fn a_storage_prefix_is_a_tenants_own_namespace_or_nothing() {
+        assert!(super::is_safe_storage_prefix(
+            "t/44444444-4444-4444-4444-444444444444"
+        ));
+        assert!(super::is_safe_storage_prefix("media"));
+        // The shapes `tenant_configuration` refuses, which are also the shapes
+        // that would silently address a different object.
+        assert!(!super::is_safe_storage_prefix(""));
+        assert!(!super::is_safe_storage_prefix("/t/one"));
+        assert!(!super::is_safe_storage_prefix("t/one/"));
+        assert!(!super::is_safe_storage_prefix("t//one"));
+        assert!(!super::is_safe_storage_prefix("t/../one"));
     }
 
     #[test]

@@ -23,6 +23,12 @@ export type Tenant = {
   purge_scheduled_for: string | null;
   /** A custom domain released because it never validated; `domain` is then a placeholder. */
   abandoned_custom_domain: string | null;
+  /**
+   * An existing instance that was taken over rather than created. Its database,
+   * media and accounts predate the platform, which is why a purge refuses to
+   * destroy the parts of it that were never ours.
+   */
+  imported: boolean;
   /** Durable Temporal execution metadata; no workflow payloads or secrets are exposed. */
   temporal_workflow_id: string | null;
   /** The operator-only Temporal UI link for that execution, when one is configured. */
@@ -90,7 +96,9 @@ export type CustomerProvisioningStep = {
   step:
     | "database"
     | "migrate"
+    | "import"
     | "render"
+    | "media"
     | "reload"
     | "health"
     | "routing"

@@ -26,23 +26,73 @@ use crate::{
 
 const TASK_QUEUE: &str = "eunha-space-lifecycle";
 
+/// How often a running provisioning step says it is still running. Well inside
+/// `LONG_STEP_HEARTBEAT_TIMEOUT`, because a missed one fails the attempt.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+
+/// What a step gets when it is bounded by work rather than by data.
+const STEP_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// What a step gets when it is bounded by how much of somebody's server there
+/// is. A restore is one transaction over a whole instance and a media upload is
+/// its whole library; neither is improved by being killed partway.
+const LONG_STEP_TIMEOUT: Duration = Duration::from_secs(12 * 60 * 60);
+
+/// How long a long step may go quiet before the attempt is given up on. Without
+/// it, a worker that died would hold the step for `LONG_STEP_TIMEOUT`.
+const LONG_STEP_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The steps that move an instance's data, rather than deciding something about
+/// it. Named here because the workflow has to choose their timeouts, and a
+/// workflow may only choose from what is fixed.
+const LONG_STEPS: [&str; 2] = ["import", "media"];
+
+/// The activity options a provisioning step runs under. Derived from the step's
+/// name alone, so a replay makes the same choice.
+fn provision_step_options(step: &str) -> temporalio_sdk::ActivityOptions {
+    match LONG_STEPS.contains(&step) {
+        true => ActivityOptions::with_start_to_close_timeout(LONG_STEP_TIMEOUT)
+            .heartbeat_timeout(LONG_STEP_HEARTBEAT_TIMEOUT)
+            .build(),
+        false => ActivityOptions::with_start_to_close_timeout(STEP_TIMEOUT).build(),
+    }
+}
+
 struct TenantActivities {
     state: Shared,
 }
 
 #[activities]
 impl TenantActivities {
+    /// One provisioning step, heartbeating for as long as it takes.
+    ///
+    /// Most steps answer in seconds. Restoring an instance's database and
+    /// moving its media do not: they are bounded by how much of somebody's
+    /// server there is, which is hours for a large one. Those steps are given
+    /// hours to finish, and a heartbeat is what keeps that from also being how
+    /// long a crashed worker goes unnoticed.
     #[activity]
     async fn provision_step(
         self: Arc<Self>,
-        _ctx: ActivityContext,
+        ctx: ActivityContext,
         request: String,
     ) -> Result<ProvisionStepOutcome, ActivityError> {
         let (tenant_id, step) = request
             .split_once(':')
             .ok_or_else(|| ActivityError::from(anyhow::anyhow!("invalid provisioning step")))?;
         let tenant_id = Uuid::parse_str(tenant_id).map_err(ActivityError::from)?;
-        Ok(provision_tenant_step(&self.state, tenant_id, step).await)
+        let work = provision_tenant_step(&self.state, tenant_id, step);
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                outcome = &mut work => return Ok(outcome),
+                _ = tokio::time::sleep(HEARTBEAT_INTERVAL) => {
+                    // A failed heartbeat means the server has already given up
+                    // on this attempt; the step finds that out when it reports.
+                    let _ = ctx.record_heartbeat(()).await;
+                }
+            }
+        }
     }
 
     #[activity]
@@ -149,16 +199,19 @@ impl TenantProvisionWorkflow {
     #[run]
     async fn run(ctx: &mut WorkflowContext<Self>) -> WorkflowResult<()> {
         let tenant_id = ctx.state(|state| state.tenant_id.clone());
+        // Every step a tenant can have, in the only order they make sense in.
+        // A tenant without one — a created tenant has no `import`, an imported
+        // one no `owner` — completes it without running anything.
         for step in [
-            "database", "migrate", "render", "reload", "health", "routing", "owner",
+            "database", "migrate", "import", "render", "media", "reload", "health", "routing",
+            "owner",
         ] {
             loop {
                 let outcome = ctx
                     .execute_activity(
                         TenantActivities::provision_step,
                         format!("{tenant_id}:{step}"),
-                        ActivityOptions::with_start_to_close_timeout(Duration::from_secs(300))
-                            .build(),
+                        provision_step_options(step),
                     )
                     .await?;
                 match outcome {
@@ -464,7 +517,30 @@ pub async fn reconcile_starter(state: Shared) {
 
 #[cfg(test)]
 mod tests {
-    use super::lifecycle_request;
+    use super::{LONG_STEP_TIMEOUT, STEP_TIMEOUT, lifecycle_request, provision_step_options};
+    use temporalio_sdk::ActivityCloseTimeouts;
+
+    #[test]
+    fn only_the_steps_that_move_data_are_given_hours() {
+        for step in ["import", "media"] {
+            let options = provision_step_options(step);
+            assert_eq!(
+                options.close_timeouts,
+                ActivityCloseTimeouts::StartToClose(LONG_STEP_TIMEOUT)
+            );
+            // Hours without a heartbeat is also hours before a dead worker is
+            // noticed, which is the trade the heartbeat timeout undoes.
+            assert!(options.heartbeat_timeout.is_some());
+        }
+        for step in ["database", "migrate", "render", "reload", "health", "routing", "owner"] {
+            let options = provision_step_options(step);
+            assert_eq!(
+                options.close_timeouts,
+                ActivityCloseTimeouts::StartToClose(STEP_TIMEOUT)
+            );
+            assert!(options.heartbeat_timeout.is_none());
+        }
+    }
 
     #[test]
     fn lifecycle_requests_accept_only_known_operations_and_tenant_ids() {
@@ -493,7 +569,10 @@ mod tests {
 pub async fn provisioning_dispatcher(state: Shared) {
     loop {
         let queued = sqlx::query_as::<_, (Uuid, String, Uuid)>(
-            "SELECT d.tenant_id,d.workflow_id,d.id FROM temporal_dispatches d JOIN tenants t ON t.id=d.tenant_id WHERE d.delivered_at IS NULL AND d.workflow_kind='provision' AND t.lifecycle_state='provisioning' AND EXISTS(SELECT 1 FROM tenant_domains h WHERE h.tenant_id=d.tenant_id AND h.status='active') ORDER BY d.created_at LIMIT 10",
+            // A created tenant waits for a hostname to be routed before any of
+            // it exists. An imported one has to be set up before its hostname
+            // moves, because the move is the cutover onto it.
+            "SELECT d.tenant_id,d.workflow_id,d.id FROM temporal_dispatches d JOIN tenants t ON t.id=d.tenant_id WHERE d.delivered_at IS NULL AND d.workflow_kind='provision' AND t.lifecycle_state='provisioning' AND (EXISTS(SELECT 1 FROM tenant_domains h WHERE h.tenant_id=d.tenant_id AND h.status='active') OR EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=d.tenant_id)) ORDER BY d.created_at LIMIT 10",
         )
         .fetch_all(&state.db)
         .await;

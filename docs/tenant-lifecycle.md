@@ -10,6 +10,7 @@ stateDiagram-v2
 
     provisioning --> provisioning: wait for domain, routing, or capacity\nTemporal timer (30 s) or wake signal
     provisioning --> ready: database → migrate → render → reload → health → routing → owner
+    provisioning --> ready: imported: database → migrate → import → render → media → reload → health → routing
     provisioning --> failed: terminal provisioning step failure
     failed --> provisioning: explicit retry
 
@@ -29,11 +30,39 @@ stateDiagram-v2
     purged --> [*]
 ```
 
+## One list of steps, two kinds of tenant
+
+The workflow iterates every step a tenant can have, in the only order they make
+sense in. A tenant without one completes it without running anything: a created
+tenant has no `import` or `media`, and an imported one has no `owner`, because
+its owner account arrived with its database. Which steps a tenant has is decided
+once, in PostgreSQL, when it is created or imported.
+
+Adding a step to that list changes what a replay of an already-running
+provision workflow expects. A workflow parked in a wait — the common long-lived
+case, an instance whose custom domain has not validated — is unaffected, because
+nothing after the step it is waiting on has run yet. One that is midway through
+its steps at the moment the control plane restarts is not: deploy while no
+tenant is actively provisioning, or expect that workflow to need a retry.
+
+The two kinds also wait for opposite things. A created instance with a custom
+domain provisions nothing until that domain validates, so an instance whose
+domain never validates leaves nothing behind. An imported instance is restored,
+rendered, served and checked *first*, and waits only at `routing` — because its
+domain is already serving somewhere else, and moving it is the cutover. The
+health check reaches the runtime directly with a `Host` header, so it proves the
+instance works before any public DNS points at it.
+
 ## Durable waiting and retrying
 
 - A provision step that is not ready returns a durable wait outcome. Temporal
   persists a 30-second timer and rechecks that same step; earlier completed
   steps are skipped idempotently.
+- `import` and `media` are bounded by how much of somebody's server there is
+  rather than by work, so they are given twelve hours instead of five minutes
+  and heartbeat every twenty seconds. The heartbeat is what keeps a long
+  deadline from also being how long a crashed worker goes unnoticed: a step
+  that goes quiet for two minutes gives up that attempt.
 - A domain activation or lifecycle change sends a best-effort Temporal signal
   to wake the provision workflow immediately. Missing a signal is safe because
   the persisted timer remains.

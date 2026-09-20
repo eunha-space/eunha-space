@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { ExternalLink, FileCog, Globe, HardDrive, HeartPulse, Inbox, Plus, PowerOff, RefreshCw, RotateCcw, RotateCw, Trash2 } from "lucide-react";
+import { Download, ExternalLink, FileCog, Globe, HardDrive, HeartPulse, Inbox, Plus, PowerOff, RefreshCw, RotateCcw, RotateCw, Trash2 } from "lucide-react";
 import { api, instanceAddress, isOffline, pendingRender, type Runtime, type Tenant, type TenantDomain } from "@/api";
 import { absoluteTime, relativeTime } from "@/format";
 import { Badge } from "@/components/ui/badge";
@@ -165,6 +165,7 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <CreateTenantDialog runtimes={runtimes} busy={busy === "create-tenant"} act={act} />
+            <ImportTenantDialog runtimes={runtimes} busy={busy === "import-tenant"} act={act} />
             <div className="flex items-center gap-2">
               <Switch
                 id="group-by-instance"
@@ -243,6 +244,11 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                     <span className="text-muted-foreground truncate text-xs" title={tenant.title}>
                       {tenant.title}
                     </span>
+                    {tenant.imported && (
+                      <RowBadge className="text-muted-foreground" title="Taken over from an existing Mastodon instance; its database and media predate the platform.">
+                        Imported
+                      </RowBadge>
+                    )}
                     {pendingRender(tenant) && (
                       <RowBadge className="border-pending/40 bg-pending/10 text-pending">
                         Pending render
@@ -509,6 +515,110 @@ function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
             <div className="flex items-center justify-between gap-4"><Label htmlFor="approval-required">Require approval</Label><Switch id="approval-required" checked={approvalRequired} onCheckedChange={setApprovalRequired} /></div>
           </div>
           <DialogFooter><Button type="submit" disabled={busy || !selectedRuntime}>{busy ? "Provisioning…" : "Provision tenant"}</Button></DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Take over an existing Mastodon instance.
+ *
+ * Almost every field here exists because the instance already has data that
+ * depends on it. The encryption secrets are what its accounts' signing keys are
+ * encrypted with, the VAPID keypair is the one its subscribers already hold,
+ * and its media has to keep the addresses it has already handed out. Generating
+ * any of these afresh would produce a server that cannot sign, cannot push, and
+ * shows no pictures — so they are asked for rather than made.
+ */
+function ImportTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy: boolean; act: Props["act"] }) {
+  const [open, setOpen] = useState(false);
+  const [domain, setDomain] = useState("");
+  const [title, setTitle] = useState("");
+  const [email, setEmail] = useState("");
+  const [runtimeId, setRuntimeId] = useState("");
+  const [dumpPath, setDumpPath] = useState("");
+  const [mediaPath, setMediaPath] = useState("");
+  const [ownerUsername, setOwnerUsername] = useState("");
+  const [encryptionKey, setEncryptionKey] = useState("");
+  const [encryptionSalt, setEncryptionSalt] = useState("");
+  const [vapidPrivate, setVapidPrivate] = useState("");
+  const [vapidPublic, setVapidPublic] = useState("");
+  const selectedRuntime = runtimeId || runtimes[0]?.id || "";
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    const ok = await act("/tenants/import", "import-tenant", {
+      domain, title, contact_email: email || null, runtime_id: selectedRuntime,
+      dump_path: dumpPath, media_path: mediaPath || null,
+      owner_username: ownerUsername || null,
+      active_record_encryption_primary_key: encryptionKey,
+      active_record_encryption_key_derivation_salt: encryptionSalt,
+      vapid_private_key: vapidPrivate || null, vapid_public_key: vapidPublic || null,
+    });
+    if (ok) {
+      setOpen(false);
+      setDomain(""); setTitle(""); setEmail(""); setDumpPath(""); setMediaPath("");
+      setOwnerUsername(""); setEncryptionKey(""); setEncryptionSalt("");
+      setVapidPrivate(""); setVapidPublic("");
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger render={<Button variant="outline" />}><Download />Import instance</DialogTrigger>
+      <DialogContent className="max-h-[85vh] overflow-y-auto">
+        <form onSubmit={submit} className="grid gap-5">
+          <DialogHeader>
+            <DialogTitle>Import a Mastodon instance</DialogTitle>
+            <DialogDescription>The instance is restored, served and health-checked before its domain moves, because moving its domain is the cutover. It goes live when its DNS points here and Cloudflare validates the hostname, not before.</DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4">
+            <div className="grid gap-2">
+              <Label htmlFor="import-domain">Instance domain</Label>
+              <Input id="import-domain" value={domain} onChange={(e) => setDomain(e.target.value.toLowerCase())} placeholder="seoul.earth" required />
+              <p className="text-muted-foreground text-xs">It keeps this domain. Its accounts&rsquo; identity is on it and remote servers know them there, so an import is never also a move.</p>
+            </div>
+            <div className="grid gap-2"><Label htmlFor="import-title">Name</Label><Input id="import-title" value={title} onChange={(e) => setTitle(e.target.value)} required /></div>
+            <div className="grid gap-2"><Label htmlFor="import-email">Contact email</Label><Input id="import-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
+            <div className="grid gap-2"><Label htmlFor="import-runtime">Runtime</Label><select id="import-runtime" className="border-input bg-background h-9 rounded-md border px-3 text-sm" value={selectedRuntime} onChange={(e) => setRuntimeId(e.target.value)} required>{runtimes.map((runtime) => <option key={runtime.id} value={runtime.id}>{runtime.instance_name} / {runtime.name}</option>)}</select></div>
+            <Separator />
+            <div className="grid gap-2">
+              <Label htmlFor="import-dump">Database dump</Label>
+              <Input id="import-dump" value={dumpPath} onChange={(e) => setDumpPath(e.target.value)} placeholder="/srv/imports/seoul.earth.custom" pattern="/[A-Za-z0-9._/-]+" required />
+              <p className="text-muted-foreground text-xs">An absolute path on the runtime host to a <code>pg_dump -Fc</code> of the instance, taken from the Mastodon release this fleet builds.</p>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="import-media">Media directory</Label>
+              <Input id="import-media" value={mediaPath} onChange={(e) => setMediaPath(e.target.value)} placeholder="/srv/imports/seoul.earth/system" pattern="/[A-Za-z0-9._/-]+" />
+              <p className="text-muted-foreground text-xs">The instance&rsquo;s <code>public/system</code> tree, staged beside the dump. Its own files are uploaded; its cache of other servers&rsquo; media is left behind and fetched again on demand. Leave empty for an instance whose storage goes on serving its media where it is.</p>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="import-owner">Admin username</Label>
+              <Input id="import-owner" value={ownerUsername} onChange={(e) => setOwnerUsername(e.target.value)} placeholder="admin" pattern="[A-Za-z0-9_]{1,30}" />
+              <p className="text-muted-foreground text-xs">An account that already exists in the dump. Recorded, not created.</p>
+            </div>
+            <Separator />
+            <div className="grid gap-2">
+              <Label htmlFor="import-encryption-key">ActiveRecord encryption key</Label>
+              <Input id="import-encryption-key" value={encryptionKey} onChange={(e) => setEncryptionKey(e.target.value)} autoComplete="off" required />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="import-encryption-salt">ActiveRecord key derivation salt</Label>
+              <Input id="import-encryption-salt" value={encryptionSalt} onChange={(e) => setEncryptionSalt(e.target.value)} autoComplete="off" required />
+              <p className="text-muted-foreground text-xs">The source instance&rsquo;s own. Its accounts&rsquo; signing keys are encrypted with these, and without them it cannot sign anything it federates.</p>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="import-vapid-private">VAPID private key</Label>
+              <Input id="import-vapid-private" value={vapidPrivate} onChange={(e) => setVapidPrivate(e.target.value)} autoComplete="off" />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="import-vapid-public">VAPID public key</Label>
+              <Input id="import-vapid-public" value={vapidPublic} onChange={(e) => setVapidPublic(e.target.value)} autoComplete="off" />
+              <p className="text-muted-foreground text-xs">Both or neither. Leaving them empty generates a new pair, which silently ends every Web Push subscription the instance has handed out.</p>
+            </div>
+          </div>
+          <DialogFooter><Button type="submit" disabled={busy || !selectedRuntime}>{busy ? "Importing…" : "Import instance"}</Button></DialogFooter>
         </form>
       </DialogContent>
     </Dialog>

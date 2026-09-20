@@ -181,9 +181,75 @@ cargo run -- set-operator admin
 unset EUNHA_SPACE_ADMIN_PASSWORD
 ```
 
-The import command records an existing instance and its complete configuration
-without changing any runtime file or process. Secret values remain server-side;
-the console APIs return only operational metadata.
+## Importing an existing Mastodon instance
+
+**Import instance** in `/admin` takes over a server that already exists, rather
+than creating one. It is operator-only: an import handles a customer's database
+dump and the secrets their data is encrypted with, and a mistimed cutover is not
+undoable.
+
+Creation mints a tenant — an unused domain, an empty database, fresh secrets,
+and an Owner account made at the end. An import inherits one, and nearly every
+difference follows from that:
+
+- **It keeps its domain.** Its accounts' ActivityPub identity is on it and
+  remote servers know them there, so an import is never also a move. The domain
+  is always the customer's own, never a `*.eunha.space` hostname.
+- **It brings its secrets.** `ACTIVE_RECORD_ENCRYPTION_PRIMARY_KEY` and
+  `..._KEY_DERIVATION_SALT` are required, because the instance's local signing
+  keys are encrypted with them and a server that cannot decrypt them cannot
+  sign anything it federates. The VAPID keypair is optional and generated when
+  absent, which silently ends every Web Push subscription the instance has
+  handed out — so it is both halves or neither.
+- **It has no owner step.** The admin username names an account already in the
+  dump; it is recorded, never created.
+- **It is set up before its domain moves.** A created instance provisions
+  nothing until its domain validates, so an abandoned one leaves nothing behind.
+  An imported one would then be waiting for a cutover onto a server with no data
+  on it, so it is restored, rendered, served and health-checked first — against
+  the runtime directly, which needs no public DNS — and becomes `ready` only
+  once the customer repoints DNS and Cloudflare validates the hostname. The
+  seven-day custom-domain window does not apply to it.
+
+The dump and the media are staged on the runtime host as absolute paths, and the
+runtime's own binary does the work, because it is what knows which Mastodon
+release this fleet builds:
+
+```
+database → migrate → import → render → media → reload → health → routing
+```
+
+`import` runs `eunha import-mastodon`, which refuses a dump from another
+Mastodon release, a database that is not empty, and data belonging to a
+different instance. It connects as `CONTROL_PROVISION_DATABASE_URL`, which for
+imports must be a superuser: a data-only restore loads through the schema's
+foreign keys and only a superuser may disable them.
+
+`media` runs `eunha import-media` over the instance's `public/system` tree,
+which uploads under the tenant's own `t/<tenant id>` storage prefix. The
+instance's own files move; its cache of other servers' avatars, attachments,
+emojis and link previews does not, since that is fetched again when missing and
+is usually most of the bytes. A retry asks for each object before sending it, so
+an upload that stopped partway resumes cheaply. Omit the media path for an
+instance whose existing object storage goes on serving its media, and give that
+storage's bucket and credentials instead; nothing provisions it and the purge
+refuses to delete from it.
+
+Both steps are given hours rather than the usual five minutes, and heartbeat
+while they run so a dead worker is still noticed in two minutes. What they
+report — the domain the data was proved to belong to, row counts, file counts,
+the storage prefix — is kept on the tenant and written to the operation log.
+Only counts, a domain and a storage prefix are kept from their output, so
+nothing else can accumulate there.
+
+A purge treats an imported tenant like any other except where the evidence says
+a resource was never ours: its database and role must carry the names
+provisioning derives from the tenant id, and its media must be under the
+tenant's own prefix. Storage the instance brought with it is left in place and
+noted on the operation.
+
+Secret values remain server-side; the console APIs return only operational
+metadata.
 
 ## Reconciliation
 
