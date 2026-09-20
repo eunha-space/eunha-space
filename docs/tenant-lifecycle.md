@@ -42,6 +42,42 @@ stateDiagram-v2
 - Long-running provision workflows use continue-as-new after 240 timed waits,
   preventing unbounded workflow histories.
 
+## Keeping a ready tenant on its configuration
+
+The lifecycle workflows above each run once and end. One workflow does not:
+`RuntimeReconcileWorkflow` exists for as long as its runtime does, and is what
+makes a configuration change reach a tenant that is already serving.
+
+Every write to `tenant_configuration` bumps the tenant's `config_revision`
+through a database trigger, and a render records the revision it came from in
+`rendered_revision`. The two differing is the only definition of drift. Once a
+minute the workflow renders every ready tenant on its runtime whose revisions
+differ, then reloads the runtime once for all of them — a reload makes the
+runtime re-read its whole tenants directory, so a fleet that drifted together
+costs one signal — and health-checks each tenant it touched.
+
+The workflow ID is fixed per runtime, `runtime-reconcile-v1-<runtime id>`, so
+the server refuses a duplicate and only one pass is ever in flight. The starter
+asserts the workflow exists rather than queueing work for it, which is why
+reconciliation has no outbox row: it is a controller, not an operation.
+
+What it will not touch:
+
+- A tenant that is not `ready` and `running`. One still provisioning has its own
+  workflow rendering and reloading it; a retained or purging one was taken off
+  disk deliberately.
+- A runtime on another host. Only the control plane named by
+  `CONTROL_RUNTIME_HOST` reconciles a runtime, and the render refuses anyway.
+- A tenant that has failed five consecutive passes. The count and the reason sit
+  on the tenant row, and an operator's render clears both.
+
+A failed render does not hold back the reload for the rest of the runtime. A
+failed reload does: every tenant rendered in that pass gives up its
+`rendered_revision`, because a render that recorded its revision would leave no
+drift for the next pass to find. Each pass writes one `reconcile` operation per
+tenant, with no `requested_by`, which is what tells it apart from an operator's
+render in the operations log.
+
 ## Watching an execution
 
 The tenant inventory in `/admin` shows the durable workflow kind and the step

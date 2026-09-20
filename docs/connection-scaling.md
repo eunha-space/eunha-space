@@ -105,9 +105,14 @@ re-parses when it is working.
 | Pool sizes, poll intervals, tenant URLs | `tenant_configuration` in PostgreSQL |
 | Pooler address, its client slots | The control-plane LaunchAgent, not the repository |
 
-A `tenant_configuration` change does not reach a running tenant on its own.
-Nothing reconciles rendered files, so every live tenant needs an explicit render
-from `/admin` before a new pool size or poll interval takes effect.
+A `tenant_configuration` change reaches a running tenant within a minute. Every
+write to that table bumps the tenant's `config_revision`, and a render records
+the revision it came from in `rendered_revision`; a reconcile workflow per
+runtime renders whatever differs and reloads the runtime once for all of them.
+An operator's render in `/admin` is now a way to skip the wait, not the only
+way it happens. A tenant whose render keeps failing is retired from the loop
+after five attempts, with the reason on the tenant row, and an explicit render
+puts it back.
 
 ## Reading the fleet
 

@@ -808,6 +808,7 @@ async fn main() -> Result<()> {
         }
         tokio::spawn(temporal::provisioning_dispatcher(state.clone()));
         tokio::spawn(temporal::lifecycle_dispatcher(state.clone()));
+        tokio::spawn(temporal::reconcile_starter(state.clone()));
     } else {
         tracing::warn!("Temporal is not configured; tenant lifecycle work will remain queued");
     }
@@ -4749,6 +4750,150 @@ async fn health_reconciler(state: Shared) {
 /// How long between health sweeps over every running tenant.
 const HEALTH_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 
+/// How many consecutive failed reconciliations retire a tenant from the loop.
+/// A render that cannot succeed — an invalid stored domain, a runtime
+/// directory that is gone — would otherwise be retried on every pass forever,
+/// and the fault needs an operator either way.
+const RECONCILE_GIVE_UP_AFTER: i32 = 5;
+
+/// The runtimes this control plane is allowed to reconcile: the ones on the
+/// host it was configured to manage. A runtime elsewhere has its own control
+/// plane, and `render_provisioned_tenant` refuses it anyway.
+pub(crate) async fn local_runtimes(state: &Shared) -> Result<Vec<Uuid>> {
+    let configured_host = std::env::var("CONTROL_RUNTIME_HOST").unwrap_or_default();
+    if configured_host.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        "SELECT r.id FROM runtimes r JOIN instances i ON i.id=r.instance_id WHERE i.address=$1 ORDER BY r.name",
+    )
+    .bind(configured_host)
+    .fetch_all(&state.db)
+    .await?)
+}
+
+/// One reconciliation pass over a runtime: render every tenant whose stored
+/// configuration is newer than the file on disk, reload the runtime once for
+/// all of them, and check that each one came back.
+///
+/// Rendering is per tenant; reloading is not. A reload makes the runtime
+/// re-read its whole tenants directory and apply what changed, so a fleet that
+/// drifted together costs one signal rather than one per tenant. Migration 037
+/// changed every tenant's pool size at once, which is the case this has to
+/// survive.
+///
+/// Returns how many tenants were brought back to their stored configuration.
+pub(crate) async fn reconcile_runtime_drift(state: &Shared, runtime_id: Uuid) -> Result<usize> {
+    let configured_host = std::env::var("CONTROL_RUNTIME_HOST").unwrap_or_default();
+    if configured_host.is_empty() {
+        return Ok(0);
+    }
+    // Only a tenant that has finished provisioning and is meant to be running.
+    // One still provisioning has a workflow of its own rendering and reloading
+    // it, and a retained or purging one was taken off disk deliberately.
+    let drifted = sqlx::query_as::<_, (Uuid, i64)>(
+        "SELECT t.id,t.config_revision FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id WHERE t.runtime_id=$1 AND i.address=$2 AND t.lifecycle_state='ready' AND t.desired_state='running' AND t.reconcile_failures<$3 AND (t.rendered_revision IS NULL OR t.rendered_revision<t.config_revision) ORDER BY t.created_at",
+    )
+    .bind(runtime_id)
+    .bind(&configured_host)
+    .bind(RECONCILE_GIVE_UP_AFTER)
+    .fetch_all(&state.db)
+    .await?;
+    if drifted.is_empty() {
+        return Ok(0);
+    }
+
+    // A tenant that cannot be rendered must not hold back the reload for the
+    // others on the runtime, so a failure is recorded and the pass carries on
+    // with whatever did render.
+    let mut rendered = Vec::new();
+    for (tenant_id, revision) in drifted {
+        let operation = start_reconcile_operation(&state.db, tenant_id).await;
+        match render_provisioned_tenant(state, tenant_id).await {
+            Ok(()) => rendered.push((tenant_id, revision, operation)),
+            Err(error) => {
+                record_reconcile_failure(&state.db, tenant_id, operation, &format!("{error:#}"))
+                    .await
+            }
+        }
+    }
+    let Some(&(first, _, _)) = rendered.first() else {
+        return Ok(0);
+    };
+
+    if let Err(error) = reload_provisioned_runtime(state, first).await {
+        let message =
+            format!("Configuration rendered, but the runtime could not be reloaded: {error:#}");
+        for (tenant_id, _, operation) in rendered {
+            // The file is ahead of what the runtime is serving, and a render
+            // that recorded its revision leaves no drift for the next pass to
+            // find. Give the revision up so this tenant is tried again.
+            let _ = sqlx::query("UPDATE tenants SET rendered_revision=NULL,updated_at=now() WHERE id=$1")
+                .bind(tenant_id)
+                .execute(&state.db)
+                .await;
+            record_reconcile_failure(&state.db, tenant_id, operation, &message).await;
+        }
+        return Ok(0);
+    }
+
+    // The reload succeeded, so every file on disk is what the runtime read. A
+    // tenant that is unwell past that point has a fault a re-render will not
+    // fix, and the health sweep owns saying so; the revision stays recorded.
+    let mut converged = 0;
+    for (tenant_id, revision, operation) in rendered {
+        match healthcheck_provisioned_tenant(state, tenant_id).await {
+            Ok(()) => {
+                finish_reconcile_operation(&state.db, tenant_id, operation, revision).await;
+                converged += 1;
+            }
+            Err(error) => {
+                record_reconcile_failure(
+                    &state.db,
+                    tenant_id,
+                    operation,
+                    &format!("Configuration rendered and reloaded, but the tenant did not become healthy: {error:#}"),
+                )
+                .await
+            }
+        }
+    }
+    Ok(converged)
+}
+
+async fn start_reconcile_operation(db: &PgPool, tenant_id: Uuid) -> Uuid {
+    let id = Uuid::new_v4();
+    // No `requested_by`: nobody asked for this one, which is what tells it
+    // apart from an operator's render in the operations log.
+    let _ = sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,started_at) VALUES($1,$2,'reconcile','running',now())")
+        .bind(id)
+        .bind(tenant_id)
+        .execute(db)
+        .await;
+    id
+}
+
+async fn record_reconcile_failure(db: &PgPool, tenant_id: Uuid, operation: Uuid, message: &str) {
+    mark_operation_failed(db, operation, message).await;
+    let _ = sqlx::query("UPDATE tenants SET reconcile_failures=reconcile_failures+1,reconcile_error=$1,updated_at=now() WHERE id=$2")
+        .bind(message)
+        .bind(tenant_id)
+        .execute(db)
+        .await;
+}
+
+async fn finish_reconcile_operation(db: &PgPool, tenant_id: Uuid, operation: Uuid, revision: i64) {
+    let _ = sqlx::query("UPDATE operations SET status='succeeded',detail=jsonb_build_object('revision',$1),finished_at=now() WHERE id=$2")
+        .bind(revision)
+        .bind(operation)
+        .execute(db)
+        .await;
+    let _ = sqlx::query("UPDATE tenants SET reconcile_failures=0,reconcile_error=NULL WHERE id=$1 AND reconcile_failures>0")
+        .bind(tenant_id)
+        .execute(db)
+        .await;
+}
+
 fn is_safe_domain(domain: &str) -> bool {
     !domain.is_empty()
         && domain.len() <= 253
@@ -5035,7 +5180,9 @@ async fn render_tenant(
         ));
     }
     let checksum = format!("{:x}", Sha256::digest(rendered_config.as_bytes()));
-    sqlx::query("UPDATE tenants SET rendered_revision=$1,rendered_checksum=$2,observed_state='healthy',observed_at=now(),observation_error=NULL,updated_at=now() WHERE id=$3")
+    // An operator's render is also how a tenant the reconciler retired after
+    // repeated failures rejoins the loop.
+    sqlx::query("UPDATE tenants SET rendered_revision=$1,rendered_checksum=$2,observed_state='healthy',observed_at=now(),observation_error=NULL,reconcile_failures=0,reconcile_error=NULL,updated_at=now() WHERE id=$3")
         .bind(revision).bind(checksum).bind(id).execute(&s.db).await?;
     sqlx::query("UPDATE operations SET status='succeeded',detail=jsonb_build_object('revision',$1),finished_at=now() WHERE id=$2")
         .bind(revision).bind(op).execute(&s.db).await?;
