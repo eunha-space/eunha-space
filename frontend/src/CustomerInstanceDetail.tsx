@@ -43,6 +43,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Spinner } from "@/components/console/status";
+import { CustomerDomainChange } from "@/CustomerDomainChange";
 
 // Provisioning is tracked step by step, but a customer only needs the shape of
 // the wait, not the mechanics — and the routing step in particular reads as
@@ -184,6 +185,16 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
               />
             )
             : null;
+          const move = setupDone || detail.domain_change
+            ? (
+              <CustomerDomainChange
+                key="move"
+                tenant={detail.tenant}
+                change={detail.domain_change}
+                onChanged={() => setRevision((value) => value + 1)}
+              />
+            )
+            : null;
           const account = accountReady && detail.tenant.owner_username
             ? (
               <AdminAccount
@@ -199,8 +210,12 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
           // Whatever the customer needs most goes first: their account once
           // there is one, their DNS while it holds everything up, otherwise
           // the progress of the setup they are waiting on.
+          // A move under way is what the customer is watching.
+          if (detail.domain_change?.status === "running") {
+            return [move, domain, account, setup];
+          }
           return setupDone
-            ? [account, domain, setup]
+            ? [account, move, domain, setup]
             : waitingForDomain
             ? [domain, setup, account]
             : [setup, domain, account];
@@ -612,7 +627,7 @@ function CustomDomainSetup(
       <CardHeader>
         <CardTitle>{t("Custom domain setup")}</CardTitle>
         <CardDescription>
-          {t("Custom domains can only be added when creating an instance.")}
+          {t("Keep each domain's DNS record in place for as long as it is connected.")}
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-5">
@@ -644,7 +659,7 @@ function CustomDomainSetup(
             )}
             {domain.status === "removing" && (
               <p className="text-muted-foreground text-sm">
-                {t("This domain wasn't connected in time and is being released.")}
+                {t("This domain is being released.")}
               </p>
             )}
             {domain.status === "pending" && (

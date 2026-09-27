@@ -107,6 +107,52 @@ drift for the next pass to find. Each pass writes one `reconcile` operation per
 tenant, with no `requested_by`, which is what tells it apart from an operator's
 render in the operations log.
 
+## Changing a ready tenant's domain
+
+A tenant's accounts are ActivityPub actors under its domain, so moving it to
+another domain is a migration rather than a setting. Until eunha could send
+Moves, a custom domain verified after the tenant had accounts only ever became
+an alias. Now a customer or an operator can move a ready tenant to a provided
+subdomain or a custom domain, and `TenantDomainChangeWorkflow` walks it through
+six steps, recorded in `domain_changes`:
+
+1. **attach**: the new hostname, with its provided siblings, is added as a
+   pending domain and as an alias, so it is served and can be checked before
+   anything else changes. The domain reconciler validates it through Cloudflare
+   as it does any other. The change waits here, for up to seven days for a
+   custom domain, and can be cancelled until it moves on; nothing about the
+   tenant has changed yet, so a cancelled or failed attach leaves it where it
+   was.
+2. **rename**: `eunha rename-domain` rewrites the addresses the tenant has
+   handed out under the old domain (its accounts', its posts', its follows').
+   Without it, the new domain would serve posts claiming to be from the old
+   one, which other servers refuse.
+3. **switch**: the new hostname becomes primary, the old one leaves the
+   configuration and joins `previous_domains`, and the tenant is rendered,
+   reloaded and health-checked under the new domain alone. The old domain stops
+   answering here, on purpose.
+4. **move**: `eunha accounts move --from OLD --all` queues, as one batch, a Move
+   from every account's old actor to its new one for its followers, signed with
+   the old key id, which their servers already hold, and a Follow from every
+   new actor to whoever the account followed, whose servers would otherwise go
+   on delivering to the old one. Each actor names its old self in
+   `alsoKnownAs`, because `previous_domains` is rendered into eunha's
+   configuration, and that is what a server checks before it honours a Move.
+5. **deliver**: the batch is followed with `eunha accounts batch-status` every 30
+   seconds until nothing in it is pending. A server that has not taken its
+   delivery within twelve hours is given up on, so the change always finishes;
+   how many were given up on is recorded, and their users can follow again by
+   hand.
+6. **release**: the old hostnames are taken off Cloudflare. A provided subdomain
+   the tenant had is reserved, not freed: whoever took it next would answer for
+   the old actors, to any server that missed the Move.
+
+A step that fails after `attach` leaves the tenant part-way moved, and the
+change `failed` for an operator. Every step can run again (the rename is a
+no-op the second time, and the Moves are not resent once their batch is
+recorded), so **Retry** in the console's domains dialog continues from the step
+that failed.
+
 ## Watching an execution
 
 The tenant inventory in `/admin` shows the durable workflow kind and the step

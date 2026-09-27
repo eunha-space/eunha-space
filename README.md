@@ -67,10 +67,14 @@ EUNHA_SPACE_PUBLIC_URL=https://eunha.space
 ```
 
 Customers may choose one custom hostname, and only while creating an instance.
-Neither customers nor operators can attach a domain to an existing instance,
-because an instance's accounts fix its ActivityPub identity to its primary
-domain. The create form asks for the CNAME to `customers.eunha.space` before
-creation and checks it through DNS-over-HTTPS, warning without blocking.
+An instance's accounts fix its ActivityPub identity to its primary domain, so
+a running instance moves to another domain rather than adding one: its
+addresses are rewritten, it is served under the new domain alone, and every
+account's followers are sent a Move. Customers and operators start a move from
+the instance's page or the console's domains dialog; *docs/tenant-lifecycle.md*
+has the steps. The create form asks for the CNAME to `customers.eunha.space`
+before creation and checks it through DNS-over-HTTPS, warning without
+blocking.
 
 An instance lives either at a `*.eunha.space` hostname or at the customer's
 own domain, never both. With a custom domain, that domain is the instance's
@@ -165,8 +169,9 @@ process-only. Each hostname is registered with its tenant runtime's
 customers are instructed to CNAME to `customers.eunha.space`, configurable with
 `CLOUDFLARE_SAAS_CNAME_TARGET`. Cloudflare IDs, activation state, and public
 DNS validation instructions are stored, but the token is not. A custom domain
-becomes canonical only before a local account exists; one that verifies later
-becomes an alias and does not change the ActivityPub identity. An alias is
+chosen at creation becomes canonical only before a local account exists; one
+that verifies later becomes an alias and does not change the ActivityPub
+identity. A domain change is the way to move that identity. An alias is
 health-checked by confirming that it reaches the tenant, which reports its
 primary domain. Set `CLOUDFLARE_API_BASE` to point the custom-hostname API at a
 local stand-in for testing; it defaults to `https://api.cloudflare.com/client/v4`.

@@ -95,6 +95,31 @@ impl TenantActivities {
         }
     }
 
+    /// One step of a domain change, heartbeating for as long as it takes:
+    /// queueing every account's Moves is bounded by how many accounts there
+    /// are.
+    #[activity]
+    async fn domain_change_step(
+        self: Arc<Self>,
+        ctx: ActivityContext,
+        request: String,
+    ) -> Result<ProvisionStepOutcome, ActivityError> {
+        let (tenant_id, step) = request
+            .split_once(':')
+            .ok_or_else(|| ActivityError::from(anyhow::anyhow!("invalid domain change step")))?;
+        let tenant_id = Uuid::parse_str(tenant_id).map_err(ActivityError::from)?;
+        let work = crate::domain_change::step(&self.state, tenant_id, step);
+        tokio::pin!(work);
+        loop {
+            tokio::select! {
+                outcome = &mut work => return Ok(outcome),
+                _ = tokio::time::sleep(HEARTBEAT_INTERVAL) => {
+                    let _ = ctx.record_heartbeat(()).await;
+                }
+            }
+        }
+    }
+
     #[activity]
     async fn finish_provision(
         self: Arc<Self>,
@@ -256,6 +281,70 @@ impl TenantProvisionWorkflow {
     }
 }
 
+/// Moves a served instance to another domain, one step at a time. The same
+/// shape as provisioning: each step either completes, asks to wait, or ends
+/// the change; waiting is a durable timer, and a step that is re-run after a
+/// restart finds its own work already done.
+#[workflow]
+struct TenantDomainChangeWorkflow {
+    tenant_id: String,
+    wait_attempts: u16,
+}
+
+#[workflow_methods]
+impl TenantDomainChangeWorkflow {
+    #[init]
+    fn new(_ctx: &WorkflowContextView, tenant_id: String) -> Self {
+        Self {
+            tenant_id,
+            wait_attempts: 0,
+        }
+    }
+
+    #[run]
+    async fn run(ctx: &mut WorkflowContext<Self>) -> WorkflowResult<()> {
+        let tenant_id = ctx.state(|state| state.tenant_id.clone());
+        for step in crate::domain_change::STEPS {
+            loop {
+                let outcome = ctx
+                    .execute_activity(
+                        TenantActivities::domain_change_step,
+                        format!("{tenant_id}:{step}"),
+                        ActivityOptions::with_start_to_close_timeout(DOMAIN_CHANGE_STEP_TIMEOUT)
+                            .heartbeat_timeout(LONG_STEP_HEARTBEAT_TIMEOUT)
+                            .build(),
+                    )
+                    .await?;
+                match outcome {
+                    ProvisionStepOutcome::Completed => break,
+                    ProvisionStepOutcome::Wait => {
+                        let wait_attempts = ctx.state_mut(|state| {
+                            state.wait_attempts += 1;
+                            state.wait_attempts
+                        });
+                        ctx.timer(Duration::from_secs(30)).await;
+                        // Waiting for a domain to connect, or for a batch of
+                        // Moves to be delivered, can take days and hours; the
+                        // history is cut rather than grown.
+                        if wait_attempts >= 240 {
+                            ctx.continue_as_new(
+                                tenant_id.clone(),
+                                ContinueAsNewOptions::default(),
+                            )?;
+                        }
+                    }
+                    ProvisionStepOutcome::Halted | ProvisionStepOutcome::Failed => return Ok(()),
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// A domain change step's longest run: queueing the Moves of an instance
+/// with many accounts.
+const DOMAIN_CHANGE_STEP_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+
 /// A controller for one runtime, not a unit of work for one tenant.
 ///
 /// PostgreSQL holds what a tenant's configuration should be and the rendered
@@ -384,6 +473,7 @@ pub async fn run_worker(state: Shared) -> Result<()> {
         .register_workflow::<TenantProvisionWorkflow>()?
         .register_workflow::<TenantLifecycleWorkflow>()?
         .register_workflow::<RuntimeReconcileWorkflow>()?
+        .register_workflow::<TenantDomainChangeWorkflow>()?
         .build();
     let mut worker = Worker::new(&runtime, client, worker_options)?;
     tracing::info!(task_queue = TASK_QUEUE, "Temporal worker polling");
@@ -470,6 +560,46 @@ pub async fn lifecycle_dispatcher(state: Shared) {
     }
 }
 
+/// Starts a workflow per queued domain change.
+pub async fn domain_change_dispatcher(state: Shared) {
+    loop {
+        let queued = sqlx::query_as::<_, (Uuid, String, Uuid)>(
+            "SELECT d.tenant_id,d.workflow_id,d.id FROM temporal_dispatches d WHERE d.delivered_at IS NULL AND d.workflow_kind='domain_change' ORDER BY d.created_at LIMIT 10",
+        )
+        .fetch_all(&state.db)
+        .await;
+        match queued {
+            Ok(changes) if !changes.is_empty() => match client().await {
+                Ok(client) => {
+                    for (tenant_id, workflow_id, dispatch_id) in changes {
+                        match client
+                            .start_workflow(
+                                TenantDomainChangeWorkflow::run,
+                                tenant_id.to_string(),
+                                WorkflowStartOptions::new(TASK_QUEUE, workflow_id).build(),
+                            )
+                            .await
+                        {
+                            Ok(_) => {
+                                let _ = sqlx::query("UPDATE temporal_dispatches SET delivered_at=now(),attempts=attempts+1,last_error=NULL WHERE id=$1").bind(dispatch_id).execute(&state.db).await;
+                            }
+                            Err(error) => {
+                                let _ = sqlx::query("UPDATE temporal_dispatches SET attempts=attempts+1,last_error=$1 WHERE id=$2").bind(error.to_string()).bind(dispatch_id).execute(&state.db).await;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "Temporal domain change dispatcher is unavailable")
+                }
+            },
+            Ok(_) => {}
+            Err(error) => tracing::warn!(error = %error, "could not read domain change work queue"),
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+}
+
 /// Keeps one reconcile workflow running per runtime on this host.
 ///
 /// Unlike the lifecycle dispatchers there is no outbox behind this: a
@@ -509,7 +639,9 @@ pub async fn reconcile_starter(state: Shared) {
                 }
             },
             Ok(_) => {}
-            Err(error) => tracing::warn!(error = %error, "could not read the runtimes to reconcile"),
+            Err(error) => {
+                tracing::warn!(error = %error, "could not read the runtimes to reconcile")
+            }
         }
         tokio::time::sleep(Duration::from_secs(60)).await;
     }
@@ -532,7 +664,9 @@ mod tests {
             // noticed, which is the trade the heartbeat timeout undoes.
             assert!(options.heartbeat_timeout.is_some());
         }
-        for step in ["database", "migrate", "render", "reload", "health", "routing", "owner"] {
+        for step in [
+            "database", "migrate", "render", "reload", "health", "routing", "owner",
+        ] {
             let options = provision_step_options(step);
             assert_eq!(
                 options.close_timeouts,

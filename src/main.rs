@@ -36,6 +36,7 @@ use tower_http::{
 };
 use uuid::Uuid;
 
+mod domain_change;
 mod temporal;
 
 // SQLx embeds the complete migration set in this binary at compile time.
@@ -412,6 +413,8 @@ struct CustomerTenantDetail {
     tenant: CustomerTenantInfo,
     domains: Vec<CustomerDomainSetup>,
     provisioning_steps: Vec<CustomerProvisioningStep>,
+    /// The instance's latest domain change, running or finished.
+    domain_change: Option<domain_change::DomainChangeSummary>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -521,6 +524,10 @@ struct InstanceToml {
     domain: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     aliases: Vec<String>,
+    /// Domains the instance had before, which its actors name in
+    /// `alsoKnownAs` for a Move from them to be honoured. Served on nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    previous_domains: Vec<String>,
     title: String,
     #[serde(default)]
     description: String,
@@ -642,6 +649,8 @@ struct StoredConfig {
 struct StoredTenant {
     domain: String,
     aliases: Vec<String>,
+    #[serde(default)]
+    previous_domains: Vec<String>,
     title: String,
     description: String,
     short_description: String,
@@ -737,6 +746,7 @@ fn typed_toml(
         instance: InstanceToml {
             domain: tenant.domain,
             aliases: tenant.aliases,
+            previous_domains: tenant.previous_domains,
             title: tenant.title,
             description: tenant.description,
             short_description: tenant.short_description,
@@ -886,6 +896,7 @@ async fn main() -> Result<()> {
         }
         tokio::spawn(temporal::provisioning_dispatcher(state.clone()));
         tokio::spawn(temporal::lifecycle_dispatcher(state.clone()));
+        tokio::spawn(temporal::domain_change_dispatcher(state.clone()));
         tokio::spawn(temporal::reconcile_starter(state.clone()));
     } else {
         tracing::warn!("Temporal is not configured; tenant lifecycle work will remain queued");
@@ -920,6 +931,14 @@ async fn main() -> Result<()> {
             post(customer_purge_instance),
         )
         .route("/customer/tenants/{id}/restore", post(customer_restore))
+        .route(
+            "/customer/tenants/{id}/domain-change",
+            post(domain_change::customer_start),
+        )
+        .route(
+            "/customer/tenants/{id}/domain-change/cancel",
+            post(domain_change::customer_cancel),
+        )
         .route("/customer/dns-check", get(customer_dns_check))
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/tenants/import", post(import_tenant))
@@ -929,6 +948,18 @@ async fn main() -> Result<()> {
         .route("/tenants/{id}/restore", post(restore_tenant))
         .route("/tenants/{id}/purge", post(purge_tenant))
         .route("/tenants/{id}/domains", get(tenant_domains))
+        .route(
+            "/tenants/{id}/domain-change",
+            get(domain_change::operator_latest).post(domain_change::operator_start),
+        )
+        .route(
+            "/tenants/{id}/domain-change/cancel",
+            post(domain_change::operator_cancel),
+        )
+        .route(
+            "/tenants/{id}/domain-change/retry",
+            post(domain_change::operator_retry),
+        )
         .route(
             "/tenants/{id}/domains/{domain_id}/cloudflare",
             post(adopt_legacy_domain),
@@ -1381,10 +1412,12 @@ async fn customer_tenant_detail(
         .bind(id)
         .fetch_all(&s.db)
         .await?;
+    let domain_change = domain_change::latest(&s.db, id).await?;
     Ok(Json(CustomerTenantDetail {
         tenant,
         domains,
         provisioning_steps,
+        domain_change,
     }))
 }
 async fn tenants(
@@ -1926,12 +1959,22 @@ async fn import_tenant(
         .bind(Uuid::new_v4()).bind(tenant_id).bind(&domain).bind(&cname_target).execute(&mut *tx).await
         .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenant_domains_hostname_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
     sqlx::query("INSERT INTO tenant_imports(tenant_id,dump_path,media_path) VALUES($1,$2,$3)")
-        .bind(tenant_id).bind(&dump_path).bind(&media_path).execute(&mut *tx).await
-        .map_err(|error| match error.as_database_error().and_then(|e| e.constraint()) {
-            Some("tenant_imports_dump_path_absolute") => bad("Give the dump as an absolute path on the runtime host."),
-            Some("tenant_imports_media_path_absolute") => bad("Give the instance's media as an absolute path on the runtime host."),
-            _ => ApiError::from(error),
-        })?;
+        .bind(tenant_id)
+        .bind(&dump_path)
+        .bind(&media_path)
+        .execute(&mut *tx)
+        .await
+        .map_err(
+            |error| match error.as_database_error().and_then(|e| e.constraint()) {
+                Some("tenant_imports_dump_path_absolute") => {
+                    bad("Give the dump as an absolute path on the runtime host.")
+                }
+                Some("tenant_imports_media_path_absolute") => {
+                    bad("Give the instance's media as an absolute path on the runtime host.")
+                }
+                _ => ApiError::from(error),
+            },
+        )?;
     // The same kind as a created tenant's: these are provisioning steps, and
     // every failure, event and retry path finds the operation by that name. The
     // detail is what says the instance came from somewhere.
@@ -1941,8 +1984,11 @@ async fn import_tenant(
         .bind(tenant_id).bind(media_path.is_some()).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,$2)")
         .bind(operation_id)
-        .bind(format!("Tenant reserved for {domain}; the instance is set up before its domain moves."))
-        .execute(&mut *tx).await?;
+        .bind(format!(
+            "Tenant reserved for {domain}; the instance is set up before its domain moves."
+        ))
+        .execute(&mut *tx)
+        .await?;
     enqueue_temporal_dispatch(&mut tx, tenant_id, "provision").await?;
     tx.commit().await?;
     Ok((
@@ -2055,6 +2101,15 @@ async fn domain_reconciler(state: Shared) {
         {
             for id in ids {
                 let _ = drop_custom_domain(&state, id).await;
+            }
+        }
+        // A provided hostname a cancelled domain change asked for: never
+        // primary, never an identity, so it is simply taken off Cloudflare.
+        if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM tenant_domains WHERE status='removing' AND kind='provided' AND NOT is_primary ORDER BY updated_at LIMIT 10")
+            .fetch_all(&state.db).await
+        {
+            for id in ids {
+                let _ = delete_domain(&state, id).await;
             }
         }
         if let Ok(ids) = sqlx::query_scalar::<_, Uuid>("SELECT d.id FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id JOIN runtimes r ON r.id=t.runtime_id WHERE d.kind IN ('provided','custom') AND t.lifecycle_state IN ('provisioning','ready','failed') AND ((d.status='pending' AND d.updated_at < now()-interval '15 seconds' AND (d.next_check_at IS NULL OR d.next_check_at <= now())) OR (d.status<>'removing' AND d.routed_origin_hostname IS DISTINCT FROM r.origin_hostname)) ORDER BY d.created_at LIMIT 10")
@@ -2195,7 +2250,9 @@ async fn drop_custom_domain(state: &Shared, id: Uuid) -> Result<()> {
     // A released primary domain must not stay reserved on the tenant row, which
     // otherwise holds its domain forever: the tenant takes a placeholder that
     // can never be a real hostname, and remembers the domain for restoring.
-    sqlx::query("UPDATE tenants SET abandoned_custom_domain=$1,aliases=array_remove(aliases,$1),domain=CASE WHEN domain=$1 THEN id::text||'.invalid' ELSE domain END WHERE id=$2")
+    // Only the domain an instance was created under is remembered as
+    // abandoned; one a domain change asked for and did not get is just gone.
+    sqlx::query("UPDATE tenants SET abandoned_custom_domain=CASE WHEN domain=$1 THEN $1 ELSE abandoned_custom_domain END,aliases=array_remove(aliases,$1),domain=CASE WHEN domain=$1 THEN id::text||'.invalid' ELSE domain END WHERE id=$2")
         .bind(&hostname).bind(tenant_id).execute(&mut *tx).await?;
     if let Some(operation_id) = sqlx::query_scalar::<_, Uuid>("SELECT id FROM operations WHERE tenant_id=$1 AND kind='tenant_provision' AND status='running' ORDER BY created_at DESC LIMIT 1")
         .bind(tenant_id).fetch_optional(&mut *tx).await?
@@ -2207,6 +2264,50 @@ async fn drop_custom_domain(state: &Shared, id: Uuid) -> Result<()> {
             .await?;
     }
     tx.commit().await?;
+    Ok(())
+}
+
+/// Take a hostname off Cloudflare, if it is there, and delete its record,
+/// which frees it.
+async fn delete_domain(state: &Shared, id: Uuid) -> Result<()> {
+    let Some(cloudflare_id) = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT cloudflare_id FROM tenant_domains WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    else {
+        return Ok(());
+    };
+    if let Some(cloudflare_id) = cloudflare_id {
+        let cloudflare = state
+            .cloudflare
+            .as_ref()
+            .context("Cloudflare is not configured")?;
+        anyhow::ensure!(
+            cloudflare_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+            "invalid Cloudflare hostname id"
+        );
+        let response = state
+            .client
+            .delete(format!(
+                "{}/{cloudflare_id}",
+                cloudflare.custom_hostnames_url()
+            ))
+            .bearer_auth(&cloudflare.api_token)
+            .send()
+            .await?;
+        anyhow::ensure!(
+            response.status().is_success() || response.status() == StatusCode::NOT_FOUND,
+            "Cloudflare refused to delete a hostname"
+        );
+    }
+    sqlx::query("DELETE FROM tenant_domains WHERE id=$1")
+        .bind(id)
+        .execute(&state.db)
+        .await?;
     Ok(())
 }
 
@@ -5387,10 +5488,12 @@ pub(crate) async fn reconcile_runtime_drift(state: &Shared, runtime_id: Uuid) ->
             // The file is ahead of what the runtime is serving, and a render
             // that recorded its revision leaves no drift for the next pass to
             // find. Give the revision up so this tenant is tried again.
-            let _ = sqlx::query("UPDATE tenants SET rendered_revision=NULL,updated_at=now() WHERE id=$1")
-                .bind(tenant_id)
-                .execute(&state.db)
-                .await;
+            let _ = sqlx::query(
+                "UPDATE tenants SET rendered_revision=NULL,updated_at=now() WHERE id=$1",
+            )
+            .bind(tenant_id)
+            .execute(&state.db)
+            .await;
             record_reconcile_failure(&state.db, tenant_id, operation, &message).await;
         }
         return Ok(0);

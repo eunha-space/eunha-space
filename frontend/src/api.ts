@@ -139,6 +139,24 @@ export type CustomerTenantDetail = {
   };
   domains: CustomerDomainSetup[];
   provisioning_steps: CustomerProvisioningStep[];
+  /** The instance's latest domain change, running or finished. */
+  domain_change: DomainChange | null;
+};
+
+/** Moving a served instance to another domain. */
+export type DomainChange = {
+  id: string;
+  from_domain: string;
+  to_domain: string;
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  step: "attach" | "rename" | "switch" | "move" | "deliver" | "release" | "done";
+  /** Deliveries of the Moves not yet through or given up on. */
+  pending: number | null;
+  /** Followers' servers the Move was given up on for. */
+  given_up: number | null;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
 };
 
 export type Operation = {

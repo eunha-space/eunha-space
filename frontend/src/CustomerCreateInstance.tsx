@@ -153,7 +153,7 @@ export function CustomerCreateInstance(
                     />
                     <span className="text-muted-foreground text-xs">
                       {t(
-                        "Before creating, add a CNAME record pointing it to customers.eunha.space. A custom domain can only be chosen now; it cannot be added or changed later.",
+                        "Before creating, add a CNAME record pointing it to customers.eunha.space. You can move the instance to another domain later.",
                       )}
                     </span>
                     {dnsCheck?.hostname === customDomain &&

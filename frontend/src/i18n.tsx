@@ -120,16 +120,38 @@ const ko: Record<string, string> = {
   "eunha space address": "은하 도메인",
   "My own domain": "내 도메인",
   "Custom domain": "커스텀 도메인",
-  "Before creating, add a CNAME record pointing it to customers.eunha.space. A custom domain can only be chosen now; it cannot be added or changed later.":
-    "생성하기 전에 customers.eunha.space를 가리키는 CNAME 레코드를 추가하세요. 커스텀 도메인은 지금만 선택할 수 있으며 나중에 추가하거나 변경할 수 없습니다.",
+  "Before creating, add a CNAME record pointing it to customers.eunha.space. You can move the instance to another domain later.":
+    "생성하기 전에 customers.eunha.space를 가리키는 CNAME 레코드를 추가하세요. 나중에 인스턴스를 다른 도메인으로 옮길 수 있습니다.",
   "We can't see that CNAME record yet. You can still create the instance; setup keeps trying for 7 days, then deletes the instance.":
     "아직 CNAME 레코드가 확인되지 않습니다. 인스턴스는 만들 수 있으며, 설정은 7일 동안 계속 시도한 뒤 인스턴스를 삭제합니다.",
   "The CNAME record is in place.": "CNAME 레코드가 확인되었습니다.",
-  "Custom domains can only be added when creating an instance.":
-    "커스텀 도메인은 인스턴스를 만들 때만 추가할 수 있습니다.",
+  "Keep each domain's DNS record in place for as long as it is connected.":
+    "도메인이 연결되어 있는 동안 DNS 레코드를 그대로 유지하세요.",
   Removing: "제거 중",
-  "This domain wasn't connected in time and is being released.":
-    "이 도메인이 기한 안에 연결되지 않아 해제하고 있습니다.",
+  "This domain is being released.": "이 도메인을 해제하고 있습니다.",
+  Domain: "도메인",
+  "Your instance's address. Every account's handle and every post's link are under it.":
+    "인스턴스의 주소입니다. 모든 계정의 핸들과 모든 게시물의 링크가 이 주소 아래에 있습니다.",
+  "Change domain": "도메인 변경",
+  "Move to this domain": "이 도메인으로 옮기기",
+  "Move your instance to": "인스턴스를 다음 주소로 옮길까요:",
+  "Every account's followers are asked to follow it at the new domain, and your accounts follow again whoever they follow. Posts move too, but under new links: links to old posts, and replies to them from other servers, stop working. The current domain stops answering once the move begins, and this can't be undone.":
+    "모든 계정의 팔로워에게 새 도메인에서 계정을 팔로우하도록 요청하고, 계정이 팔로우하던 사람들을 새 도메인에서 다시 팔로우합니다. 게시물도 옮겨지지만 링크가 바뀌므로, 이전 게시물로 가는 링크와 다른 서버에서 그 게시물에 단 답글은 더 이상 동작하지 않습니다. 이동이 시작되면 현재 도메인은 응답하지 않으며, 되돌릴 수 없습니다.",
+  "Add a CNAME record pointing it to customers.eunha.space. Nothing moves until it's connected, and you can stop until then.":
+    "customers.eunha.space를 가리키는 CNAME 레코드를 추가하세요. 연결되기 전까지는 아무것도 옮겨지지 않으며, 그때까지는 이동을 멈출 수 있습니다.",
+  "Connecting the new domain": "새 도메인 연결",
+  "Moving your instance": "인스턴스 옮기기",
+  "Moving your followers": "팔로워 옮기기",
+  "Releasing the old domain": "이전 도메인 해제",
+  "servers to go": "개 서버 남음",
+  "Stop the move": "이동 멈추기",
+  "Moved from": "이전 주소:",
+  "servers didn't take the move; their users can follow your accounts again by hand.":
+    "개 서버가 이동을 받지 못했습니다. 그 서버의 사용자는 직접 다시 팔로우할 수 있습니다.",
+  "The move didn't start: the new domain couldn't be connected. Your instance stays where it is.":
+    "새 도메인을 연결하지 못해 이동을 시작하지 않았습니다. 인스턴스는 그대로 있습니다.",
+  "The move stopped part of the way. We've been told and will finish it.":
+    "이동이 도중에 멈췄습니다. 운영팀에 전달되었으며 이동을 마무리할 예정입니다.",
   "If it isn't connected by then, this instance is deleted":
     "이때까지 연결되지 않으면 인스턴스가 삭제됩니다",
   "This instance was deleted because its custom domain wasn't connected within 7 days, so it was never set up. Restore it to try the domain again.":

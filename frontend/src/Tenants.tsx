@@ -1,6 +1,6 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { Download, ExternalLink, FileCog, Globe, HardDrive, HeartPulse, Inbox, Plus, PowerOff, RefreshCw, RotateCcw, RotateCw, Trash2 } from "lucide-react";
-import { api, instanceAddress, isOffline, pendingRender, type Runtime, type Tenant, type TenantDomain } from "@/api";
+import { api, type DomainChange, instanceAddress, isOffline, pendingRender, type Runtime, type Tenant, type TenantDomain } from "@/api";
 import { absoluteTime, relativeTime } from "@/format";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -628,7 +628,24 @@ function ImportTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
 function DomainsDialog({ tenant, busy, act }: { tenant: Tenant; busy: string; act: Props["act"] }) {
   const [open, setOpen] = useState(false);
   const [domains, setDomains] = useState<TenantDomain[]>([]);
-  async function refresh() { setDomains(await api<TenantDomain[]>(`/tenants/${tenant.id}/domains`)); }
+  const [change, setChange] = useState<DomainChange | null>(null);
+  const [target, setTarget] = useState("");
+  async function refresh() {
+    const [nextDomains, nextChange] = await Promise.all([
+      api<TenantDomain[]>(`/tenants/${tenant.id}/domains`),
+      api<DomainChange | null>(`/tenants/${tenant.id}/domain-change`),
+    ]);
+    setDomains(nextDomains);
+    setChange(nextChange);
+  }
+  async function changeAct(path: string, key: string, body?: object) {
+    if (await act(`/tenants/${tenant.id}/domain-change${path}`, key, body)) {
+      setTarget("");
+      await refresh();
+    }
+  }
+  // A bare label is an eunha space subdomain; anything with a dot, a domain.
+  const request = target.includes(".") ? { custom_domain: target } : { subdomain: target };
   async function adopt(domain: TenantDomain) {
     if (await act(`/tenants/${tenant.id}/domains/${domain.id}/cloudflare`, `adopt-domain-${domain.id}`)) {
       await refresh();
@@ -644,7 +661,33 @@ function DomainsDialog({ tenant, busy, act }: { tenant: Tenant; busy: string; ac
       <TooltipContent>Domains</TooltipContent>
     </Tooltip>
     <DialogContent>
-      <DialogHeader><DialogTitle>Domains for {tenant.domain}</DialogTitle><DialogDescription>Tenant routing and Cloudflare certificates. Custom domains are chosen only when a customer creates an instance. Adopting an existing primary domain does not change its ActivityPub identity.</DialogDescription></DialogHeader>
+      <DialogHeader><DialogTitle>Domains for {tenant.domain}</DialogTitle><DialogDescription>Tenant routing and Cloudflare certificates. Adopting an existing primary domain does not change its ActivityPub identity; changing the domain moves it, with a Move to every account's followers.</DialogDescription></DialogHeader>
+      <div className="bg-muted/50 grid gap-2 rounded-md p-3 text-sm">
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-medium">Domain change</span>
+          {change && <Badge variant={change.status === "succeeded" ? "secondary" : "outline"}>{change.status}{change.status === "running" ? ` · ${change.step}` : ""}</Badge>}
+        </div>
+        {change && <p className="text-muted-foreground text-xs">{change.from_domain} → {change.to_domain} · started {absoluteTime(change.created_at)}{change.pending !== null ? ` · ${change.pending} deliveries pending, ${change.given_up ?? 0} given up on` : ""}</p>}
+        {change?.error && <p className="text-destructive text-xs">{change.error}</p>}
+        <div className="flex flex-wrap gap-2">
+          {change?.status === "running" && change.step === "attach" && <ActionButton variant="outline" busy={busy === `cancel-change-${tenant.id}`} onClick={() => changeAct("/cancel", `cancel-change-${tenant.id}`)}>Cancel change</ActionButton>}
+          {change?.status === "failed" && change.step !== "attach" && <ActionButton variant="outline" busy={busy === `retry-change-${tenant.id}`} onClick={() => changeAct("/retry", `retry-change-${tenant.id}`)}>Retry from {change.step}</ActionButton>}
+        </div>
+        {change?.status !== "running" && tenant.lifecycle_state === "ready" && <div className="flex gap-2">
+          <Input value={target} onChange={(e) => setTarget(e.target.value.trim().toLowerCase())} placeholder="label or custom.domain" aria-label="New domain" />
+          <ActionButton
+            variant="outline"
+            disabled={!target}
+            busy={busy === `start-change-${tenant.id}`}
+            confirm={{
+              title: `Move ${tenant.domain} to ${target.includes(".") ? target : `${target}.eunha.space`}?`,
+              description: "Its addresses are rewritten, it is served under the new domain alone, and every account's followers are sent a Move. The old domain stops answering once the move begins; this cannot be undone after the new domain connects.",
+              action: "Start move",
+            }}
+            onClick={() => changeAct("", `start-change-${tenant.id}`, request)}
+          >Change</ActionButton>
+        </div>}
+      </div>
       <div className="grid gap-3">{domains.map((domain) => <div key={domain.id} className="bg-muted/50 rounded-md p-3 text-sm">
         <div className="flex items-center justify-between gap-2"><div className="min-w-0"><span className="block truncate font-medium">{domain.hostname}</span><span className="text-muted-foreground text-xs">{domain.kind === "legacy" ? "Existing domain" : domain.kind === "provided" ? "Eunha hostname" : "Cloudflare for SaaS"}</span></div><div className="flex shrink-0 gap-1">{domain.is_primary && <Badge variant="outline">primary</Badge>}<Badge variant={domain.status === "active" ? "secondary" : "outline"}>{domain.status}</Badge>{domain.kind !== "legacy" && <Badge variant="secondary">managed</Badge>}</div></div>
         {domain.kind === "legacy" && domain.is_primary && <div className="mt-3 flex items-center justify-between gap-4 border-t pt-3"><p className="text-muted-foreground text-xs">Move TLS and routing to the shared Eunha tunnel without changing accounts or actor URLs.</p><ActionButton
