@@ -883,9 +883,15 @@ async fn main() -> Result<()> {
                     .enable_all()
                     .build();
                 match runtime {
+                // Nothing runs a workflow while the worker is down, and it goes
+                // down whenever Temporal does; it is started again rather
+                // than left stopped until the control plane restarts.
                 Ok(runtime) => runtime.block_on(async move {
-                    if let Err(error) = temporal::run_worker(worker_state).await {
-                        tracing::error!(error = %format!("{error:#}"), "Temporal worker stopped");
+                    loop {
+                        if let Err(error) = temporal::run_worker(worker_state.clone()).await {
+                            tracing::error!(error = %format!("{error:#}"), "Temporal worker stopped; restarting");
+                        }
+                        tokio::time::sleep(Duration::from_secs(10)).await;
                     }
                 }),
                 Err(error) => tracing::error!(error = %error, "could not start Temporal runtime"),
@@ -3004,7 +3010,29 @@ const PURGE: LifecycleFlow = LifecycleFlow {
     exhausted: "an operator needs to finish removing the tenant's data",
 };
 
-async fn run_lifecycle_flow(state: &Shared, tenant_id: Uuid, flow: &LifecycleFlow) {
+/// A lifecycle step failed and is to be tried again: the activity fails with
+/// it, and Temporal's retry runs the flow again, which resumes at that step
+/// once `LIFECYCLE_RETRY_SECONDS` have passed.
+#[derive(Debug)]
+pub(crate) struct LifecycleRetry(String);
+
+impl std::fmt::Display for LifecycleRetry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for LifecycleRetry {}
+
+/// Run `flow` for `tenant_id` from its first unfinished step. A step that
+/// fails is retried, `LIFECYCLE_RETRY_SECONDS` apart, until it has been tried
+/// `LIFECYCLE_MAX_ATTEMPTS` times; then the operation is failed for an
+/// operator and this returns, so that the workflow does not retry forever.
+async fn run_lifecycle_flow(
+    state: &Shared,
+    tenant_id: Uuid,
+    flow: &LifecycleFlow,
+) -> Result<(), LifecycleRetry> {
     let table = flow.steps_table;
     for &step in flow.steps {
         let row = sqlx::query_as::<_, (String, i32, bool)>(&format!(
@@ -3014,18 +3042,23 @@ async fn run_lifecycle_flow(state: &Shared, tenant_id: Uuid, flow: &LifecycleFlo
         .bind(step)
         .fetch_optional(&state.db)
         .await;
-        let Ok(Some((status, attempts, stale))) = row else {
-            return;
+        let (status, attempts, stale) = match row {
+            Ok(Some(row)) => row,
+            Ok(None) => return Ok(()),
+            Err(error) => return Err(LifecycleRetry(error.to_string())),
         };
         match status.as_str() {
             "succeeded" => continue,
-            "failed" if !stale || attempts >= LIFECYCLE_MAX_ATTEMPTS => return,
+            "failed" if attempts >= LIFECYCLE_MAX_ATTEMPTS => return Ok(()),
+            "failed" if !stale => {
+                return Err(LifecycleRetry(format!("{step} is waiting to be retried")));
+            }
             _ => {}
         }
-        if sqlx::query(&format!("UPDATE {table} SET status='running',attempts=attempts+1,error=NULL,started_at=now(),finished_at=NULL,updated_at=now() WHERE tenant_id=$1 AND step=$2"))
-            .bind(tenant_id).bind(step).execute(&state.db).await.is_err()
+        if let Err(error) = sqlx::query(&format!("UPDATE {table} SET status='running',attempts=attempts+1,error=NULL,started_at=now(),finished_at=NULL,updated_at=now() WHERE tenant_id=$1 AND step=$2"))
+            .bind(tenant_id).bind(step).execute(&state.db).await
         {
-            return;
+            return Err(LifecycleRetry(error.to_string()));
         }
         let result = lifecycle_step(state, tenant_id, step).await;
         let operation = sqlx::query_scalar::<_, Uuid>("SELECT id FROM operations WHERE tenant_id=$1 AND kind=$2 AND status='running' ORDER BY created_at DESC LIMIT 1")
@@ -3047,7 +3080,11 @@ async fn run_lifecycle_flow(state: &Shared, tenant_id: Uuid, flow: &LifecycleFlo
                         mark_operation_failed(&state.db, operation, &message).await;
                     }
                 }
-                return;
+                return if exhausted {
+                    Ok(())
+                } else {
+                    Err(LifecycleRetry(message))
+                };
             }
         };
         let _ = sqlx::query(&format!("UPDATE {table} SET status='succeeded',finished_at=now(),updated_at=now() WHERE tenant_id=$1 AND step=$2"))
@@ -3074,6 +3111,7 @@ async fn run_lifecycle_flow(state: &Shared, tenant_id: Uuid, flow: &LifecycleFlo
         .await;
     let _ = sqlx::query("UPDATE operations SET status='succeeded',finished_at=now() WHERE id=(SELECT id FROM operations WHERE tenant_id=$1 AND kind=$2 AND status='running' ORDER BY created_at DESC LIMIT 1)")
         .bind(tenant_id).bind(flow.operation_kind).execute(&state.db).await;
+    Ok(())
 }
 
 /// Run one step of a lifecycle flow. A step that deliberately left something in
@@ -3086,12 +3124,12 @@ async fn lifecycle_step(state: &Shared, tenant_id: Uuid, step: &str) -> Result<O
         // domain step rendered again after the first attempt.
         "offline" if purging(state, tenant_id).await? => {
             unrender_tenant(state, tenant_id).await?;
-            reload_provisioned_runtime(state, tenant_id).await?;
+            reload_runtime(state, tenant_id, false).await?;
             verify_tenant_offline(state, tenant_id).await.map(|()| None)
         }
-        "reload" => reload_provisioned_runtime(state, tenant_id)
-            .await
-            .map(|()| None),
+        // The tenant's file is gone, so the runtime answering its hostname
+        // with 421 afterwards is success, not a rejected reload.
+        "reload" => reload_runtime(state, tenant_id, false).await.map(|()| None),
         "offline" => verify_tenant_offline(state, tenant_id).await.map(|()| None),
         "cloudflare" => purge_cloudflare_hostnames(state, tenant_id).await,
         "database" => purge_tenant_database(state, tenant_id).await,
@@ -4320,6 +4358,15 @@ async fn runtime_dispatches_host(state: &Shared, bind_address: &str, domain: &st
 }
 
 async fn reload_provisioned_runtime(state: &Shared, tenant_id: Uuid) -> Result<()> {
+    reload_runtime(state, tenant_id, true).await
+}
+
+/// Make the runtime re-read its tenants directory, after `tenant_id`'s file
+/// was written or removed. With `serves`, wait until the runtime serves the
+/// tenant, which is how a rejected reload shows; a tenant taken off the
+/// runtime is not served afterwards by design, and whether it is gone is the
+/// `offline` step's to check.
+async fn reload_runtime(state: &Shared, tenant_id: Uuid, serves: bool) -> Result<()> {
     let (runtime_id, service_label, router_enabled, tenant_directory, bind_address, domain) = sqlx::query_as::<_, (Uuid, String, bool, String, String, String)>(
         "SELECT r.id,r.service_label,r.router_enabled,r.tenant_directory,r.bind_address,t.domain FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
     )
@@ -4331,10 +4378,12 @@ async fn reload_provisioned_runtime(state: &Shared, tenant_id: Uuid) -> Result<(
     let lock = runtime_reload_lock(state, runtime_id).await;
     let _guard = lock.lock().await;
     signal_runtime_reload(&service_label).await?;
-    anyhow::ensure!(
-        runtime_dispatches_host(state, &bind_address, &domain).await,
-        "the runtime did not adopt this instance; its log says why it rejected the reload"
-    );
+    if serves {
+        anyhow::ensure!(
+            runtime_dispatches_host(state, &bind_address, &domain).await,
+            "the runtime did not adopt this instance; its log says why it rejected the reload"
+        );
+    }
     Ok(())
 }
 

@@ -138,8 +138,11 @@ impl TenantActivities {
         request: String,
     ) -> Result<(), ActivityError> {
         let (flow, tenant_id) = lifecycle_request(&request).map_err(ActivityError::from)?;
-        run_lifecycle_flow(&self.state, tenant_id, flow).await;
-        Ok(())
+        // A step to retry fails the activity, and Temporal's retry is what
+        // runs it again; one that has used its attempts ends it.
+        run_lifecycle_flow(&self.state, tenant_id, flow)
+            .await
+            .map_err(|retry| ActivityError::from(anyhow::Error::new(retry)))
     }
 
     #[activity]
@@ -459,7 +462,14 @@ async fn client() -> Result<Client> {
             .build(),
     )
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let connection = Connection::connect(connection_options).await?;
+    // Bounded: a connect that hangs would stop a dispatcher's loop for good,
+    // with nothing in the log to say so.
+    let connection = tokio::time::timeout(
+        Duration::from_secs(10),
+        Connection::connect(connection_options),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("connecting to Temporal timed out"))??;
     Ok(Client::new(connection, client_options)?)
 }
 
