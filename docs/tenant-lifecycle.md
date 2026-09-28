@@ -143,9 +143,11 @@ six steps, recorded in `domain_changes`:
    delivery within twelve hours is given up on, so the change always finishes;
    how many were given up on is recorded, and their users can follow again by
    hand.
-6. **release**: the old hostnames are taken off Cloudflare. A provided subdomain
-   the tenant had is reserved, not freed: whoever took it next would answer for
-   the old actors, to any server that missed the Move.
+6. **release**: the old hostnames are taken off Cloudflare and freed, a
+   provided subdomain included, for anyone to take. Whoever takes one next
+   answers at the old actors' addresses; a server that missed the Move and
+   still follows an old actor would take a new one there for it, once the
+   keys it holds stop verifying and it fetches that actor again.
 
 A step that fails after `attach` leaves the tenant part-way moved, and the
 change `failed` for an operator. Every step can run again (the rename is a

@@ -692,26 +692,17 @@ async fn deliver(state: &Shared, tenant_id: Uuid, change: &Running) -> Result<bo
     Ok(true)
 }
 
-/// Take the old hostnames off Cloudflare and finish. A provided subdomain the
-/// instance had stays reserved: whoever took it next would answer for the old
-/// actors, to any server that missed the Move.
+/// Take the old hostnames off Cloudflare and finish. They are free for
+/// anyone to take afterwards, a provided subdomain included.
 async fn release(state: &Shared, tenant_id: Uuid, change: &Running) -> Result<bool> {
-    let old = sqlx::query_as::<_, (Uuid, String, String)>(
-        "SELECT id,hostname,kind FROM tenant_domains WHERE tenant_id=$1 AND NOT is_primary AND hostname <> ALL(COALESCE((SELECT aliases FROM tenants WHERE id=$1),'{}'::text[])) AND status<>'removing'",
+    let old = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM tenant_domains WHERE tenant_id=$1 AND NOT is_primary AND hostname <> ALL(COALESCE((SELECT aliases FROM tenants WHERE id=$1),'{}'::text[])) AND status<>'removing'",
     )
     .bind(tenant_id)
     .fetch_all(&state.db)
     .await?;
-    for (id, hostname, kind) in &old {
-        if kind == "provided" {
-            let label = hostname.split('.').next().unwrap_or_default();
-            sqlx::query("INSERT INTO reserved_subdomains(label,reason) VALUES($1,$2) ON CONFLICT (label) DO NOTHING")
-                .bind(label)
-                .bind(format!("{} moved away from it; its old actors live there.", change.to_domain))
-                .execute(&state.db)
-                .await?;
-        }
-        crate::delete_domain(state, *id).await?;
+    for id in old {
+        crate::delete_domain(state, id).await?;
     }
     let mut tx = state.db.begin().await?;
     sqlx::query("UPDATE domain_changes SET status='succeeded',step='done',finished_at=now(),updated_at=now() WHERE id=$1")
