@@ -41,6 +41,7 @@ mod domain_change;
 mod health;
 #[cfg(test)]
 mod integration_tests;
+mod service_usage;
 mod temporal;
 mod usage;
 
@@ -922,6 +923,11 @@ async fn main() -> Result<()> {
         tracing::error!("could not rename tenant configuration files");
     }
     health::supervise(state.clone(), "usage::sampler", usage::sampler);
+    health::supervise(
+        state.clone(),
+        "service_usage::sampler",
+        service_usage::sampler,
+    );
     health::supervise(state.clone(), "health_reconciler", health_reconciler);
     health::supervise(
         state.clone(),
@@ -1031,6 +1037,7 @@ async fn main() -> Result<()> {
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/usage", get(usage::usage))
         .route("/usage/history", get(usage::aggregate_history))
+        .route("/usage/service/history", get(service_usage::history))
         .route("/tenants/{id}/usage/history", get(usage::history))
         .route("/tenants/import", post(import_tenant))
         .route("/tenants/{id}/check", post(check_tenant))

@@ -51,6 +51,50 @@ Prometheus `/metrics` listener. Blue/green slots enable it on their direct HTTP
 port plus 1,000, with distinct targets for each process. The stable runtime
 proxy and public tunnel do not route to it. It exports tenant-labelled request
 counts, response-header latency histograms, in-flight and aborted requests,
-admission rejections, and application database-pool connections. The current
-admin database dashboard continues to use its direct PostgreSQL probes; these
-new service metrics are available to a private Prometheus collector.
+admission rejections, and application database-pool connections.
+
+## Service collection and charts
+
+The control plane scrapes this Prometheus exposition privately, using its
+existing operator SSH access to each hosting server. It does not run a separate
+Prometheus server. The sampler reads the active blue/green slot and scrapes its
+loopback listener; draining slots are deliberately excluded to avoid counting a
+tenant twice. A slot switch during a scrape invalidates that reading. Requests
+already draining on an old slot are outside this measurement.
+
+Scrapes run independently of database collection, with up to four runtimes in
+parallel, an eight-second overall deadline per runtime, a three-second HTTP
+deadline, and an eight-MiB exposition limit. The collector waits ten seconds
+between rounds, so large fleets or slow hosts increase the cadence. HTTP proxies
+and redirects are disabled. Runtimes without blue/green routing, older binaries,
+and unavailable listeners produce missing readings rather than zeroes.
+
+Only known canonical tenant domains are accepted. Route labels and raw
+exposition never enter storage, logs, or APIs. Every successful tenant reading
+must include all three refreshed pool/in-flight gauges. Missing request counters
+on an otherwise reporting tenant mean no activity; unknown tenants are ignored.
+Retained tenants have no serving service and are excluded. Ready and failed
+tenants remain eligible, with failures reflected in coverage.
+
+Migration 044 stores numeric service samples and private process identities for
+24 hours. The operator-only `/api/usage/service/history` returns the last ten
+minutes, with optional `tenant_id=<UUID>` or `instance_id=<UUID>` filters.
+Scope uses current tenant placement. The API exposes numeric summaries and
+coverage, never process identities or runtime paths. Reloading the page restores
+charts from PostgreSQL.
+
+Fleet, hosting-server, and tenant charts show requests per second, 5xx error
+percentage, mean response-header latency, in-flight requests, total and idle
+application pool connections, aborted requests per second, and capacity
+rejections per second. Mean latency uses histogram sum/count deltas, weighted by
+request volume; it is not a percentile. Latency excludes streamed body time.
+Admission rejections have their own counter and do not enter request/error rates.
+Monitoring requests are included in service traffic.
+
+Counter rates require consecutive readings within thirty seconds, with the same
+active slot, process PID, and process start time. Deployments, restarts, declining
+counters (including idle-series expiration), failed scrapes, and longer pauses
+produce gaps. Every tenant must report a metric for fleet/server totals to be
+shown; partial coverage is explicit. Error percentage and latency are missing
+when there is no traffic. Current readings older than thirty seconds are marked
+stale and are not displayed as live values.

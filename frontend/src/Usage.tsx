@@ -9,6 +9,7 @@ import { NativeSelect } from "@/components/ui/native-select";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AggregateUsage, formatBytes as bytes } from "@/components/console/aggregate-usage";
+import { ServiceUsage } from "@/components/console/service-usage";
 
 type Sample = { tenant_id: string; sampled_at: number; database_bytes: number | null; connections: number | null; active_connections: number | null; transactions: number | null; stats_reset: string | null };
 type Reading = Sample & { rate: number | null };
@@ -102,15 +103,16 @@ export function Usage({ tenants, runtimes }: { tenants: Tenant[]; runtimes: Runt
     return { ...row, rate: valid ? (row.transactions! - before.transactions!) / elapsed : null };
   });
   return <div className="grid gap-4">
-    <p className="text-muted-foreground text-sm">Live PostgreSQL usage, collected in the background every 10 seconds. CPU, RAM, media storage, and bandwidth require additional runtime instrumentation. Connections reflect direct PostgreSQL backends; pooled client connections are not included.</p>
+    <p className="text-muted-foreground text-sm">Live database and Eunha service metrics, collected privately in the background about every 10 seconds. CPU, RAM, media storage, and bandwidth are not measured. Database connections reflect PostgreSQL backends; service pool charts show application connections.</p>
     {error && <Alert variant="destructive"><AlertDescription>Usage refresh failed. Previous readings may be stale. {error}</AlertDescription></Alert>}
     <section className="grid gap-3" aria-labelledby="fleet-usage-title">
-      <div><h2 id="fleet-usage-title" className="font-semibold">Fleet-wide usage</h2><p className="text-muted-foreground text-xs">PostgreSQL usage across every hosting server and runtime.</p></div>
+      <div><h2 id="fleet-usage-title" className="font-semibold">Fleet-wide usage</h2><p className="text-muted-foreground text-xs">Database and service usage across every hosting server and runtime.</p></div>
       <AggregateUsage readings={readings.filter(row => eligibleIds.has(row.tenant_id))} expected={tenants.filter(eligible).length} now={now} loaded={loaded} />
+      <ServiceUsage now={now} />
     </section>
     <section className="grid gap-3" aria-labelledby="instance-usage-title">
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <div><h2 id="instance-usage-title" className="font-semibold">Instance-wide usage</h2><p className="text-muted-foreground text-xs">Combined tenant PostgreSQL usage for the selected hosting server.</p></div>
+        <div><h2 id="instance-usage-title" className="font-semibold">Instance-wide usage</h2><p className="text-muted-foreground text-xs">Combined tenant database and service usage for the selected hosting server.</p></div>
         <label className="grid gap-1 text-sm">Hosting server
           <NativeSelect value={instance?.id ?? ""} onChange={event => setSelectedInstanceId(event.target.value)} disabled={!instances.length}>
             {!instances.length && <option value="">No hosting servers</option>}
@@ -122,6 +124,7 @@ export function Usage({ tenants, runtimes }: { tenants: Tenant[]; runtimes: Runt
         readings={readings.filter(row => instanceEligibleIds.has(row.tenant_id))}
         expected={instanceTenants.filter(eligible).length} now={now} loaded={loaded} />
         : <p className="text-muted-foreground text-sm">No hosting servers are registered.</p>}
+      {instance && <ServiceUsage key={`service-${instance.id}`} instanceId={instance.id} now={now} />}
     </section>
     <div className="grid gap-3">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -139,6 +142,7 @@ export function Usage({ tenants, runtimes }: { tenants: Tenant[]; runtimes: Runt
         <UsageChart title="Database connections" now={now} points={trend.map(row => ({ at: row.sampled_at, value: row.connections }))} format={value => value.toLocaleString(undefined, { maximumFractionDigits: 1 })} color="var(--chart-2)" />
         <UsageChart title="Transactions / second" now={now} points={trend.map(row => ({ at: row.sampled_at, value: row.rate }))} format={value => value.toFixed(1)} color="var(--chart-4)" />
       </div>
+      {selected && <ServiceUsage key={`service-${selected.id}`} tenantId={selected.id} now={now} />}
     </div>
     <Input aria-label="Filter tenants" placeholder="Filter by tenant or runtime…" value={search} onChange={event => setSearch(event.target.value)} className="max-w-sm" />
     <Card><CardContent><Table><TableHeader><TableRow><TableHead>Tenant</TableHead><TableHead>Runtime</TableHead><TableHead>Database storage</TableHead><TableHead>Connections / active</TableHead><TableHead>Transactions / sec</TableHead><TableHead>Sample</TableHead></TableRow></TableHeader><TableBody>

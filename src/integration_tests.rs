@@ -3,6 +3,100 @@ use super::*;
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn service_history_is_private_scoped_persisted_and_reset_aware(pool: PgPool) {
+    let (runtime, headers) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    let retained = tenant(&pool, runtime).await;
+    sqlx::query("UPDATE tenants SET lifecycle_state='ready' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE tenants SET lifecycle_state='retained' WHERE id=$1")
+        .bind(retained)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let now = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+    sqlx::query("INSERT INTO tenant_service_samples(tenant_id,sampled_at,epoch,requests,errors,duration_sum,duration_count,pool) VALUES($1,$2,'blue:1',10,1,1,10,2),($1,$3,'blue:1',30,3,5,30,3),($1,$4,'green:2',2,0,0.1,2,2)")
+        .bind(id).bind(now-30000).bind(now-20000).bind(now-10000).execute(&pool).await.unwrap();
+    let shared = state(pool.clone());
+    let Json(history) = service_usage::history(
+        State(shared.clone()),
+        headers.clone(),
+        Query(service_usage::Scope::default()),
+    )
+    .await
+    .unwrap();
+    let value = serde_json::to_value(history).unwrap();
+    assert_eq!(value["eligible_tenants"], 1);
+    assert_eq!(value["samples"][1]["request_rate"], 2.0);
+    assert_eq!(value["samples"][1]["latency_ms"], 200.0);
+    assert!(value["samples"][2]["request_rate"].is_null());
+    assert!(!value.to_string().contains("epoch"));
+    let Json(empty) = service_usage::history(
+        State(shared.clone()),
+        headers.clone(),
+        Query(service_usage::Scope {
+            tenant_id: Some(retained),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(serde_json::to_value(empty).unwrap()["eligible_tenants"], 0);
+    let Json(empty) = service_usage::history(
+        State(shared.clone()),
+        headers.clone(),
+        Query(service_usage::Scope {
+            instance_id: Some(Uuid::new_v4()),
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        serde_json::to_value(empty).unwrap()["samples"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        service_usage::history(
+            State(shared.clone()),
+            HeaderMap::new(),
+            Query(service_usage::Scope::default())
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    // A runtime with no running slot still persists a null reading, never zero.
+    service_usage::collect(&shared).await.unwrap();
+    let missing = sqlx::query_as::<_, service_usage::Sample>(
+        "SELECT * FROM tenant_service_samples WHERE tenant_id=$1 ORDER BY sampled_at DESC LIMIT 1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(missing.requests.is_none());
+    assert!(missing.pool.is_none());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM tenant_service_samples WHERE tenant_id=$1"
+        )
+        .bind(retained)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
 async fn auth_budgets_are_atomic_and_reset(pool: PgPool) {
     let attempts =
         futures::future::join_all((0..20).map(|_| auth::limit(&pool, "test", "identity", 5))).await;
