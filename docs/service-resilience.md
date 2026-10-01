@@ -48,52 +48,6 @@ afterward, because the legacy binary predates admission guards. The active
 release check is repeated immediately before switching. Avoid manual runtime
 release requests during that initial cutover.
 
-## Backup coverage and restore drills
-
-The existing host job discovers and backs up all PostgreSQL databases to B2 and
-copies R2 media with remote version retention. Run
-`python3 ops/backup/install-coverage.py` on the host to extend that job with:
-
-- Control-plane and tunnel launchd configuration, including process-only secrets.
-- Tunnel YAML and credentials, and the production Temporal environment.
-- PostgreSQL global roles and password hashes.
-- The active immutable control-plane executable, frontend, and release ID.
-
-These archives contain secrets. Keep the backup bucket private and recovery
-credentials in an independently accessible password manager. Generated tenant
-TOML remains disposable; restore authoritative tenant configuration from the
-control-plane database. Restoring an instance within retention still cancels its
-scheduled purge. A destructive purge remains explicitly confirmed or scheduled
-seven days after confirmed customer deletion.
-
-After a successful backup, run:
-
-```sh
-python3 ops/backup/restore-drill.py --report /private/tmp/eunha-restore-report.json
-```
-
-Use `--existing-backups` to verify the existing database/media archives while
-the sensitive recovery extension awaits approval. This mode explicitly reports
-its narrower scope and does not claim to restore service credentials or roles.
-
-The drill selects the latest completed backup, verifies service and tunnel
-configuration and the runnable release, restores global roles and every Eunha
-and Temporal database into a disposable PostgreSQL cluster, then reads every
-restored table through counts. The cluster listens only on a private Unix socket.
-Tenant contents, connection strings, and restored SQL errors are never printed.
-The report contains backup identity, table counts, elapsed time, and pass/fail
-flags. Production databases are never modified. Temporary restored data is
-removed on exit. Run drills after schema changes and regularly; archive only the
-credential-free report. `python3 ops/backup/install-restore-drill.py` installs a
-weekly Sunday 04:30 host-time drill after the nightly backup. The drill also compares a bounded media sample in each populated tenant
-namespace against the off-host copy using SHA-256. This samples media integrity;
-it is not a full-bucket recovery proof.
-
-The nightly snapshot schedule gives a worst-case database recovery point of
-approximately 24 hours when every backup succeeds. This does not provide
-continuous WAL archival or point-in-time recovery. Decide on a tighter recovery
-point before introducing WAL retention and an off-host archive.
-
 ## Verification
 
 `mise exec -- cargo test` runs unit checks, `mise run test-deploy` simulates
