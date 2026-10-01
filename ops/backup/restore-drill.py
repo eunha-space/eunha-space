@@ -54,12 +54,31 @@ def verify_database(pg, database, env):
     return count
 
 
+def write_report(path, report):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=path.name + ".", delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            json.dump(report, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--set", default=None, help="completed set path; defaults to most recent successful backup")
     parser.add_argument("--existing-backups", action="store_true", help="verify existing database/media backups without requiring the proposed recovery extension")
     parser.add_argument("--report", required=True, type=Path)
     args = parser.parse_args()
+    report = {"passed": False, "started_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "scope": "databases-and-media" if args.existing_backups else "full-recovery"}
+    # An early download/configuration failure must never leave a prior success
+    # looking like the result of the current attempt.
+    write_report(args.report, report)
     backup_set = args.set or latest_completed_set()
     if not re.fullmatch(r"sets/[A-Za-z0-9_.-]+/[0-9TZ]+", backup_set):
         raise RuntimeError("invalid backup set")
@@ -82,7 +101,7 @@ def main():
         raise RuntimeError("backup lacks required control-plane, Temporal, or tenant databases")
     pg = Path(env.get("PG_BIN", "/opt/homebrew/opt/postgresql@18/bin"))
     started = time.monotonic()
-    report = {"backup_set": backup_set, "databases": [], "passed": False, "roles_restored": False, "service_configuration_verified": False, "release_verified": False, "media_samples_verified": 0, "scope": "databases-and-media" if args.existing_backups else "full-recovery"}
+    report.update(backup_set=backup_set, databases=[], roles_restored=False, service_configuration_verified=False, release_verified=False, media_samples_verified=0)
     with tempfile.TemporaryDirectory(prefix="eunha-restore-", dir="/private/tmp") as temporary:
         root = Path(temporary)
         os.chmod(root, 0o700)
@@ -157,9 +176,7 @@ def main():
         finally:
             execute([str(pg / "pg_ctl"), "-D", str(data), "-m", "immediate", "-w", "stop"])
             report["total_seconds"] = round(time.monotonic() - started, 1)
-            args.report.parent.mkdir(parents=True, exist_ok=True)
-            args.report.write_text(json.dumps(report, indent=2) + "\n")
-            args.report.chmod(0o600)
+            write_report(args.report, report)
     print(f"Restore drill passed for {len(names)} databases in {report['total_seconds']} seconds.")
 
 
