@@ -16,6 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
+      - name: System build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
       - name: Rust formatting component
         run: mise exec -- rustup component add rustfmt
       - name: Rust formatting and unit tests

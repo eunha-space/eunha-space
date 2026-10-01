@@ -946,11 +946,12 @@ async fn main() -> Result<()> {
                     // than left stopped until the control plane restarts.
                     Ok(runtime) => runtime.block_on(async move {
                         loop {
-                            if let Err(_error) = temporal::run_worker(worker_state.clone()).await {
-                                worker_state
-                                    .health
-                                    .worker
-                                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                            if !health::worker_attempt(
+                                worker_state.health.clone(),
+                                temporal::run_worker(worker_state.clone()),
+                            )
+                            .await
+                            {
                                 tracing::error!("Temporal worker stopped; restarting");
                             }
                             tokio::time::sleep(Duration::from_secs(10)).await;
