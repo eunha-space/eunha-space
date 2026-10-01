@@ -45,3 +45,12 @@ accurately to tenants. Media storage, request bandwidth, CPU, and memory are not
 measured here. Supporting those requires tenant-aware runtime counters or
 isolation, and additional metrics storage. This dashboard does not
 estimate those values from process-wide readings.
+
+Eunha runtime releases now support an optional, separate loopback-only
+Prometheus `/metrics` listener. Blue/green slots enable it on their direct HTTP
+port plus 1,000, with distinct targets for each process. The stable runtime
+proxy and public tunnel do not route to it. It exports tenant-labelled request
+counts, response-header latency histograms, in-flight and aborted requests,
+admission rejections, and application database-pool connections. The current
+admin database dashboard continues to use its direct PostgreSQL probes; these
+new service metrics are available to a private Prometheus collector.

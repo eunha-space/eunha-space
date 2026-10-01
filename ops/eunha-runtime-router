@@ -39,13 +39,26 @@ test -d "$TENANTS"
 test -x "$HAPROXY"
 mkdir -p "$ROUTER_DIR" "$ROOT/slots"
 
+# A dedicated loopback port for each process, never through the stable proxy.
+metrics_address() {
+  /usr/bin/python3 - "$1" <<'PY_METRICS'
+import sys
+port = int(sys.argv[1].rsplit(":", 1)[1]) + 1000
+if not 1 <= port <= 65535:
+    raise SystemExit("runtime metrics port is outside the TCP port range")
+print(f"127.0.0.1:{port}")
+PY_METRICS
+}
+
 write_slot_plist() {
   local slot="$1" address="$2"
+  local metrics
+  metrics="$(metrics_address "$address")"
   local label="$BASE_LABEL.$slot"
   local plist="$HOME/Library/LaunchAgents/$label.plist"
   /usr/bin/plutil -create xml1 "$plist"
   /usr/bin/plutil -insert Label -string "$label" "$plist"
-  /usr/bin/plutil -insert ProgramArguments -json "[\"/bin/sh\",\"-c\",\"exec '$ROOT/slots/$slot/eunha' --tenants '$TENANTS' --bind-address '$address'\"]" "$plist"
+  /usr/bin/plutil -insert ProgramArguments -json "[\"/bin/sh\",\"-c\",\"exec '$ROOT/slots/$slot/eunha' --tenants '$TENANTS' --bind-address '$address' --metrics-bind-address '$metrics'\"]" "$plist"
   /usr/bin/plutil -insert WorkingDirectory -string "$ROOT/slots/$slot" "$plist"
   /usr/bin/plutil -insert RunAtLoad -bool true "$plist"
   /usr/bin/plutil -insert KeepAlive -bool true "$plist"
