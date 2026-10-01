@@ -12,14 +12,19 @@ jobs:
     env:
       CI: "true"
       CARGO_BUILD_JOBS: "2"
+      PG_BIN: /usr/lib/postgresql/18/bin
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
       - name: System build dependencies
         run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl --fail -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          . /etc/os-release
+          printf 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' "$VERSION_CODENAME" | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler
+          sudo apt-get install -y protobuf-compiler postgresql-18
       - name: Rust formatting component
         run: mise exec -- rustup component add rustfmt
       - name: Rust formatting and unit tests

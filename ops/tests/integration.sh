@@ -2,6 +2,11 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PG_BIN="${PG_BIN:-$(pg_config --bindir)}"
+PG_VERSION="$("$PG_BIN/postgres" --version)"
+if [[ ! "$PG_VERSION" =~ ([0-9]+)\. ]] || (( BASH_REMATCH[1] < 18 )); then
+  echo "Integration tests require PostgreSQL 18 or newer." >&2
+  exit 1
+fi
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/eunha-space-test.XXXXXX")"
 cleanup() {
   "$PG_BIN/pg_ctl" -D "$TEST_ROOT/data" -m immediate stop >/dev/null 2>&1 || true

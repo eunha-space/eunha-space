@@ -102,4 +102,6 @@ socket-only PostgreSQL cluster and runs the migrations and integration suite.
 Integration cases cover atomic rate budgets, interrupted transactions, retained
 data and seven-day scheduling, concurrent restore/purge, failed metric probes,
 authenticated history, deployment admission, and database outages. The temporary
-cluster requires local PostgreSQL binaries (override `PG_BIN` when necessary).
+cluster requires PostgreSQL 18 or newer (migration 013 renames a named NOT NULL
+constraint introduced in PostgreSQL 18). Linux CI installs PostgreSQL 18 from
+the official PGDG repository. Override `PG_BIN` to select those binaries.
