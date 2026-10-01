@@ -4,6 +4,7 @@ import plistlib
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 spec = importlib.util.spec_from_file_location("deploy", Path(__file__).parents[1] / "deploy-control-plane.py")
 deploy = importlib.util.module_from_spec(spec)
@@ -50,6 +51,21 @@ class DeploymentTests(unittest.TestCase):
         with patch.object(deploy, "sql", side_effect=lambda config, statement: self.sql.append(statement) or ""), patch.object(deploy, "run", side_effect=self.fake_run), patch.object(deploy.subprocess, "check_output", return_value="abc123\n"), patch.object(deploy, "restart") as restart, patch.object(deploy, "wait_ready", side_effect=readiness):
             deploy.deploy(self.original)
             return restart.call_count
+
+    def test_restart_waits_for_launchd_to_finish_shutdown(self):
+        results = [SimpleNamespace(returncode=0), SimpleNamespace(returncode=5), SimpleNamespace(returncode=0)]
+        with patch.object(deploy.subprocess, "run", side_effect=results) as command, patch.object(deploy, "run") as checked, patch.object(deploy.time, "sleep") as sleep:
+            deploy.restart()
+        self.assertEqual(command.call_count, 3)
+        sleep.assert_called_once_with(1)
+        self.assertEqual(checked.call_args.args[0][1], "kickstart")
+
+    def test_restart_registration_failure_is_bounded(self):
+        with patch.object(deploy.subprocess, "run", return_value=SimpleNamespace(returncode=5)) as command, patch.object(deploy, "run") as checked, patch.object(deploy.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "registration failed"):
+                deploy.restart()
+        self.assertEqual(command.call_count, 31)
+        checked.assert_not_called()
 
     def test_success_uses_immutable_assets_and_retains_previous(self):
         self.assertEqual(self.execute([True]), 1)

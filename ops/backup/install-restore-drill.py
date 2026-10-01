@@ -5,7 +5,7 @@ import plistlib
 import subprocess
 import sys
 
-root = Path(__file__).resolve().parent.parent
+root = Path(__file__).resolve().parents[2]
 label = "space.eunha.restore-drill"
 path = Path.home() / "Library/LaunchAgents" / (label + ".plist")
 logs = Path.home() / "Library/Logs/eunha-space"

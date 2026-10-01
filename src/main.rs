@@ -5949,11 +5949,11 @@ async fn render_tenant(
     // signalling while this one is still settling.
     let lock = runtime_reload_lock(&s, runtime_id).await;
     let _guard = lock.lock().await;
-    if let Err(error) = signal_runtime_reload(&service_label).await {
+    if signal_runtime_reload(&service_label).await.is_err() {
         mark_operation_failed(
             &s.db,
             op,
-            &format!("Configuration rendered, but the runtime could not be reloaded: {error}"),
+            "Configuration rendered, but the runtime could not be reloaded.",
         )
         .await;
         return Err(ApiError(
