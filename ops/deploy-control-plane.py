@@ -67,7 +67,15 @@ def sql(config, statement):
 def restart():
     domain = f"gui/{os.getuid()}"
     subprocess.run(["launchctl", "bootout", f"{domain}/{LABEL}"], capture_output=True)
-    run(["launchctl", "bootstrap", domain, str(PLIST)], capture_output=True)
+    # bootout can return before launchd finishes removing a gracefully stopping
+    # service. Retry registration for a bounded interval before rolling back.
+    for attempt in range(30):
+        registration = subprocess.run(["launchctl", "bootstrap", domain, str(PLIST)], capture_output=True)
+        if registration.returncode == 0:
+            break
+        time.sleep(1)
+    else:
+        raise RuntimeError("Service registration failed after shutdown")
     run(["launchctl", "kickstart", f"{domain}/{LABEL}"], capture_output=True)
 
 
