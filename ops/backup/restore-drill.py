@@ -45,6 +45,7 @@ def latest_completed_set():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--set", default=None, help="completed set path; defaults to most recent successful backup")
+    parser.add_argument("--existing-backups", action="store_true", help="verify existing database/media backups without requiring the proposed recovery extension")
     parser.add_argument("--report", required=True, type=Path)
     args = parser.parse_args()
     backup_set = args.set or latest_completed_set()
@@ -56,48 +57,51 @@ def main():
     files = json.loads(execute([rclone, "lsjson", remote, "--files-only", "--config", "/dev/null"], env=env))
     archive_names = {item["Name"] for item in files}
     recovery_files = {"postgres-globals.sql", "space.eunha.control-plane.plist", "space.eunha.cloudflared.plist", "eunha.yml", ".env.production"}
-    if not recovery_files.issubset(archive_names):
+    if not args.existing_backups and not recovery_files.issubset(archive_names):
         raise RuntimeError("backup lacks service recovery configuration or PostgreSQL roles")
     compose = next((name for name in ["docker-compose.yml", "docker-compose.production.yml"] if name in archive_names), None)
-    if compose is None:
+    if not args.existing_backups and compose is None:
         raise RuntimeError("Temporal compose archive missing")
-    recovery_files.add(compose)
+    if compose:
+        recovery_files.add(compose)
     names = sorted(item["Name"] for item in files if re.fullmatch(r"(?:eunha_space|eunha_t_[a-f0-9]{32}|temporal|temporal_visibility)\.dump\.gz", item["Name"]))
     required = {"eunha_space.dump.gz", "temporal.dump.gz", "temporal_visibility.dump.gz"}
     if not required.issubset(names) or not any(name.startswith("eunha_t_") for name in names):
         raise RuntimeError("backup lacks required control-plane, Temporal, or tenant databases")
     pg = Path(env.get("PG_BIN", "/opt/homebrew/opt/postgresql@18/bin"))
     started = time.monotonic()
-    report = {"backup_set": backup_set, "databases": [], "passed": False, "roles_restored": False, "service_configuration_verified": False, "release_verified": False, "media_samples_verified": 0}
+    report = {"backup_set": backup_set, "databases": [], "passed": False, "roles_restored": False, "service_configuration_verified": False, "release_verified": False, "media_samples_verified": 0, "scope": "databases-and-media" if args.existing_backups else "full-recovery"}
     with tempfile.TemporaryDirectory(prefix="eunha-restore-", dir="/private/tmp") as temporary:
         root = Path(temporary)
         os.chmod(root, 0o700)
-        for filename in sorted(recovery_files):
-            execute([rclone, "copyto", remote + "/" + filename, str(root / filename), "--config", "/dev/null"], env=env)
-        with (root / "space.eunha.control-plane.plist").open("rb") as stream:
-            service = plistlib.load(stream)
-        if not all(service.get("EnvironmentVariables", {}).get(key) for key in ["CONTROL_DATABASE_URL", "TEMPORAL_ADDRESS"]):
-            raise RuntimeError("backed-up service configuration is incomplete")
-        credential = re.search(r"^\s*credentials-file:\s*['\"]?([^'\"\n]+)", (root / "eunha.yml").read_text(), re.M)
-        if not credential or Path(credential.group(1).strip()).name not in archive_names:
-            raise RuntimeError("tunnel credential archive is missing")
-        execute([rclone, "copyto", remote + "/" + Path(credential.group(1).strip()).name, str(root / "tunnel-credentials.json"), "--config", "/dev/null"], env=env)
-        if not json.loads((root / "tunnel-credentials.json").read_text()).get("TunnelSecret"):
-            raise RuntimeError("tunnel credential archive is invalid")
-        report["service_configuration_verified"] = True
-        release = root / "release"
-        execute([rclone, "copy", remote + "/control-plane-release", str(release), "--config", "/dev/null"], env=env)
-        if not all((release / path).is_file() and (release / path).stat().st_size > 0 for path in ["eunha-space", "frontend/dist/index.html", "release-id"]):
-            raise RuntimeError("release archive is incomplete")
-        report["release_verified"] = True
+        if not args.existing_backups:
+            for filename in sorted(recovery_files):
+                execute([rclone, "copyto", remote + "/" + filename, str(root / filename), "--config", "/dev/null"], env=env)
+            with (root / "space.eunha.control-plane.plist").open("rb") as stream:
+                service = plistlib.load(stream)
+            if not all(service.get("EnvironmentVariables", {}).get(key) for key in ["CONTROL_DATABASE_URL", "TEMPORAL_ADDRESS"]):
+                raise RuntimeError("backed-up service configuration is incomplete")
+            credential = re.search(r"^\s*credentials-file:\s*['\"]?([^'\"\n]+)", (root / "eunha.yml").read_text(), re.M)
+            if not credential or Path(credential.group(1).strip()).name not in archive_names:
+                raise RuntimeError("tunnel credential archive is missing")
+            execute([rclone, "copyto", remote + "/" + Path(credential.group(1).strip()).name, str(root / "tunnel-credentials.json"), "--config", "/dev/null"], env=env)
+            if not json.loads((root / "tunnel-credentials.json").read_text()).get("TunnelSecret"):
+                raise RuntimeError("tunnel credential archive is invalid")
+            report["service_configuration_verified"] = True
+            release = root / "release"
+            execute([rclone, "copy", remote + "/control-plane-release", str(release), "--config", "/dev/null"], env=env)
+            if not all((release / path).is_file() and (release / path).stat().st_size > 0 for path in ["eunha-space", "frontend/dist/index.html", "release-id"]):
+                raise RuntimeError("release archive is incomplete")
+            report["release_verified"] = True
         data = root / "postgres"
         execute([str(pg / "initdb"), "-D", str(data), "-A", "trust", "-U", "eunha_restore_drill", "--no-locale"])
         socket_env = os.environ.copy()
         socket_env.update(PGHOST=str(root), PGPORT="56440", PGUSER="eunha_restore_drill")
         execute([str(pg / "pg_ctl"), "-D", str(data), "-l", str(root / "server.log"), "-o", f"-c listen_addresses='' -k {root} -p 56440", "-w", "start"])
         try:
-            execute([str(pg / "psql"), "-X", "-v", "ON_ERROR_STOP=1", "--dbname", "postgres", "-f", str(root / "postgres-globals.sql")], env=socket_env)
-            report["roles_restored"] = True
+            if not args.existing_backups:
+                execute([str(pg / "psql"), "-X", "-v", "ON_ERROR_STOP=1", "--dbname", "postgres", "-f", str(root / "postgres-globals.sql")], env=socket_env)
+                report["roles_restored"] = True
             for name in names:
                 database = name[:-len(".dump.gz")]
                 step = time.monotonic()
@@ -108,7 +112,10 @@ def main():
                 with gzip.open(compressed, "rb") as source, dump.open("wb") as output:
                     shutil.copyfileobj(source, output)
                 execute([str(pg / "createdb"), database], env=socket_env)
-                execute([str(pg / "pg_restore"), "--exit-on-error", "--no-acl", "--dbname", database, str(dump)], env=socket_env)
+                restore = [str(pg / "pg_restore"), "--exit-on-error", "--no-acl", "--dbname", database, str(dump)]
+                if args.existing_backups:
+                    restore.append("--no-owner")
+                execute(restore, env=socket_env)
                 table_count = int(execute([str(pg / "psql"), "-X", "-At", "--dbname", database, "-c", "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'"], env=socket_env))
                 if table_count == 0:
                     raise RuntimeError("restored database has no tables")

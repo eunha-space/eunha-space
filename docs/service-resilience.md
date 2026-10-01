@@ -72,6 +72,10 @@ After a successful backup, run:
 python3 ops/backup/restore-drill.py --report /private/tmp/eunha-restore-report.json
 ```
 
+Use `--existing-backups` to verify the existing database/media archives while
+the sensitive recovery extension awaits approval. This mode explicitly reports
+its narrower scope and does not claim to restore service credentials or roles.
+
 The drill selects the latest completed backup, verifies service and tunnel
 configuration and the runnable release, restores global roles and every Eunha
 and Temporal database into a disposable PostgreSQL cluster, then reads every

@@ -8,12 +8,16 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       CI: "true"
+      CARGO_BUILD_JOBS: "2"
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
+      - name: Rust formatting component
+        run: mise exec -- rustup component add rustfmt
       - name: Rust formatting and unit tests
         run: |
           mise exec -- cargo fmt --check
