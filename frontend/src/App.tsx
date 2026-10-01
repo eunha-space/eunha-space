@@ -339,7 +339,7 @@ export function App() {
               act={act}
             />
           )}
-          {view === "usage" && <Usage tenants={tenants} />}
+          {view === "usage" && <Usage tenants={tenants} runtimes={runtimes} />}
           {view === "instances" && (
             <Instances runtimes={runtimes} tenants={tenants} />
           )}

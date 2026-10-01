@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, errorMessage, type Tenant } from "@/api";
+import { api, errorMessage, type Tenant, type Runtime } from "@/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -8,15 +8,17 @@ import { UsageChart } from "@/components/console/usage-chart";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { AggregateUsage, formatBytes as bytes } from "@/components/console/aggregate-usage";
 
 type Sample = { tenant_id: string; sampled_at: number; database_bytes: number | null; connections: number | null; active_connections: number | null; transactions: number | null; stats_reset: string | null };
 type Reading = Sample & { rate: number | null };
-function bytes(value: number) {
-  const unit = value >= 1024 ** 3 ? 3 : value >= 1024 ** 2 ? 2 : value >= 1024 ? 1 : 0;
-  return `${(value / 1024 ** unit).toLocaleString(undefined, { maximumFractionDigits: 1 })} ${["B", "KiB", "MiB", "GiB"][unit]}`;
-}
 
-export function Usage({ tenants }: { tenants: Tenant[] }) {
+export function Usage({ tenants, runtimes }: { tenants: Tenant[]; runtimes: Runtime[] }) {
+  const [selectedInstanceId, setSelectedInstanceId] = useState("");
+  const instances = [...new Map(runtimes.map(runtime => [runtime.instance_id, { id: runtime.instance_id, name: runtime.instance_name }])).values()].sort((a, b) => a.name.localeCompare(b.name));
+  const instance = instances.find(row => row.id === selectedInstanceId) ?? instances[0];
+  const instanceRuntimeNames = new Set(runtimes.filter(runtime => runtime.instance_id === instance?.id).map(runtime => runtime.name));
+  const instanceTenants = tenants.filter(tenant => instanceRuntimeNames.has(tenant.runtime_name));
   const [readings, setReadings] = useState<Reading[]>([]);
   const [history, setHistory] = useState<Map<string, Reading[]>>(new Map());
   const [selectedId, setSelectedId] = useState("");
@@ -37,7 +39,7 @@ export function Usage({ tenants }: { tenants: Tenant[] }) {
         const next = samples.map(sample => {
           const before = previous.get(sample.tenant_id);
           const elapsed = before ? (sample.sampled_at - before.sampled_at) / 1000 : 0;
-          const valid = before && elapsed > 0 && sample.stats_reset === before.stats_reset && sample.transactions !== null && before.transactions !== null && sample.transactions >= before.transactions;
+          const valid = before && elapsed > 0 && elapsed <= 30 && sample.stats_reset === before.stats_reset && sample.transactions !== null && before.transactions !== null && sample.transactions >= before.transactions;
           const rate = valid ? (sample.transactions! - before!.transactions!) / elapsed : null;
           // Repeated cached readings preserve the last rate.
           if (elapsed === 0) return { ...sample, rate: before?.rate ?? null };
@@ -69,7 +71,9 @@ export function Usage({ tenants }: { tenants: Tenant[] }) {
     return () => { disposed = true; clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
   }, []);
   const byId = new Map(readings.map(sample => [sample.tenant_id, sample]));
-  const available = readings.filter(sample => sample.database_bytes !== null);
+  const eligible = (tenant: Tenant) => ["ready", "failed", "retained"].includes(tenant.lifecycle_state);
+  const eligibleIds = new Set(tenants.filter(eligible).map(tenant => tenant.id));
+  const instanceEligibleIds = new Set(instanceTenants.filter(eligible).map(tenant => tenant.id));
   const rows = tenants.filter(tenant => `${tenant.domain} ${tenant.title} ${tenant.runtime_name}`.toLowerCase().includes(search.toLowerCase())).sort((a, b) => (byId.get(b.id)?.database_bytes ?? -1) - (byId.get(a.id)?.database_bytes ?? -1));
   const selected = tenants.find(tenant => tenant.id === selectedId) ?? rows[0];
   const selectedTenantId = selected?.id;
@@ -100,9 +104,25 @@ export function Usage({ tenants }: { tenants: Tenant[] }) {
   return <div className="grid gap-4">
     <p className="text-muted-foreground text-sm">Live PostgreSQL usage, collected in the background every 10 seconds. CPU, RAM, media storage, and bandwidth require additional runtime instrumentation. Connections reflect direct PostgreSQL backends; pooled client connections are not included.</p>
     {error && <Alert variant="destructive"><AlertDescription>Usage refresh failed. Previous readings may be stale. {error}</AlertDescription></Alert>}
-    <div className="grid gap-3 sm:grid-cols-3">
-      {[ ["Database storage", loaded ? bytes(available.reduce((sum, row) => sum + row.database_bytes!, 0)) : "—"], ["Database connections", loaded ? available.reduce((sum, row) => sum + (row.connections ?? 0), 0).toLocaleString() : "—"], ["Reporting tenants", loaded ? `${available.length} / ${tenants.length}` : "—"] ].map(([label, value]) => <Card key={label}><CardHeader><CardTitle>{label}</CardTitle></CardHeader><CardContent className="text-2xl font-semibold tabular-nums">{value}</CardContent></Card>)}
-    </div>
+    <section className="grid gap-3" aria-labelledby="fleet-usage-title">
+      <div><h2 id="fleet-usage-title" className="font-semibold">Fleet-wide usage</h2><p className="text-muted-foreground text-xs">PostgreSQL usage across every hosting server and runtime.</p></div>
+      <AggregateUsage readings={readings.filter(row => eligibleIds.has(row.tenant_id))} expected={tenants.filter(eligible).length} now={now} loaded={loaded} />
+    </section>
+    <section className="grid gap-3" aria-labelledby="instance-usage-title">
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div><h2 id="instance-usage-title" className="font-semibold">Instance-wide usage</h2><p className="text-muted-foreground text-xs">Combined tenant PostgreSQL usage for the selected hosting server.</p></div>
+        <label className="grid gap-1 text-sm">Hosting server
+          <NativeSelect value={instance?.id ?? ""} onChange={event => setSelectedInstanceId(event.target.value)} disabled={!instances.length}>
+            {!instances.length && <option value="">No hosting servers</option>}
+            {instances.map(row => <option key={row.id} value={row.id}>{row.name}</option>)}
+          </NativeSelect>
+        </label>
+      </div>
+      {instance ? <AggregateUsage key={instance.id} instanceId={instance.id}
+        readings={readings.filter(row => instanceEligibleIds.has(row.tenant_id))}
+        expected={instanceTenants.filter(eligible).length} now={now} loaded={loaded} />
+        : <p className="text-muted-foreground text-sm">No hosting servers are registered.</p>}
+    </section>
     <div className="grid gap-3">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div><h2 className="font-semibold">Tenant trends</h2><p className="text-muted-foreground text-xs">Last 10 minutes, restored from stored samples after reload. Gaps indicate missing samples or pauses.</p></div>

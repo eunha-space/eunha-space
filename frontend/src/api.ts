@@ -171,6 +171,7 @@ export type Operation = {
 
 export type Runtime = {
   id: string;
+  instance_id: string;
   name: string;
   /** Stable operator-facing name of the physical instance. */
   instance_name: string;

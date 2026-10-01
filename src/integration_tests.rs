@@ -412,3 +412,129 @@ async fn interrupted_provisioning_step_resumes_and_completed_step_is_skipped(poo
     .unwrap();
     assert_eq!(attempts, 2);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn fleet_history_groups_hosts_without_double_counting_or_hiding_gaps(pool: PgPool) {
+    let (runtime, headers) = fixture(&pool).await;
+    let host = sqlx::query_scalar::<_, Uuid>("SELECT instance_id FROM runtimes WHERE id=$1")
+        .bind(runtime)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let other_host = Uuid::new_v4();
+    let other_runtime = Uuid::new_v4();
+    sqlx::query("INSERT INTO instances(id,name,address) VALUES($1,'other-host','127.0.0.2')")
+        .bind(other_host)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO runtimes(id,name,instance_id,tenant_directory,service_label,binary_path,bind_address,blue_bind_address,green_bind_address,origin_hostname) VALUES($1,'other-runtime',$2,'/tmp/other','other.runtime','/tmp/other/eunha','127.0.0.1:60002','127.0.0.1:61002','127.0.0.1:61003','other.origin.example')")
+        .bind(other_runtime).bind(other_host).execute(&pool).await.unwrap();
+    let sibling_runtime = Uuid::new_v4();
+    sqlx::query("INSERT INTO runtimes(id,name,instance_id,tenant_directory,service_label,binary_path,bind_address,blue_bind_address,green_bind_address,origin_hostname) VALUES($1,'sibling-runtime',$2,'/tmp/sibling','sibling.runtime','/tmp/sibling/eunha','127.0.0.1:60004','127.0.0.1:61004','127.0.0.1:61005','sibling.origin.example')")
+        .bind(sibling_runtime).bind(host).execute(&pool).await.unwrap();
+    let ids = [
+        tenant(&pool, runtime).await,
+        tenant(&pool, sibling_runtime).await,
+        tenant(&pool, other_runtime).await,
+        tenant(&pool, runtime).await,
+    ];
+    for id in ids {
+        sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,resend_api_key,resend_from,media_storage_region,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url) VALUES($1,'postgresql://private-secret@localhost/test','redis://localhost','private-key','test@example','auto','private-id','private-media-secret','https://media.example')")
+            .bind(id).execute(&pool).await.unwrap();
+    }
+    sqlx::query("UPDATE tenants SET lifecycle_state='provisioning' WHERE id=$1")
+        .bind(ids[3])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let now = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+    let bucket = (now / 10000 - 4) * 10000;
+    for (index, id) in ids.into_iter().enumerate() {
+        let multiplier = 1_i64 << index;
+        for (offset, transactions) in [(-9000, multiplier * 10), (1000, multiplier * 20)] {
+            sqlx::query("INSERT INTO tenant_usage_samples(tenant_id,sampled_at,database_bytes,connections,active_connections,transactions,stats_reset) VALUES($1,$2,$3,$4,1,$5,'reset-a')")
+                .bind(id).bind(bucket+offset).bind(multiplier*100+10).bind(multiplier).bind(transactions).execute(&pool).await.unwrap();
+        }
+    }
+    // Two samples in one bucket contribute only the latest reading.
+    sqlx::query("INSERT INTO tenant_usage_samples(tenant_id,sampled_at,database_bytes,connections,active_connections,transactions,stats_reset) VALUES($1,$2,120,2,1,21,'reset-a')")
+        .bind(ids[0]).bind(bucket+1500).execute(&pool).await.unwrap();
+    // A failed probe must not turn partial fleet totals into apparently complete values.
+    for (index, id) in ids[..3].iter().enumerate() {
+        sqlx::query("INSERT INTO tenant_usage_samples(tenant_id,sampled_at,database_bytes,connections,active_connections,transactions,stats_reset) VALUES($1,$2,$3,$4,$4,$5,'reset-a')")
+            .bind(id).bind(bucket+11000).bind((index>0).then_some(100_i64)).bind((index>0).then_some(1_i64)).bind((index>0).then_some(100_i64)).execute(&pool).await.unwrap();
+    }
+    let app = state(pool);
+    let Json(fleet) = usage::aggregate_history(
+        State(app.clone()),
+        headers.clone(),
+        Query(usage::AggregateScope::default()),
+    )
+    .await
+    .unwrap();
+    let value = serde_json::to_value(&fleet).unwrap();
+    assert_eq!(value["eligible_tenants"], 3);
+    let complete = value["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["sampled_at"] == bucket)
+        .unwrap();
+    assert_eq!(complete["database_bytes"], 740);
+    assert_eq!(complete["connections"], 8);
+    assert_eq!(complete["rate"], 8.0);
+    let partial = value["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["sampled_at"] == bucket + 10000)
+        .unwrap();
+    assert_eq!(partial["reporting_tenants"], 2);
+    assert!(partial["database_bytes"].is_null());
+    assert!(partial["rate"].is_null());
+    let Json(instance) = usage::aggregate_history(
+        State(app.clone()),
+        headers.clone(),
+        Query(usage::AggregateScope {
+            instance_id: Some(host),
+        }),
+    )
+    .await
+    .unwrap();
+    let instance = serde_json::to_value(instance).unwrap();
+    assert_eq!(instance["eligible_tenants"], 2);
+    let point = instance["samples"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["sampled_at"] == bucket)
+        .unwrap();
+    assert_eq!(point["database_bytes"], 330);
+    assert_eq!(point["rate"], 4.0);
+    let serialized = value.to_string();
+    assert!(!serialized.contains("private"));
+    assert!(!serialized.contains("postgresql"));
+    let Json(empty) = usage::aggregate_history(
+        State(app.clone()),
+        headers,
+        Query(usage::AggregateScope {
+            instance_id: Some(Uuid::new_v4()),
+        }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(serde_json::to_value(empty).unwrap()["eligible_tenants"], 0);
+    assert_eq!(
+        usage::aggregate_history(
+            State(app),
+            HeaderMap::new(),
+            Query(usage::AggregateScope::default())
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+}

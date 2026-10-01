@@ -39,6 +39,78 @@ pub(crate) async fn history(
     Ok(Json(rows.into_iter().rev().collect()))
 }
 
+#[derive(Default, Deserialize)]
+pub(crate) struct AggregateScope {
+    pub instance_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct AggregateHistory {
+    eligible_tenants: i64,
+    samples: Vec<AggregateSample>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AggregateSample {
+    sampled_at: i64,
+    reporting_tenants: i64,
+    database_bytes: Option<i64>,
+    connections: Option<i64>,
+    active_connections: Option<i64>,
+    rate: Option<f64>,
+}
+
+pub(crate) async fn aggregate_history(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Query(scope): Query<AggregateScope>,
+) -> Result<Json<AggregateHistory>, ApiError> {
+    operator(&headers, &s.db).await?;
+    // One statement gives inventory and samples a consistent snapshot. Select
+    // the latest reading per tenant/bucket so retries cannot double-count usage.
+    let SqlJson(history) = sqlx::query_scalar::<_, SqlJson<AggregateHistory>>(r#"
+        WITH eligible AS (
+            SELECT t.id FROM tenants t
+            JOIN tenant_configuration c ON c.tenant_id=t.id
+            JOIN runtimes r ON r.id=t.runtime_id
+            WHERE t.lifecycle_state IN ('ready','failed','retained')
+              AND ($1::uuid IS NULL OR r.instance_id=$1)
+        ), previous AS (
+            SELECT u.*,lag(sampled_at) OVER w previous_at,
+                lag(transactions) OVER w previous_transactions,
+                lag(stats_reset) OVER w previous_reset
+            FROM tenant_usage_samples u JOIN eligible e ON e.id=u.tenant_id
+            WHERE sampled_at >= $2-30000
+            WINDOW w AS (PARTITION BY tenant_id ORDER BY sampled_at)
+        ), readings AS (
+            SELECT DISTINCT ON (tenant_id,sampled_at/10000)
+                tenant_id,sampled_at/10000*10000 bucket,
+                database_bytes,connections,active_connections,
+                CASE WHEN sampled_at-previous_at BETWEEN 1 AND 30000
+                    AND stats_reset IS NOT DISTINCT FROM previous_reset
+                    AND transactions >= previous_transactions
+                THEN (transactions-previous_transactions)::double precision
+                     / ((sampled_at-previous_at)::double precision/1000) END rate
+            FROM previous WHERE sampled_at >= $2
+            ORDER BY tenant_id,sampled_at/10000,sampled_at DESC
+        ), totals AS (
+            SELECT bucket sampled_at,count(database_bytes) reporting_tenants,
+                CASE WHEN count(database_bytes)=(SELECT count(*) FROM eligible)
+                     THEN sum(database_bytes)::bigint END database_bytes,
+                CASE WHEN count(connections)=(SELECT count(*) FROM eligible)
+                     THEN sum(connections)::bigint END connections,
+                CASE WHEN count(active_connections)=(SELECT count(*) FROM eligible)
+                     THEN sum(active_connections)::bigint END active_connections,
+                CASE WHEN count(rate)=(SELECT count(*) FROM eligible)
+                     THEN sum(rate) END rate
+            FROM readings GROUP BY bucket
+        ) SELECT jsonb_build_object(
+            'eligible_tenants',(SELECT count(*) FROM eligible),
+            'samples',COALESCE((SELECT jsonb_agg(to_jsonb(t) ORDER BY sampled_at) FROM totals t),'[]'::jsonb))
+        "#).bind(scope.instance_id).bind(now_millis()-600_000).fetch_one(&s.db).await?;
+    Ok(Json(history))
+}
+
 fn now_millis() -> i64 {
     (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
 }

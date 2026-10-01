@@ -13,6 +13,21 @@ The latest persisted readings are restored into the cache after service restart.
 Missing readings and collection pauses longer than thirty seconds break graph
 lines. Cached samples are not added twice.
 
+The page includes fleet-wide and hosting-server-wide metric cards and ten-minute
+charts, alongside individual tenant trends. A hosting server groups all runtimes
+with the same instance ID; it is the physical instance shown on the Instances
+page. These totals describe its tenants' PostgreSQL usage, not total host CPU or
+RAM. The authenticated `/api/usage/history` endpoint returns fleet history;
+`?instance_id=<UUID>` scopes it to one hosting server. Aggregation uses current
+tenant placement and eligibility, so moving a tenant changes its history's scope.
+
+Aggregate history takes the latest sample per tenant in each ten-second bucket.
+Transaction rates are calculated per tenant before summing, and counter resets
+or gaps longer than thirty seconds invalidate the rate. Graphs omit incomplete
+fleet/server totals. Cards sum only readings no older than thirty seconds, show
+partial coverage explicitly, and display unavailable metrics as missing rather
+than zero. The reporting count covers eligible, configured tenants.
+
 The collector uses each tenant's configured direct PostgreSQL connection. It
 reports database size, backend connections (excluding its own connection), active
 backends, and committed plus rolled-back transactions. The browser computes
