@@ -42,6 +42,18 @@ def latest_completed_set():
     return matches[-1]
 
 
+def verify_database(pg, database, env):
+    # Include application schemas such as eunha, excluding PostgreSQL internals.
+    scope = "table_schema <> 'information_schema' AND table_schema !~ '^pg_' AND table_type='BASE TABLE'"
+    count = int(execute([str(pg / "psql"), "-X", "-At", "--dbname", database, "-c",
+                        "SELECT count(*) FROM information_schema.tables WHERE " + scope], env=env))
+    if count == 0:
+        raise RuntimeError("restored database has no application tables")
+    execute([str(pg / "psql"), "-X", "-v", "ON_ERROR_STOP=1", "--dbname", database, "-c",
+             "DO $$ DECLARE t record; n bigint; BEGIN FOR t IN SELECT table_schema,table_name FROM information_schema.tables WHERE " + scope + " LOOP EXECUTE format('SELECT count(*) FROM %I.%I',t.table_schema,t.table_name) INTO n; END LOOP; END $$;"], env=env)
+    return count
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--set", default=None, help="completed set path; defaults to most recent successful backup")
@@ -112,15 +124,11 @@ def main():
                 with gzip.open(compressed, "rb") as source, dump.open("wb") as output:
                     shutil.copyfileobj(source, output)
                 execute([str(pg / "createdb"), database], env=socket_env)
-                restore = [str(pg / "pg_restore"), "--exit-on-error", "--no-acl", "--dbname", database, str(dump)]
+                restore = [str(pg / "pg_restore"), "--exit-on-error", "--dbname", database, str(dump)]
                 if args.existing_backups:
-                    restore.append("--no-owner")
+                    restore.extend(["--no-owner", "--no-acl"])
                 execute(restore, env=socket_env)
-                table_count = int(execute([str(pg / "psql"), "-X", "-At", "--dbname", database, "-c", "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'"], env=socket_env))
-                if table_count == 0:
-                    raise RuntimeError("restored database has no tables")
-                # Read every table through an aggregate; output includes no row contents.
-                execute([str(pg / "psql"), "-X", "-v", "ON_ERROR_STOP=1", "--dbname", database, "-c", "DO $$ DECLARE t record; n bigint; BEGIN FOR t IN SELECT tablename FROM pg_tables WHERE schemaname='public' LOOP EXECUTE format('SELECT count(*) FROM public.%I',t.tablename) INTO n; END LOOP; END $$;"], env=socket_env)
+                table_count = verify_database(pg, database, socket_env)
                 report["databases"].append({"name": database, "tables": table_count, "restore_seconds": round(time.monotonic() - step, 1)})
                 execute([str(pg / "dropdb"), database], env=socket_env)
                 dump.unlink()

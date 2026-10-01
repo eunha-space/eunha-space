@@ -18,3 +18,4 @@ trap cleanup EXIT
 "$PG_BIN/pg_ctl" -D "$TEST_ROOT/data" -l "$TEST_ROOT/server.log" -o "-c listen_addresses='' -k $TEST_ROOT -p 56439" -w start >/dev/null
 cd "$ROOT"
 DATABASE_URL="postgresql:///postgres?host=$TEST_ROOT&port=56439" mise exec -- cargo test integration_tests -- --ignored
+PG_BIN="$PG_BIN" PGHOST="$TEST_ROOT" PGPORT=56439 mise exec -- python3 ops/tests/verify_restore.py
