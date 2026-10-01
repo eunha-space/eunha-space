@@ -18,6 +18,7 @@ import {
   type Tenant,
 } from "@/api";
 import { relativeTime } from "@/format";
+import { Usage } from "@/Usage";
 import { Instances } from "@/Instances";
 import { Login } from "@/Login";
 import { Operations } from "@/Operations";
@@ -181,6 +182,7 @@ export function App() {
 
   const sections: { id: View; label: string; icon: typeof Server }[] = [
     { id: "tenants", label: t("Tenants"), icon: Server },
+    { id: "usage", label: t("Resource usage"), icon: Activity },
     { id: "instances", label: t("Instances"), icon: HardDrive },
     { id: "releases", label: t("Releases"), icon: Rocket },
     { id: "operations", label: t("Operations"), icon: Activity },
@@ -318,6 +320,7 @@ export function App() {
               act={act}
             />
           )}
+          {view === "usage" && <Usage tenants={tenants} />}
           {view === "instances" && (
             <Instances runtimes={runtimes} tenants={tenants} />
           )}

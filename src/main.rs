@@ -38,6 +38,7 @@ use uuid::Uuid;
 
 mod domain_change;
 mod temporal;
+mod usage;
 
 // SQLx embeds the complete migration set in this binary at compile time.
 
@@ -55,6 +56,7 @@ enum Command {
 
 #[derive(Clone)]
 struct AppState {
+    usage: Arc<tokio::sync::Mutex<usage::Cache>>,
     db: PgPool,
     client: reqwest::Client,
     provision_database_url: String,
@@ -824,6 +826,7 @@ async fn main() -> Result<()> {
     }
 
     let state = Arc::new(AppState {
+        usage: Arc::new(tokio::sync::Mutex::new(usage::Cache::default())),
         db,
         provision_database_url: std::env::var("CONTROL_PROVISION_DATABASE_URL")
             .unwrap_or(database_url),
@@ -947,6 +950,7 @@ async fn main() -> Result<()> {
         )
         .route("/customer/dns-check", get(customer_dns_check))
         .route("/tenants", get(tenants).post(create_tenant))
+        .route("/usage", get(usage::usage))
         .route("/tenants/import", post(import_tenant))
         .route("/tenants/{id}/check", post(check_tenant))
         .route("/tenants/{id}/retry", post(retry_provisioning))

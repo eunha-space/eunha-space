@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 /** The console lives under /admin, one path per section. */
 export const BASE_PATH = "/admin";
 
-export const SECTIONS = ["tenants", "instances", "releases", "operations"] as const;
+export const SECTIONS = ["tenants", "usage", "instances", "releases", "operations"] as const;
 export type View = (typeof SECTIONS)[number];
 
 const DEFAULT_VIEW: View = "tenants";
