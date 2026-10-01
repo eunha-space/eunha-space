@@ -52,6 +52,7 @@ export function App() {
   const [operations, setOperations] = useState<Operation[]>([]);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [serviceReady, setServiceReady] = useState(true);
   const [updatedAt, setUpdatedAt] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [now, setNow] = useState(() => Date.now());
@@ -109,6 +110,23 @@ export function App() {
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [load]);
+
+  useEffect(() => {
+    let disposed = false;
+    let inFlight = false;
+    async function checkReadiness() {
+      if (document.hidden || inFlight) return;
+      inFlight = true;
+      const ready = await fetch("/health/ready").then(async response => response.ok && (await response.json()).ready === true).catch(() => false);
+      if (!disposed) setServiceReady(ready);
+      inFlight = false;
+    }
+    void checkReadiness();
+    const timer = setInterval(() => void checkReadiness(), 30000);
+    const visible = () => { if (!document.hidden) void checkReadiness(); };
+    document.addEventListener("visibilitychange", visible);
+    return () => { disposed = true; clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
+  }, []);
 
   /** Keeps "updated 20 seconds ago" honest even when polling is paused. */
   useEffect(() => {
@@ -295,6 +313,7 @@ export function App() {
             </div>
           </header>
 
+          {!serviceReady && <Alert variant="destructive" className="mb-3"><CircleAlert /><AlertDescription>Control plane needs attention: a dependency is unavailable or background work has stalled. Tenant operations may be delayed.</AlertDescription></Alert>}
           {error && (
             <Alert variant="destructive" className="mb-3">
               <CircleAlert />

@@ -2,9 +2,8 @@
 use super::*;
 use futures::{StreamExt, stream};
 use sqlx::{Connection, PgConnection};
-use std::time::Instant;
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub(crate) struct Usage {
     tenant_id: Uuid,
     sampled_at: i64,
@@ -17,7 +16,6 @@ pub(crate) struct Usage {
 
 #[derive(Default)]
 pub(crate) struct Cache {
-    collected: Option<Instant>,
     rows: Vec<Usage>,
 }
 
@@ -26,14 +24,42 @@ pub(crate) async fn usage(
     headers: HeaderMap,
 ) -> Result<Json<Vec<Usage>>, ApiError> {
     operator(&headers, &s.db).await?;
-    // Coalesce concurrent viewers and cap collection to once per ten seconds.
-    let mut cache = s.usage.lock().await;
-    if cache
-        .collected
-        .is_some_and(|at| at.elapsed() < Duration::from_secs(10))
-    {
-        return Ok(Json(cache.rows.clone()));
+    let rows = s.usage.lock().await.rows.clone();
+    Ok(Json(rows))
+}
+
+pub(crate) async fn history(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<Usage>>, ApiError> {
+    operator(&headers, &s.db).await?;
+    let rows = sqlx::query_as::<_, Usage>("SELECT tenant_id,sampled_at,database_bytes,connections,active_connections,transactions,stats_reset FROM tenant_usage_samples WHERE tenant_id=$1 AND sampled_at >= $2 ORDER BY sampled_at DESC LIMIT 120")
+        .bind(id).bind(now_millis() - 600_000).fetch_all(&s.db).await?;
+    Ok(Json(rows.into_iter().rev().collect()))
+}
+
+fn now_millis() -> i64 {
+    (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64
+}
+
+pub(crate) async fn sampler(s: Shared) {
+    // Serve the previous snapshot immediately after a restart, with its real age.
+    if let Ok(rows) = sqlx::query_as::<_, Usage>("SELECT DISTINCT ON (tenant_id) tenant_id,sampled_at,database_bytes,connections,active_connections,transactions,stats_reset FROM tenant_usage_samples WHERE sampled_at >= $1 ORDER BY tenant_id,sampled_at DESC")
+        .bind(now_millis() - 86_400_000).fetch_all(&s.db).await {
+        s.usage.lock().await.rows = rows;
     }
+    loop {
+        if collect(&s).await.is_err() {
+            tracing::warn!("usage sampling failed; retaining previous readings");
+        } else {
+            s.health.tick("usage-sampler");
+        }
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+}
+
+pub(crate) async fn collect(s: &Shared) -> Result<(), ApiError> {
     let tenants = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT t.id,c.database_url FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id WHERE t.lifecycle_state IN ('ready','failed','retained') ORDER BY t.domain",
     ).fetch_all(&s.db).await.map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Usage inventory unavailable.".into()))?;
@@ -58,7 +84,15 @@ pub(crate) async fn usage(
             stats_reset: values.and_then(|v| v.4),
         }
     })).buffer_unordered(8).collect::<Vec<_>>().await;
-    cache.collected = Some(Instant::now());
-    cache.rows = rows.clone();
-    Ok(Json(rows))
+    let mut tx = s.db.begin().await?;
+    // One fixed insert; samples contain identifiers and numbers, never URLs.
+    sqlx::query("INSERT INTO tenant_usage_samples SELECT tenant_id,sampled_at,database_bytes,connections,active_connections,transactions,stats_reset FROM jsonb_populate_recordset(NULL::tenant_usage_samples,$1) ON CONFLICT DO NOTHING")
+        .bind(SqlJson(&rows)).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM tenant_usage_samples WHERE sampled_at < $1")
+        .bind(now_millis() - 86_400_000)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    s.usage.lock().await.rows = rows;
+    Ok(())
 }

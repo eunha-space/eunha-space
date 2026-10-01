@@ -1,0 +1,26 @@
+name: Checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      CI: "true"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: jdx/mise-action@v2
+      - name: Rust formatting and unit tests
+        run: |
+          mise exec -- cargo fmt --check
+          mise exec -- cargo test
+      - name: PostgreSQL failure and concurrency tests
+        run: mise run test-integration
+      - name: Deployment recovery tests
+        run: mise run test-deploy
+      - name: Frontend
+        run: mise run frontend

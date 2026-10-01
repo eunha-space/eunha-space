@@ -8,8 +8,8 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use temporalio_client::{
-    Client, ClientOptions, Connection, WorkflowSignalOptions, WorkflowStartOptions,
-    envconfig::LoadClientConfigProfileOptions, errors::WorkflowStartError,
+    Client, ClientOptions, Connection, WorkflowIdReusePolicy, WorkflowSignalOptions,
+    WorkflowStartOptions, envconfig::LoadClientConfigProfileOptions, errors::WorkflowStartError,
 };
 use temporalio_macros::{activities, workflow, workflow_methods};
 use temporalio_sdk::{
@@ -168,28 +168,9 @@ impl TenantActivities {
         tenant_id: String,
     ) -> Result<(), ActivityError> {
         let tenant_id = Uuid::parse_str(&tenant_id).map_err(ActivityError::from)?;
-        let mut tx = self.state.db.begin().await.map_err(ActivityError::from)?;
-        let due = sqlx::query_scalar::<_, bool>(
-            "SELECT true FROM tenants WHERE id=$1 AND lifecycle_state='retained' AND purge_scheduled_for <= now() FOR UPDATE",
-        )
-        .bind(tenant_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(ActivityError::from)?
-        .is_some();
-        if due {
-            crate::start_purge(
-                &mut tx,
-                tenant_id,
-                None,
-                None,
-                true,
-                "The retention period ended without a restore; the tenant's data is being destroyed.",
-            )
+        schedule_due_purge(&self.state, tenant_id)
             .await
             .map_err(ActivityError::from)?;
-        }
-        tx.commit().await.map_err(ActivityError::from)?;
         Ok(())
     }
 }
@@ -478,6 +459,7 @@ pub async fn run_worker(state: Shared) -> Result<()> {
     tracing::info!(task_queue = TASK_QUEUE, "connecting Temporal worker");
     let client = client().await?;
     tracing::info!(task_queue = TASK_QUEUE, "Temporal worker connected");
+    let health = state.health.clone();
     let worker_options = WorkerOptions::new(TASK_QUEUE)
         .register_activities(TenantActivities { state })
         .register_workflow::<TenantProvisionWorkflow>()?
@@ -487,7 +469,14 @@ pub async fn run_worker(state: Shared) -> Result<()> {
         .build();
     let mut worker = Worker::new(&runtime, client, worker_options)?;
     tracing::info!(task_queue = TASK_QUEUE, "Temporal worker polling");
-    worker.run().await?;
+    health
+        .worker
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let result = worker.run().await;
+    health
+        .worker
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    result?;
     Ok(())
 }
 
@@ -504,20 +493,20 @@ pub async fn wake_provisioning(state: &Shared, tenant_id: Uuid) {
     {
         Ok(Some(workflow_id)) => workflow_id,
         Ok(None) => return,
-        Err(error) => {
-            tracing::warn!(error = %error, %tenant_id, "could not find provisioning workflow to wake");
+        Err(_error) => {
+            tracing::warn!(%tenant_id, "could not find provisioning workflow to wake");
             return;
         }
     };
     let client = match client().await {
         Ok(client) => client,
-        Err(error) => {
-            tracing::warn!(error = %error, %tenant_id, "could not connect to Temporal to wake provisioning");
+        Err(_error) => {
+            tracing::warn!(%tenant_id, "could not connect to Temporal to wake provisioning");
             return;
         }
     };
     let handle = client.get_workflow_handle::<TenantProvisionWorkflow>(workflow_id);
-    if let Err(error) = handle
+    if let Err(_error) = handle
         .signal(
             TenantProvisionWorkflow::wake,
             (),
@@ -525,7 +514,7 @@ pub async fn wake_provisioning(state: &Shared, tenant_id: Uuid) {
         )
         .await
     {
-        tracing::debug!(error = %error, %tenant_id, "provisioning workflow was not available to wake");
+        tracing::debug!(%tenant_id, "provisioning workflow was not available to wake");
     }
 }
 
@@ -547,25 +536,26 @@ pub async fn lifecycle_dispatcher(state: Shared) {
                             .start_workflow(
                                 TenantLifecycleWorkflow::run,
                                 format!("{kind}:{tenant_id}"),
-                                WorkflowStartOptions::new(TASK_QUEUE, workflow_id).build(),
+                                dispatch_options(workflow_id),
                             )
                             .await
                         {
-                            Ok(_) => {
+                            Ok(_) | Err(WorkflowStartError::AlreadyStarted { .. }) => {
                                 let _ = sqlx::query("UPDATE temporal_dispatches SET delivered_at=now(),attempts=attempts+1,last_error=NULL WHERE id=$1").bind(dispatch_id).execute(&state.db).await;
                             }
-                            Err(error) => {
-                                let _ = sqlx::query("UPDATE temporal_dispatches SET attempts=attempts+1,last_error=$1 WHERE id=$2").bind(error.to_string()).bind(dispatch_id).execute(&state.db).await;
+                            Err(_error) => {
+                                let _ = sqlx::query("UPDATE temporal_dispatches SET attempts=attempts+1,last_error=$1 WHERE id=$2").bind("Workflow dispatch failed; retrying.").bind(dispatch_id).execute(&state.db).await;
                             }
                         }
                     }
                 }
-                Err(error) => {
-                    tracing::warn!(error = %error, "Temporal lifecycle dispatcher is unavailable")
+                Err(_error) => {
+                    tracing::warn!("Temporal lifecycle dispatcher is unavailable")
                 }
             },
-            Err(error) => tracing::warn!(error = %error, "could not read lifecycle work queue"),
+            Err(_error) => tracing::warn!("could not read lifecycle work queue"),
         }
+        state.health.tick("lifecycle-dispatch");
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
@@ -586,26 +576,27 @@ pub async fn domain_change_dispatcher(state: Shared) {
                             .start_workflow(
                                 TenantDomainChangeWorkflow::run,
                                 tenant_id.to_string(),
-                                WorkflowStartOptions::new(TASK_QUEUE, workflow_id).build(),
+                                dispatch_options(workflow_id),
                             )
                             .await
                         {
-                            Ok(_) => {
+                            Ok(_) | Err(WorkflowStartError::AlreadyStarted { .. }) => {
                                 let _ = sqlx::query("UPDATE temporal_dispatches SET delivered_at=now(),attempts=attempts+1,last_error=NULL WHERE id=$1").bind(dispatch_id).execute(&state.db).await;
                             }
-                            Err(error) => {
-                                let _ = sqlx::query("UPDATE temporal_dispatches SET attempts=attempts+1,last_error=$1 WHERE id=$2").bind(error.to_string()).bind(dispatch_id).execute(&state.db).await;
+                            Err(_error) => {
+                                let _ = sqlx::query("UPDATE temporal_dispatches SET attempts=attempts+1,last_error=$1 WHERE id=$2").bind("Workflow dispatch failed; retrying.").bind(dispatch_id).execute(&state.db).await;
                             }
                         }
                     }
                 }
-                Err(error) => {
-                    tracing::warn!(error = %error, "Temporal domain change dispatcher is unavailable")
+                Err(_error) => {
+                    tracing::warn!("Temporal domain change dispatcher is unavailable")
                 }
             },
             Ok(_) => {}
-            Err(error) => tracing::warn!(error = %error, "could not read domain change work queue"),
+            Err(_error) => tracing::warn!("could not read domain change work queue"),
         }
+        state.health.tick("domain-dispatch");
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
@@ -638,21 +629,22 @@ pub async fn reconcile_starter(state: Shared) {
                             // the server rejecting the duplicate is what makes
                             // the fixed workflow ID a single-execution guarantee.
                             Err(WorkflowStartError::AlreadyStarted { .. }) => {}
-                            Err(error) => {
-                                tracing::warn!(error = %error, %runtime_id, "could not start runtime reconciler")
+                            Err(_error) => {
+                                tracing::warn!(%runtime_id, "could not start runtime reconciler")
                             }
                         }
                     }
                 }
-                Err(error) => {
-                    tracing::warn!(error = %error, "Temporal reconcile starter is unavailable")
+                Err(_error) => {
+                    tracing::warn!("Temporal reconcile starter is unavailable")
                 }
             },
             Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(error = %error, "could not read the runtimes to reconcile")
+            Err(_error) => {
+                tracing::warn!("could not read the runtimes to reconcile")
             }
         }
+        state.health.tick("reconcile-starter");
         tokio::time::sleep(Duration::from_secs(60)).await;
     }
 }
@@ -728,27 +720,81 @@ pub async fn provisioning_dispatcher(state: Shared) {
                             .start_workflow(
                                 TenantProvisionWorkflow::run,
                                 tenant_id.to_string(),
-                                WorkflowStartOptions::new(TASK_QUEUE, workflow_id).build(),
+                                dispatch_options(workflow_id),
                             )
                             .await
                         {
-                            Ok(_) => {
+                            Ok(_) | Err(WorkflowStartError::AlreadyStarted { .. }) => {
                                 let _ = sqlx::query("UPDATE temporal_dispatches SET delivered_at=now(),attempts=attempts+1,last_error=NULL WHERE id=$1").bind(dispatch_id).execute(&state.db).await;
                             }
-                            Err(error) => {
-                                let _ = sqlx::query("UPDATE temporal_dispatches SET attempts=attempts+1,last_error=$1 WHERE id=$2").bind(error.to_string()).bind(dispatch_id).execute(&state.db).await;
+                            Err(_error) => {
+                                let _ = sqlx::query("UPDATE temporal_dispatches SET attempts=attempts+1,last_error=$1 WHERE id=$2").bind("Workflow dispatch failed; retrying.").bind(dispatch_id).execute(&state.db).await;
                             }
                         }
                     }
                 }
-                Err(error) => {
-                    tracing::warn!(error = %error, "Temporal provisioning dispatcher is unavailable");
+                Err(_error) => {
+                    tracing::warn!("Temporal provisioning dispatcher is unavailable");
                 }
             },
-            Err(error) => {
-                tracing::warn!(error = %error, "Temporal provisioning dispatcher is unavailable");
+            Err(_error) => {
+                tracing::warn!("Temporal provisioning dispatcher is unavailable");
             }
         }
+        state.health.tick("provision-dispatch");
         tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+}
+
+/// A bounded connection check; errors never enter the HTTP response.
+pub(crate) async fn available() -> bool {
+    matches!(
+        tokio::time::timeout(Duration::from_secs(2), client()).await,
+        Ok(Ok(_))
+    )
+}
+
+pub(crate) async fn schedule_due_purge(state: &Shared, tenant_id: Uuid) -> Result<()> {
+    let mut tx = state.db.begin().await?;
+    let due = sqlx::query_scalar::<_, bool>(
+        "SELECT true FROM tenants WHERE id=$1 AND lifecycle_state='retained' AND purge_scheduled_for <= now() FOR UPDATE",
+    )
+    .bind(tenant_id)
+    .fetch_optional(&mut *tx)
+    .await
+    ?
+    .is_some();
+    if due {
+        crate::start_purge(
+            &mut tx,
+            tenant_id,
+            None,
+            None,
+            true,
+            "The retention period ended without a restore; the tenant's data is being destroyed.",
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// A dispatch's ID is immutable. A lost acknowledgement must not restart a
+/// completed workflow or hold its outbox row pending forever.
+fn dispatch_options(workflow_id: String) -> WorkflowStartOptions {
+    WorkflowStartOptions::new(TASK_QUEUE, workflow_id)
+        .id_reuse_policy(WorkflowIdReusePolicy::RejectDuplicate)
+        .build()
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+    #[test]
+    fn dispatch_retries_reject_duplicate_executions() {
+        assert!(matches!(
+            dispatch_options("test-dispatch".into()).id_reuse_policy,
+            WorkflowIdReusePolicy::RejectDuplicate
+        ));
     }
 }

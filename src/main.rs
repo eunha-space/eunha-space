@@ -36,7 +36,11 @@ use tower_http::{
 };
 use uuid::Uuid;
 
+mod auth;
 mod domain_change;
+mod health;
+#[cfg(test)]
+mod integration_tests;
 mod temporal;
 mod usage;
 
@@ -56,6 +60,7 @@ enum Command {
 
 #[derive(Clone)]
 struct AppState {
+    health: Arc<health::Health>,
     usage: Arc<tokio::sync::Mutex<usage::Cache>>,
     db: PgPool,
     client: reqwest::Client,
@@ -132,12 +137,30 @@ type Shared = Arc<AppState>;
 struct ApiError(StatusCode, String);
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(serde_json::json!({ "error": self.1 }))).into_response()
+        let mut response = (self.0, Json(serde_json::json!({ "error": self.1 }))).into_response();
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-store"),
+        );
+        if self.0 == StatusCode::TOO_MANY_REQUESTS {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, header::HeaderValue::from_static("900"));
+        }
+        response
     }
 }
 impl<E: std::fmt::Display> From<E> for ApiError {
     fn from(value: E) -> Self {
-        Self(StatusCode::INTERNAL_SERVER_ERROR, value.to_string())
+        // Arbitrary driver/provider errors can contain credentials or query details.
+        // Log a type and correlation ID only; never format the source error.
+        let id = Uuid::new_v4();
+        tracing::error!(error_id = %id, error_type = std::any::type_name::<E>(), "internal request failure");
+        drop(value);
+        Self(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Request could not be completed. Reference: {id}"),
+        )
     }
 }
 
@@ -149,6 +172,27 @@ impl<E: std::fmt::Display> From<E> for ApiError {
 /// narrower one leaves out are marked `default`, because sqlx reads a column
 /// that is not in the query as an error rather than as `None`, and an `Option`
 /// field does not change that. Leaving one unmarked breaks customer sign-in.
+#[cfg(test)]
+mod error_tests {
+    use super::*;
+    #[tokio::test]
+    async fn arbitrary_errors_never_disclose_their_contents() {
+        let error = ApiError::from(anyhow::anyhow!(
+            "postgresql://tenant:secret@example/db token=private"
+        ));
+        let response = error.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(!body.contains("secret"));
+        assert!(!body.contains("private"));
+        assert!(!body.contains("postgresql"));
+        assert!(body.contains("Reference:"));
+    }
+}
+
 #[derive(Serialize, sqlx::FromRow)]
 struct TenantSummary {
     id: Uuid,
@@ -816,6 +860,7 @@ async fn main() -> Result<()> {
         std::env::var("CONTROL_DATABASE_URL").context("CONTROL_DATABASE_URL is required")?;
     let db = PgPoolOptions::new()
         .max_connections(8)
+        .acquire_timeout(Duration::from_secs(5))
         .connect(&database_url)
         .await?;
     sqlx::migrate!().run(&db).await?;
@@ -826,6 +871,7 @@ async fn main() -> Result<()> {
     }
 
     let state = Arc::new(AppState {
+        health: Arc::new(health::Health::default()),
         usage: Arc::new(tokio::sync::Mutex::new(usage::Cache::default())),
         db,
         provision_database_url: std::env::var("CONTROL_PROVISION_DATABASE_URL")
@@ -871,12 +917,21 @@ async fn main() -> Result<()> {
             .build()?,
         runtime_reloads: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     });
-    if let Err(error) = rename_legacy_tenant_files(&state).await {
-        tracing::error!(error = %format!("{error:#}"), "could not rename tenant configuration files");
+    if rename_legacy_tenant_files(&state).await.is_err() {
+        tracing::error!("could not rename tenant configuration files");
     }
-    tokio::spawn(health_reconciler(state.clone()));
-    tokio::spawn(release_recovery_reconciler(state.clone()));
-    tokio::spawn(automatic_release_reconciler(state.clone()));
+    health::supervise(state.clone(), "usage::sampler", usage::sampler);
+    health::supervise(state.clone(), "health_reconciler", health_reconciler);
+    health::supervise(
+        state.clone(),
+        "release_recovery_reconciler",
+        release_recovery_reconciler,
+    );
+    health::supervise(
+        state.clone(),
+        "automatic_release_reconciler",
+        automatic_release_reconciler,
+    );
     if std::env::var_os("TEMPORAL_ADDRESS").is_some() {
         let worker_state = state.clone();
         if let Err(error) = std::thread::Builder::new()
@@ -886,31 +941,53 @@ async fn main() -> Result<()> {
                     .enable_all()
                     .build();
                 match runtime {
-                // Nothing runs a workflow while the worker is down, and it goes
-                // down whenever Temporal does; it is started again rather
-                // than left stopped until the control plane restarts.
-                Ok(runtime) => runtime.block_on(async move {
-                    loop {
-                        if let Err(error) = temporal::run_worker(worker_state.clone()).await {
-                            tracing::error!(error = %format!("{error:#}"), "Temporal worker stopped; restarting");
+                    // Nothing runs a workflow while the worker is down, and it goes
+                    // down whenever Temporal does; it is started again rather
+                    // than left stopped until the control plane restarts.
+                    Ok(runtime) => runtime.block_on(async move {
+                        loop {
+                            if let Err(_error) = temporal::run_worker(worker_state.clone()).await {
+                                worker_state
+                                    .health
+                                    .worker
+                                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                                tracing::error!("Temporal worker stopped; restarting");
+                            }
+                            tokio::time::sleep(Duration::from_secs(10)).await;
                         }
-                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    }),
+                    Err(error) => {
+                        tracing::error!(error = %error, "could not start Temporal runtime")
                     }
-                }),
-                Err(error) => tracing::error!(error = %error, "could not start Temporal runtime"),
-            }
+                }
             })
         {
             tracing::error!(error = %error, "could not spawn Temporal worker thread");
         }
-        tokio::spawn(temporal::provisioning_dispatcher(state.clone()));
-        tokio::spawn(temporal::lifecycle_dispatcher(state.clone()));
-        tokio::spawn(temporal::domain_change_dispatcher(state.clone()));
-        tokio::spawn(temporal::reconcile_starter(state.clone()));
+        health::supervise(
+            state.clone(),
+            "temporal::provisioning_dispatcher",
+            temporal::provisioning_dispatcher,
+        );
+        health::supervise(
+            state.clone(),
+            "temporal::lifecycle_dispatcher",
+            temporal::lifecycle_dispatcher,
+        );
+        health::supervise(
+            state.clone(),
+            "temporal::domain_change_dispatcher",
+            temporal::domain_change_dispatcher,
+        );
+        health::supervise(
+            state.clone(),
+            "temporal::reconcile_starter",
+            temporal::reconcile_starter,
+        );
     } else {
         tracing::warn!("Temporal is not configured; tenant lifecycle work will remain queued");
     }
-    tokio::spawn(domain_reconciler(state.clone()));
+    health::supervise(state.clone(), "domain_reconciler", domain_reconciler);
     let api = Router::new()
         .route("/session", post(login).delete(logout))
         .route("/session/me", get(me))
@@ -951,6 +1028,7 @@ async fn main() -> Result<()> {
         .route("/customer/dns-check", get(customer_dns_check))
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/usage", get(usage::usage))
+        .route("/tenants/{id}/usage/history", get(usage::history))
         .route("/tenants/import", post(import_tenant))
         .route("/tenants/{id}/check", post(check_tenant))
         .route("/tenants/{id}/retry", post(retry_provisioning))
@@ -983,15 +1061,24 @@ async fn main() -> Result<()> {
             post(set_automatic_release),
         )
         .route("/operations/{id}/events", get(operation_events))
-        .route("/operations", get(operations));
+        .route("/operations", get(operations))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::request_budget,
+        ));
     // The console owns /admin/<section>; each of those paths has to serve the
     // shell with a 200 so a deep link or a refresh lands on the right section.
     // ServeDir::not_found_service would serve the shell but force a 404, and a
     // blanket fallback would answer for genuinely missing assets too, so the
     // console routes are explicit and everything else still 404s.
-    let index = ServeFile::new("frontend/dist/index.html");
+    let frontend_directory = PathBuf::from(
+        std::env::var("CONTROL_FRONTEND_DIRECTORY").unwrap_or_else(|_| "frontend/dist".into()),
+    );
+    let index = ServeFile::new(frontend_directory.join("index.html"));
     let app = Router::new()
         .nest("/api", api)
+        .route("/health/live", get(health::live))
+        .route("/health/ready", get(health::ready))
         .route_service("/", index.clone())
         .route_service("/admin", index.clone())
         .route_service("/admin/{*section}", index.clone())
@@ -1000,15 +1087,22 @@ async fn main() -> Result<()> {
         .route_service("/account", index)
         .route_service(
             "/instances/{id}",
-            ServeFile::new("frontend/dist/index.html"),
+            ServeFile::new(frontend_directory.join("index.html")),
         )
-        .fallback_service(ServeDir::new("frontend/dist"))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .fallback_service(ServeDir::new(frontend_directory))
+        .layer(TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
+            tracing::info_span!("http_request", method = %request.method(), path = %request.uri().path())
+        }))
+        .with_state(state.clone());
     let bind = std::env::var("BIND_ADDRESS").unwrap_or_else(|_| "127.0.0.1:60001".into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind, "eunha space control plane listening");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(health::shutdown(state))
+    .await?;
     Ok(())
 }
 
@@ -1049,6 +1143,7 @@ async fn operator(headers: &HeaderMap, db: &PgPool) -> Result<(Uuid, String), Ap
         .bind(token_hash(token)).fetch_optional(db).await?.ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "Session expired".into()))
 }
 async fn login(State(s): State<Shared>, Json(body): Json<Login>) -> Result<Response, ApiError> {
+    auth::limit(&s.db, "operator-login", &body.username, 10).await?;
     let row = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id,password_hash FROM operators WHERE username=$1",
     )
@@ -1061,16 +1156,7 @@ async fn login(State(s): State<Shared>, Json(body): Json<Login>) -> Result<Respo
             "Invalid credentials".into(),
         ));
     };
-    let parsed = PasswordHash::new(&hash).map_err(|_| {
-        ApiError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Stored credential is invalid".into(),
-        )
-    })?;
-    if Argon2::default()
-        .verify_password(body.password.as_bytes(), &parsed)
-        .is_err()
-    {
+    if !auth::verify(body.password.clone(), hash).await? {
         return Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "Invalid credentials".into(),
@@ -1144,6 +1230,7 @@ async fn customer_register(
     Json(mut body): Json<CustomerCredentials>,
 ) -> Result<StatusCode, ApiError> {
     body.email = body.email.trim().to_ascii_lowercase();
+    auth::limit(&s.db, "customer-auth", &body.email, 10).await?;
     if !body.email.contains('@') || body.email.len() > 254 {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
@@ -1242,6 +1329,7 @@ async fn customer_login(
     Json(mut body): Json<CustomerCredentials>,
 ) -> Result<Response, ApiError> {
     body.email = body.email.trim().to_ascii_lowercase();
+    auth::limit(&s.db, "customer-auth", &body.email, 10).await?;
     let row = sqlx::query_as::<_, (Uuid, Option<String>, bool)>(
         "SELECT id,password_hash,email_verified_at IS NOT NULL FROM customers WHERE email=$1",
     )
@@ -1264,19 +1352,7 @@ async fn customer_login(
             "Set a password after signing in with an email link.".into(),
         )
     })?;
-    let parsed = PasswordHash::new(&hash).map_err(|_| {
-        ApiError(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "Stored credential is invalid".into(),
-        )
-    })?;
-    if Argon2::default()
-        .verify_password(
-            body.password.as_deref().unwrap_or_default().as_bytes(),
-            &parsed,
-        )
-        .is_err()
-    {
+    if !auth::verify(body.password.clone().unwrap_or_default(), hash).await? {
         return Err(ApiError(
             StatusCode::UNAUTHORIZED,
             "Invalid credentials".into(),
@@ -1301,7 +1377,8 @@ async fn customer_set_password(
     Json(body): Json<NewCustomerPassword>,
 ) -> Result<StatusCode, ApiError> {
     let (id, _) = customer(&headers, &s.db).await?;
-    if body.password.len() < 14 {
+    auth::limit(&s.db, "password-change", &id.to_string(), 10).await?;
+    if body.password.len() < 14 || body.password.len() > 1024 {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "Use a password with at least 14 characters.".into(),
@@ -1316,33 +1393,14 @@ async fn customer_set_password(
     // itself the proof of ownership; anywhere else, prove the old one.
     let proved_by_email = customer_email_link_session(&headers, &s.db).await?;
     if let (Some(existing), false) = (existing, proved_by_email) {
-        let supplied = body.current_password.as_deref().unwrap_or_default();
-        let parsed = PasswordHash::new(&existing).map_err(|_| {
-            ApiError(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Stored credential is invalid".into(),
-            )
-        })?;
-        if Argon2::default()
-            .verify_password(supplied.as_bytes(), &parsed)
-            .is_err()
-        {
+        if !auth::verify(body.current_password.clone().unwrap_or_default(), existing).await? {
             return Err(ApiError(
                 StatusCode::FORBIDDEN,
                 "That current password is not right.".into(),
             ));
         }
     }
-    let salt = SaltString::generate(&mut OsRng);
-    let hash = Argon2::default()
-        .hash_password(body.password.as_bytes(), &salt)
-        .map_err(|_| {
-            ApiError(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Could not secure the password.".into(),
-            )
-        })?
-        .to_string();
+    let hash = auth::hash(body.password.clone()).await?;
     sqlx::query("UPDATE customers SET password_hash=$1 WHERE id=$2")
         .bind(hash)
         .bind(id)
@@ -2140,6 +2198,7 @@ async fn domain_reconciler(state: Shared) {
                 }
             }
         }
+        state.health.tick("domains");
         tokio::time::sleep(Duration::from_secs(15)).await;
     }
 }
@@ -3049,7 +3108,11 @@ async fn run_lifecycle_flow(
         let (status, attempts, stale) = match row {
             Ok(Some(row)) => row,
             Ok(None) => return Ok(()),
-            Err(error) => return Err(LifecycleRetry(error.to_string())),
+            Err(_) => {
+                return Err(LifecycleRetry(
+                    "Lifecycle state unavailable; retrying.".into(),
+                ));
+            }
         };
         match status.as_str() {
             "succeeded" => continue,
@@ -3059,10 +3122,10 @@ async fn run_lifecycle_flow(
             }
             _ => {}
         }
-        if let Err(error) = sqlx::query(&format!("UPDATE {table} SET status='running',attempts=attempts+1,error=NULL,started_at=now(),finished_at=NULL,updated_at=now() WHERE tenant_id=$1 AND step=$2"))
+        if let Err(_error) = sqlx::query(&format!("UPDATE {table} SET status='running',attempts=attempts+1,error=NULL,started_at=now(),finished_at=NULL,updated_at=now() WHERE tenant_id=$1 AND step=$2"))
             .bind(tenant_id).bind(step).execute(&state.db).await
         {
-            return Err(LifecycleRetry(error.to_string()));
+            return Err(LifecycleRetry("Lifecycle state update failed; retrying.".into()));
         }
         let result = lifecycle_step(state, tenant_id, step).await;
         let operation = sqlx::query_scalar::<_, Uuid>("SELECT id FROM operations WHERE tenant_id=$1 AND kind=$2 AND status='running' ORDER BY created_at DESC LIMIT 1")
@@ -4666,9 +4729,17 @@ async fn queue_runtime_release(
             "The stored runtime release target is invalid.".into(),
         ));
     }
+    let mut tx = state.db.begin().await?;
+    // Serialize deployment admission with the maintenance lease transition.
+    sqlx::query("SELECT pg_advisory_xact_lock(60001001)")
+        .execute(&mut *tx)
+        .await?;
+    if sqlx::query_scalar::<_, bool>("SELECT COALESCE(deploy_until > now(),false) FROM control_plane_maintenance WHERE singleton").fetch_one(&mut *tx).await? {
+        return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "Control plane deployment is in progress. Try again shortly.".into()));
+    }
     let operation_id = Uuid::new_v4();
     let inserted: Option<Uuid> = sqlx::query_scalar("INSERT INTO operations(id,runtime_id,kind,status,requested_by,detail,started_at) VALUES($1,$2,'runtime_release','running',$3,jsonb_build_object('trigger',$4),now()) ON CONFLICT DO NOTHING RETURNING id")
-        .bind(operation_id).bind(runtime_id).bind(requested_by).bind(trigger).fetch_optional(&state.db).await?;
+        .bind(operation_id).bind(runtime_id).bind(requested_by).bind(trigger).fetch_optional(&mut *tx).await?;
     let Some(operation_id) = inserted else {
         return Err(ApiError(
             StatusCode::CONFLICT,
@@ -4677,7 +4748,8 @@ async fn queue_runtime_release(
     };
     let deployment_id = Uuid::new_v4();
     sqlx::query("INSERT INTO runtime_deployments(id,runtime_id,operation_id,trigger,status,started_at) VALUES($1,$2,$3,$4,'queued',now())")
-        .bind(deployment_id).bind(runtime_id).bind(operation_id).bind(trigger).execute(&state.db).await?;
+        .bind(deployment_id).bind(runtime_id).bind(operation_id).bind(trigger).execute(&mut *tx).await?;
+    tx.commit().await?;
     tokio::spawn(run_runtime_release(
         state,
         operation_id,
@@ -4874,11 +4946,15 @@ async fn release_event(db: &PgPool, operation_id: Uuid, message: &str) {
 fn central_paths() -> Result<(PathBuf, PathBuf), String> {
     let exe = std::env::current_exe()
         .map_err(|_| "Control-plane release directory is unavailable.".to_string())?;
-    let root = exe
-        .parent()
-        .and_then(FsPath::parent)
-        .and_then(FsPath::parent)
-        .ok_or_else(|| "Control-plane release directory is unavailable.".to_string())?;
+    let root = match std::env::var("CONTROL_PROJECT_ROOT") {
+        Ok(root) => PathBuf::from(root),
+        Err(_) => exe
+            .parent()
+            .and_then(FsPath::parent)
+            .and_then(FsPath::parent)
+            .ok_or_else(|| "Control-plane release directory is unavailable.".to_string())?
+            .to_path_buf(),
+    };
     let source = root
         .parent()
         .ok_or_else(|| "Central Eunha source directory is unavailable.".to_string())?
@@ -4886,7 +4962,7 @@ fn central_paths() -> Result<(PathBuf, PathBuf), String> {
     if !source.join("Cargo.toml").is_file() {
         return Err("Central Eunha source checkout is unavailable.".into());
     }
-    Ok((root.to_path_buf(), source))
+    Ok((root, source))
 }
 
 async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathBuf), String> {
@@ -5322,6 +5398,7 @@ fn shell_quote(value: &str) -> String {
 async fn release_recovery_reconciler(state: Shared) {
     loop {
         fail_abandoned_releases(&state.db).await;
+        state.health.tick("release-recovery");
         tokio::time::sleep(Duration::from_secs(30)).await;
     }
 }
@@ -5413,6 +5490,11 @@ async fn check_tenant(
 
 async fn health_reconciler(state: Shared) {
     loop {
+        let _ = sqlx::query(
+            "DELETE FROM auth_rate_limits WHERE window_started_at < now()-interval '1 day'",
+        )
+        .execute(&state.db)
+        .await;
         let _ = sqlx::query("DELETE FROM sessions WHERE expires_at <= now()")
             .execute(&state.db)
             .await;

@@ -16,3 +16,11 @@ run = "cargo build --release"
 [tasks.temporal]
 description = "Run the local Temporal service used for workflow development"
 run = "docker compose --env-file ops/temporal/.env.dev -f ops/temporal/docker-compose.dev.yml up"
+
+[tasks.test-integration]
+description = "Run failure and database tests in a disposable PostgreSQL cluster"
+run = "ops/tests/integration.sh"
+
+[tasks.test-deploy]
+description = "Verify deployment activation and rollback without touching services"
+run = "python3 -m unittest discover -s ops/tests -p 'test_*.py'"

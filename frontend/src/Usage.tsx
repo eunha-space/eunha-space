@@ -72,16 +72,40 @@ export function Usage({ tenants }: { tenants: Tenant[] }) {
   const available = readings.filter(sample => sample.database_bytes !== null);
   const rows = tenants.filter(tenant => `${tenant.domain} ${tenant.title} ${tenant.runtime_name}`.toLowerCase().includes(search.toLowerCase())).sort((a, b) => (byId.get(b.id)?.database_bytes ?? -1) - (byId.get(a.id)?.database_bytes ?? -1));
   const selected = tenants.find(tenant => tenant.id === selectedId) ?? rows[0];
-  const trend = selected ? history.get(selected.id) ?? [] : [];
+  const selectedTenantId = selected?.id;
+  const [historyError, setHistoryError] = useState("");
+  useEffect(() => {
+    if (!selectedTenantId) return;
+    let disposed = false;
+    setHistoryError("");
+    void api<Sample[]>(`/tenants/${selectedTenantId}/usage/history`).then(samples => {
+      if (disposed) return;
+      setHistory(current => {
+        const merged = new Map<number, Reading>();
+        for (const sample of samples) merged.set(sample.sampled_at, { ...sample, rate: null });
+        for (const sample of current.get(selectedTenantId) ?? []) merged.set(sample.sampled_at, sample);
+        const updated = new Map(current);
+        updated.set(selectedTenantId, [...merged.values()].sort((a, b) => a.sampled_at - b.sampled_at).slice(-120));
+        return updated;
+      });
+    }).catch(() => { if (!disposed) setHistoryError("Stored history could not be loaded. Live samples will still appear."); });
+    return () => { disposed = true; };
+  }, [selectedTenantId]);
+  const trend = (selected ? history.get(selected.id) ?? [] : []).map((row, index, samples) => {
+    const before = samples[index - 1];
+    const elapsed = before ? (row.sampled_at - before.sampled_at) / 1000 : 0;
+    const valid = before && elapsed > 0 && elapsed <= 30 && row.stats_reset === before.stats_reset && row.transactions !== null && before.transactions !== null && row.transactions >= before.transactions;
+    return { ...row, rate: valid ? (row.transactions! - before.transactions!) / elapsed : null };
+  });
   return <div className="grid gap-4">
-    <p className="text-muted-foreground text-sm">Live PostgreSQL usage, sampled every 10 seconds while this page is visible. CPU, RAM, media storage, and bandwidth require additional runtime instrumentation. Connections reflect direct PostgreSQL backends; pooled client connections are not included.</p>
+    <p className="text-muted-foreground text-sm">Live PostgreSQL usage, collected in the background every 10 seconds. CPU, RAM, media storage, and bandwidth require additional runtime instrumentation. Connections reflect direct PostgreSQL backends; pooled client connections are not included.</p>
     {error && <Alert variant="destructive"><AlertDescription>Usage refresh failed. Previous readings may be stale. {error}</AlertDescription></Alert>}
     <div className="grid gap-3 sm:grid-cols-3">
       {[ ["Database storage", loaded ? bytes(available.reduce((sum, row) => sum + row.database_bytes!, 0)) : "—"], ["Database connections", loaded ? available.reduce((sum, row) => sum + (row.connections ?? 0), 0).toLocaleString() : "—"], ["Reporting tenants", loaded ? `${available.length} / ${tenants.length}` : "—"] ].map(([label, value]) => <Card key={label}><CardHeader><CardTitle>{label}</CardTitle></CardHeader><CardContent className="text-2xl font-semibold tabular-nums">{value}</CardContent></Card>)}
     </div>
     <div className="grid gap-3">
       <div className="flex flex-wrap items-end justify-between gap-3">
-        <div><h2 className="font-semibold">Tenant trends</h2><p className="text-muted-foreground text-xs">Last 10 minutes collected on this page. History resets when you leave or reload. Gaps indicate missing samples or pauses.</p></div>
+        <div><h2 className="font-semibold">Tenant trends</h2><p className="text-muted-foreground text-xs">Last 10 minutes, restored from stored samples after reload. Gaps indicate missing samples or pauses.</p></div>
         <label className="grid gap-1 text-sm">Tenant
           <NativeSelect value={selected?.id ?? ""} onChange={event => setSelectedId(event.target.value)} disabled={!tenants.length}>
             {!tenants.length && <option value="">No tenants</option>}
@@ -89,6 +113,7 @@ export function Usage({ tenants }: { tenants: Tenant[] }) {
           </NativeSelect>
         </label>
       </div>
+      {historyError && <p role="status" className="text-muted-foreground text-sm">{historyError}</p>}
       <div className="grid gap-3 xl:grid-cols-3">
         <UsageChart title="Database storage" now={now} points={trend.map(row => ({ at: row.sampled_at, value: row.database_bytes }))} format={bytes} />
         <UsageChart title="Database connections" now={now} points={trend.map(row => ({ at: row.sampled_at, value: row.connections }))} format={value => value.toLocaleString(undefined, { maximumFractionDigits: 1 })} color="var(--chart-2)" />
