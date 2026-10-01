@@ -24,7 +24,7 @@ export function UsageChart({ title, points, now, format, color = "var(--chart-1)
           </g>)}
           {segments.map((segment, index) => <g key={index}>
             <polyline points={segment.map(point => `${point.x},${point.y}`).join(" ")} fill="none" stroke={color} strokeWidth="2" />
-            {segment.map(({ x, y, point }) => <circle key={point.at} cx={x} cy={y} r="3" fill={color} tabIndex={0} aria-label={`${time(point.at)}: ${format(point.value!)}`}><title>{time(point.at)}: {format(point.value!)}</title></circle>)}
+            {segment.map(({ x, y, point }) => <circle key={point.at} cx={x} cy={y} r="3" fill={color} tabIndex={0} aria-label={`${time(point.at)}: ${format(point.value!)}${point.note ? ` · ${point.note}` : ""}`}><title>{time(point.at)}: {format(point.value!)}{point.note ? ` · ${point.note}` : ""}</title></circle>)}
           </g>)}
           {[start, start + 5 * 60 * 1000, now].map((at, index) => <text key={index} x={64 + index * 256} y="192" textAnchor={index === 0 ? "start" : index === 2 ? "end" : "middle"} fill="var(--muted-foreground)" fontSize="11">{time(at)}</text>)}
         </svg>}

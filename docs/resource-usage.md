@@ -23,10 +23,11 @@ tenant placement and eligibility, so moving a tenant changes its history's scope
 
 Aggregate history takes the latest sample per tenant in each ten-second bucket.
 Transaction rates are calculated per tenant before summing, and counter resets
-or gaps longer than thirty seconds invalidate the rate. Graphs omit incomplete
-fleet/server totals. Cards sum only readings no older than thirty seconds, show
+or gaps longer than thirty seconds invalidate the rate. Database graphs show totals from reporting tenants, with coverage available
+on hover or keyboard focus. Cards sum only readings no older than thirty seconds, show
 partial coverage explicitly, and display unavailable metrics as missing rather
-than zero. The reporting count covers eligible, configured tenants.
+than zero. A missing retained database does not hide healthy tenants’ database
+charts. The reporting count covers eligible, configured tenants.
 
 The collector uses each tenant's configured direct PostgreSQL connection. It
 reports database size, backend connections (excluding its own connection), active

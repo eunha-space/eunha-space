@@ -1,4 +1,4 @@
-export type UsagePoint = { at: number; value: number | null };
+export type UsagePoint = { at: number; value: number | null; note?: string };
 
 /** Keep missing samples and pauses as gaps instead of inventing measurements. */
 export function chartSegments(points: UsagePoint[], start: number, end: number, maximum: number) {

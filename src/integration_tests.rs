@@ -586,8 +586,11 @@ async fn fleet_history_groups_hosts_without_double_counting_or_hiding_gaps(pool:
         .find(|row| row["sampled_at"] == bucket + 10000)
         .unwrap();
     assert_eq!(partial["reporting_tenants"], 2);
-    assert!(partial["database_bytes"].is_null());
-    assert!(partial["rate"].is_null());
+    assert_eq!(partial["database_bytes"], 200);
+    assert_eq!(partial["connections"], 2);
+    assert_eq!(partial["active_connections"], 2);
+    assert_eq!(partial["rate_reporting_tenants"], 2);
+    assert!(partial["rate"].as_f64().unwrap() > 0.0);
     let Json(instance) = usage::aggregate_history(
         State(app.clone()),
         headers.clone(),

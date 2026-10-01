@@ -10,7 +10,7 @@ export type UsageReading = {
 };
 type AggregateHistory = {
   eligible_tenants: number;
-  samples: { sampled_at: number; reporting_tenants: number; database_bytes: number | null;
+  samples: { sampled_at: number; reporting_tenants: number; rate_reporting_tenants: number; database_bytes: number | null;
     connections: number | null; active_connections: number | null; rate: number | null }[];
 };
 export function formatBytes(value: number) {
@@ -52,6 +52,7 @@ export function AggregateUsage({ instanceId, readings, expected, now, loaded }: 
     { title: "Transactions / second", field: "rate", format: number, color: "var(--chart-4)" },
   ] as const;
   return <div className="grid gap-3">
+    <h3 className="text-sm font-semibold">PostgreSQL database</h3>
     <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
       {metrics.map(metric => {
         const measured = fresh.filter(row => row[metric.field] !== null);
@@ -67,9 +68,9 @@ export function AggregateUsage({ instanceId, readings, expected, now, loaded }: 
     {error && <p role="status" className="text-destructive text-sm">Aggregate history could not be refreshed. Previous graph readings may be stale.</p>}
     <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
       {metrics.map(metric => <UsageChart key={metric.field} title={metric.title} now={now}
-        points={(history?.samples ?? []).map(row => ({ at: row.sampled_at, value: row[metric.field] }))}
+        points={(history?.samples ?? []).map(row => ({ at: row.sampled_at, value: row[metric.field], note: `${metric.field === "rate" ? row.rate_reporting_tenants : row.reporting_tenants} / ${eligible} tenants reporting` }))}
         format={metric.format} color={metric.color} />)}
     </div>
-    <p className="text-muted-foreground text-xs">Last 10 minutes, in 10-second buckets. Cards sum fresh reporting tenants and mark partial coverage. Graphs show gaps when any eligible tenant is missing a metric. Ready, failed, and retained tenants are included.</p>
+    <p className="text-muted-foreground text-xs">Last 10 minutes, in 10-second buckets. Cards sum fresh reporting tenants and mark partial coverage. Graphs sum reporting tenants; hover or focus a point for coverage. Missing all readings or sampling pauses produce gaps. Ready, failed, and retained tenants are included.</p>
   </div>;
 }

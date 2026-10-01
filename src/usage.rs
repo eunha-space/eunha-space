@@ -54,6 +54,7 @@ pub(crate) struct AggregateHistory {
 struct AggregateSample {
     sampled_at: i64,
     reporting_tenants: i64,
+    rate_reporting_tenants: i64,
     database_bytes: Option<i64>,
     connections: Option<i64>,
     active_connections: Option<i64>,
@@ -95,14 +96,11 @@ pub(crate) async fn aggregate_history(
             ORDER BY tenant_id,sampled_at/10000,sampled_at DESC
         ), totals AS (
             SELECT bucket sampled_at,count(database_bytes) reporting_tenants,
-                CASE WHEN count(database_bytes)=(SELECT count(*) FROM eligible)
-                     THEN sum(database_bytes)::bigint END database_bytes,
-                CASE WHEN count(connections)=(SELECT count(*) FROM eligible)
-                     THEN sum(connections)::bigint END connections,
-                CASE WHEN count(active_connections)=(SELECT count(*) FROM eligible)
-                     THEN sum(active_connections)::bigint END active_connections,
-                CASE WHEN count(rate)=(SELECT count(*) FROM eligible)
-                     THEN sum(rate) END rate
+                count(rate) rate_reporting_tenants,
+                sum(database_bytes)::bigint database_bytes,
+                sum(connections)::bigint connections,
+                sum(active_connections)::bigint active_connections,
+                sum(rate) rate
             FROM readings GROUP BY bucket
         ) SELECT jsonb_build_object(
             'eligible_tenants',(SELECT count(*) FROM eligible),
