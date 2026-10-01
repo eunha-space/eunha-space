@@ -359,14 +359,50 @@ async fn interrupted_provisioning_step_resumes_and_completed_step_is_skipped(poo
     let id = tenant(&pool, runtime).await;
     sqlx::query("INSERT INTO provisioning_steps(tenant_id,step,status,attempts) VALUES($1,'health','running',1)")
         .bind(id).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE tenants SET lifecycle_state='provisioning' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let request_count = requests.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    sqlx::query("UPDATE runtimes SET bind_address=$1 WHERE id=$2")
+        .bind(listener.local_addr().unwrap().to_string())
+        .bind(runtime)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let domain = format!("{}.example", id.simple());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/api/v2/instance",
+                get(move || {
+                    let domain = domain.clone();
+                    let requests = request_count.clone();
+                    async move {
+                        requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        Json(serde_json::json!({"domain":domain}))
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
     let restarted = state(pool.clone());
-    assert!(provisioning_step(&restarted, id, "health").await.unwrap());
-    finish_provisioning_step(&pool, id, "health").await.unwrap();
-    assert!(
-        !provisioning_step(&state(pool.clone()), id, "health")
-            .await
-            .unwrap()
-    );
+    assert!(matches!(
+        provision_tenant_step(&restarted, id, "health").await,
+        ProvisionStepOutcome::Completed
+    ));
+    assert!(matches!(
+        provision_tenant_step(&state(pool.clone()), id, "health").await,
+        ProvisionStepOutcome::Completed
+    ));
+    assert_eq!(requests.load(std::sync::atomic::Ordering::Relaxed), 1);
+    server.abort();
     let attempts: i32 = sqlx::query_scalar(
         "SELECT attempts FROM provisioning_steps WHERE tenant_id=$1 AND step='health'",
     )

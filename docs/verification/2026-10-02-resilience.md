@@ -1,7 +1,7 @@
 # Resilience verification — 2026-10-02 (Asia/Seoul)
 
 The production control plane was deployed through immutable activation and
-readiness verification. Its active release is `f745854b9fce-20261001T163509Z`.
+readiness verification. Its active release is `a10ec8011243-20261001T163701Z`.
 A failed activation restored the previous healthy release automatically. A bounded
 launchd registration retry subsequently allowed the new release to activate.
 The previous release remains available for rollback. Readiness confirmed the
@@ -15,7 +15,9 @@ return 401 and the next returns 429 with a 900-second retry header.
 Local checks: 30 unit tests, 11 PostgreSQL integration tests, and six Python
 operational-tool tests passed. The integration suite uses a disposable socket-only
 PostgreSQL cluster and applies the full migration set. Linux CI passed on commit defcd52 (run 36891426003). Subsequent audit-boundary
-regression checks also passed locally.
+regression checks also passed locally. The interrupted provisioning test runs
+the real health probe after recreating application state and verifies that a
+completed step performs no second request.
 
 An existing off-host backup taken 2026-10-01 at 03:17:03 KST was restored on the
 production host into an isolated socket-only PostgreSQL cluster. This restored
