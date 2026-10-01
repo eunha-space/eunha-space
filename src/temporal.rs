@@ -154,7 +154,11 @@ impl TenantActivities {
         let runtime_id = Uuid::parse_str(&runtime_id).map_err(ActivityError::from)?;
         let converged = reconcile_runtime_drift(&self.state, runtime_id)
             .await
-            .map_err(ActivityError::from)?;
+            .map_err(|_| {
+                ActivityError::from(anyhow::anyhow!(
+                    "Runtime reconciliation failed; retry is safe."
+                ))
+            })?;
         if converged > 0 {
             tracing::info!(%runtime_id, converged, "reconciled drifted tenants");
         }
@@ -170,7 +174,9 @@ impl TenantActivities {
         let tenant_id = Uuid::parse_str(&tenant_id).map_err(ActivityError::from)?;
         schedule_due_purge(&self.state, tenant_id)
             .await
-            .map_err(ActivityError::from)?;
+            .map_err(|_| {
+                ActivityError::from(anyhow::anyhow!("Purge scheduling failed; retry is safe."))
+            })?;
         Ok(())
     }
 }

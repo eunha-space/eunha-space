@@ -3730,8 +3730,19 @@ async fn runtime_connection_budget(db: &PgPool, tenant_id: Uuid) -> Result<()> {
     }
 }
 
+// Only reconstructed numeric capacity diagnostics may cross the audit boundary.
+fn safe_connection_budget_reason(reason: &str) -> Option<String> {
+    let rest = reason.strip_prefix("this server is full: its instances would open ")?;
+    let (declared, accepted) = rest.split_once(" database connections and it accepts ")?;
+    let declared: i64 = declared.parse().ok()?;
+    let accepted: i64 = accepted.parse().ok()?;
+    let safe = connection_budget_error(declared, accepted)?;
+    (safe == reason).then_some(safe)
+}
+
 async fn fail_provisioning(db: &PgPool, tenant_id: Uuid, step: &str, reason: Option<&str>) {
-    let message = match reason {
+    let safe_reason = reason.and_then(safe_connection_budget_reason);
+    let message = match safe_reason {
         Some(reason) => format!("{step} failed: {reason}; retry is safe."),
         None => format!("{step} failed; retry is safe."),
     };
@@ -5607,9 +5618,14 @@ pub(crate) async fn reconcile_runtime_drift(state: &Shared, runtime_id: Uuid) ->
         let operation = start_reconcile_operation(&state.db, tenant_id).await;
         match render_provisioned_tenant(state, tenant_id).await {
             Ok(()) => rendered.push((tenant_id, revision, operation)),
-            Err(error) => {
-                record_reconcile_failure(&state.db, tenant_id, operation, &format!("{error:#}"))
-                    .await
+            Err(_) => {
+                record_reconcile_failure(
+                    &state.db,
+                    tenant_id,
+                    operation,
+                    "The tenant configuration could not be rendered.",
+                )
+                .await
             }
         }
     }
@@ -5617,9 +5633,8 @@ pub(crate) async fn reconcile_runtime_drift(state: &Shared, runtime_id: Uuid) ->
         return Ok(0);
     };
 
-    if let Err(error) = reload_provisioned_runtime(state, first).await {
-        let message =
-            format!("Configuration rendered, but the runtime could not be reloaded: {error:#}");
+    if reload_provisioned_runtime(state, first).await.is_err() {
+        let message = "Configuration rendered, but the runtime could not be reloaded.";
         for (tenant_id, _, operation) in rendered {
             // The file is ahead of what the runtime is serving, and a render
             // that recorded its revision leaves no drift for the next pass to
@@ -5645,12 +5660,12 @@ pub(crate) async fn reconcile_runtime_drift(state: &Shared, runtime_id: Uuid) ->
                 finish_reconcile_operation(&state.db, tenant_id, operation, revision).await;
                 converged += 1;
             }
-            Err(error) => {
+            Err(_) => {
                 record_reconcile_failure(
                     &state.db,
                     tenant_id,
                     operation,
-                    &format!("Configuration rendered and reloaded, but the tenant did not become healthy: {error:#}"),
+                    "Configuration rendered and reloaded, but the tenant did not become healthy.",
                 )
                 .await
             }

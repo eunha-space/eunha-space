@@ -303,3 +303,76 @@ async fn failed_release_admission_leaves_no_orphan_operation(pool: PgPool) {
         0
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn provisioning_audit_rejects_secret_error_payloads(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    sqlx::query("UPDATE tenants SET lifecycle_state='provisioning' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO provisioning_steps(tenant_id,step,status) VALUES($1,'database','running')",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let operation = Uuid::new_v4();
+    sqlx::query("INSERT INTO operations(id,tenant_id,kind,status) VALUES($1,$2,'tenant_provision','running')")
+        .bind(operation).bind(id).execute(&pool).await.unwrap();
+    fail_provisioning(
+        &pool,
+        id,
+        "database",
+        Some(
+            "postgresql://tenant:private-password@host/database; failing row includes private-key",
+        ),
+    )
+    .await;
+    let errors: (String, String, String) = sqlx::query_as("SELECT p.error,t.observation_error,o.error FROM provisioning_steps p JOIN tenants t ON t.id=p.tenant_id JOIN operations o ON o.tenant_id=t.id WHERE t.id=$1")
+        .bind(id).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        errors,
+        (
+            "database failed; retry is safe.".into(),
+            "database failed; retry is safe.".into(),
+            "database failed; retry is safe.".into()
+        )
+    );
+    assert_eq!(
+        safe_connection_budget_reason(
+            "this server is full: its instances would open 100 database connections and it accepts 97"
+        ),
+        connection_budget_error(100, 97)
+    );
+    assert!(safe_connection_budget_reason("this server is full: its instances would open 100 database connections and it accepts 97 private-password").is_none());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn interrupted_provisioning_step_resumes_and_completed_step_is_skipped(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    sqlx::query("INSERT INTO provisioning_steps(tenant_id,step,status,attempts) VALUES($1,'health','running',1)")
+        .bind(id).execute(&pool).await.unwrap();
+    let restarted = state(pool.clone());
+    assert!(provisioning_step(&restarted, id, "health").await.unwrap());
+    finish_provisioning_step(&pool, id, "health").await.unwrap();
+    assert!(
+        !provisioning_step(&state(pool.clone()), id, "health")
+            .await
+            .unwrap()
+    );
+    let attempts: i32 = sqlx::query_scalar(
+        "SELECT attempts FROM provisioning_steps WHERE tenant_id=$1 AND step='health'",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(attempts, 2);
+}

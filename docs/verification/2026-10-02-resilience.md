@@ -10,10 +10,10 @@ for six tenants; a production check found the latest sample eight seconds old.
 A production smoke check also confirmed ten invalid authentication attempts
 return 401 and the next returns 429 with a 900-second retry header.
 
-Local checks: 30 unit tests, nine PostgreSQL integration tests, and four Python
+Local checks: 30 unit tests, 11 PostgreSQL integration tests, and four Python
 operational-tool tests passed. The integration suite uses a disposable socket-only
-PostgreSQL cluster and applies the full migration set. Linux CI is also being
-verified against the pushed commit; its result must be checked separately.
+PostgreSQL cluster and applies the full migration set. Linux CI passed on commit defcd52 (run 36891426003). Subsequent audit-boundary
+regression checks also passed locally.
 
 An existing off-host backup taken 2026-10-01 at 03:17:03 KST was restored on the
 production host into an isolated socket-only PostgreSQL cluster. This restored
