@@ -1,5 +1,42 @@
 use super::*;
 
+pub(crate) fn customer_email_config() -> Result<Option<CustomerEmailConfig>> {
+    use lettre::{
+        AsyncSmtpTransport, Tokio1Executor, transport::smtp::authentication::Credentials,
+    };
+    let Ok(host) = std::env::var("EUNHA_SPACE_SMTP_HOST") else {
+        return Ok(None);
+    };
+    let port = std::env::var("EUNHA_SPACE_SMTP_PORT").unwrap_or_else(|_| "465".into());
+    let transport = match port.as_str() {
+        "465" => AsyncSmtpTransport::<Tokio1Executor>::relay(&host),
+        "587" => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host),
+        _ => anyhow::bail!("Control-plane SMTP requires port 465 or 587"),
+    }
+    .map_err(|_| anyhow::anyhow!("Invalid control-plane SMTP hostname"))?;
+    let username = std::env::var("EUNHA_SPACE_SMTP_USERNAME")
+        .context("Control-plane SMTP username is required")?;
+    let password = std::env::var("EUNHA_SPACE_SMTP_PASSWORD")
+        .context("Control-plane SMTP password is required")?;
+    anyhow::ensure!(
+        !username.is_empty() && !password.is_empty(),
+        "Control-plane SMTP credentials are required"
+    );
+    let from = std::env::var("EUNHA_SPACE_EMAIL_FROM")
+        .unwrap_or_else(|_| "eunha space <noreply@eunha.space>".into())
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid control-plane email sender"))?;
+    Ok(Some(CustomerEmailConfig {
+        transport: transport
+            .credentials(Credentials::new(username, password))
+            .timeout(Some(Duration::from_secs(30)))
+            .build(),
+        from,
+        public_url: std::env::var("EUNHA_SPACE_PUBLIC_URL")
+            .unwrap_or_else(|_| "https://eunha.space".into()),
+    }))
+}
+
 #[derive(Deserialize)]
 pub(crate) struct Settings {
     host: String,

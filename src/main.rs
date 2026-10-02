@@ -86,8 +86,8 @@ struct AppState {
 }
 #[derive(Clone)]
 struct CustomerEmailConfig {
-    api_key: String,
-    from: String,
+    transport: lettre::AsyncSmtpTransport<lettre::Tokio1Executor>,
+    from: lettre::message::Mailbox,
     public_url: String,
 }
 /// The operator-reachable Temporal Web UI, from `TEMPORAL_UI_URL`. The UI is
@@ -491,7 +491,6 @@ struct TenantToml {
     media_storage: MediaStorageToml,
     #[serde(default)]
     smtp: Option<SmtpToml>,
-    resend: ResendToml,
     instance: InstanceToml,
     #[serde(default)]
     active_record_encryption: Option<EncryptionToml>,
@@ -550,11 +549,6 @@ struct MediaStorageToml {
     access_key_id: String,
     secret_access_key: String,
     base_url: String,
-}
-#[derive(Deserialize, Serialize)]
-struct ResendToml {
-    api_key: String,
-    from: String,
 }
 #[derive(Deserialize, Serialize)]
 struct SmtpToml {
@@ -665,8 +659,6 @@ struct StoredConfig {
     redis_coordination_url: Option<String>,
     redis_key_prefix: String,
     redis_process_metrics: bool,
-    resend_api_key: String,
-    resend_from: String,
     smtp_host: Option<String>,
     smtp_port: Option<i32>,
     smtp_username: Option<String>,
@@ -789,10 +781,6 @@ fn typed_toml(
             base_url: config.media_storage_base_url,
         },
         smtp,
-        resend: ResendToml {
-            api_key: config.resend_api_key,
-            from: config.resend_from,
-        },
         instance: InstanceToml {
             domain: tenant.domain,
             aliases: tenant.aliases,
@@ -906,15 +894,7 @@ async fn main() -> Result<()> {
             .map(|suffix| suffix.trim().trim_start_matches('.').to_ascii_lowercase())
             .filter(|suffix| is_valid_domain(suffix))
             .collect(),
-        customer_email: std::env::var("EUNHA_SPACE_RESEND_API_KEY")
-            .ok()
-            .map(|api_key| CustomerEmailConfig {
-                api_key,
-                from: std::env::var("EUNHA_SPACE_EMAIL_FROM")
-                    .unwrap_or_else(|_| "eunha space <noreply@eunha.space>".into()),
-                public_url: std::env::var("EUNHA_SPACE_PUBLIC_URL")
-                    .unwrap_or_else(|_| "https://eunha.space".into()),
-            }),
+        customer_email: smtp::customer_email_config()?,
         temporal_ui: temporal_ui_config(),
         client: reqwest::Client::builder()
             .timeout(Duration::from_secs(4))
@@ -1307,15 +1287,20 @@ async fn send_customer_link(
         mail.public_url.trim_end_matches('/'),
         token
     );
-    let response=s.client.post("https://api.resend.com/emails").bearer_auth(&mail.api_key).json(&serde_json::json!({"from":mail.from,"to":[email],"subject":subject,"text":format!("Use this secure link to continue to eunha space:\n\n{url}\n\nThis link expires in 30 minutes.")})).send().await;
-    if matches!(response,Ok(response) if response.status().is_success()) {
-        Ok(())
-    } else {
-        Err(ApiError(
+    use lettre::AsyncTransport;
+    let message = lettre::Message::builder()
+        .from(mail.from.clone())
+        .to(email.parse().map_err(|_| ApiError(StatusCode::BAD_REQUEST, "Invalid email address.".into()))?)
+        .subject(subject)
+        .body(format!("Use this secure link to continue to eunha space:\n\n{url}\n\nThis link expires in 30 minutes."))
+        .map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "Could not build the email link.".into()))?;
+    mail.transport.send(message).await.map_err(|_| {
+        ApiError(
             StatusCode::BAD_GATEWAY,
             "Could not send the email link.".into(),
-        ))
-    }
+        )
+    })?;
+    Ok(())
 }
 
 async fn customer_verify(
@@ -1784,13 +1769,13 @@ async fn create_tenant_inner(
         .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenants_domain_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
     sqlx::query(r#"INSERT INTO tenant_configuration(
         tenant_id,database_url,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,
-        redis_url,redis_coordination_url,redis_key_prefix,redis_process_metrics,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,resend_api_key,resend_from,
+        redis_url,redis_coordination_url,redis_key_prefix,redis_process_metrics,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,
         active_record_encryption_primary_key,active_record_encryption_key_derivation_salt,software_update_url,allowed_private_networks,sign_integrity_proofs,
         media_storage_region,media_storage_endpoint,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url,media_storage_key_prefix,
         delivery_workers,delivery_batch,delivery_concurrency,inbox_workers,inbox_batch,inbox_concurrency,queue_idle_poll_seconds,process_delivery_concurrency,
         max_concurrent_requests,process_max_tenants,process_database_connections)
       SELECT $1,$2,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,
-        redis_url,redis_coordination_url,$3,redis_process_metrics,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,resend_api_key,resend_from,
+        redis_url,redis_coordination_url,$3,redis_process_metrics,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,
         $4,$5,software_update_url,allowed_private_networks,sign_integrity_proofs,
         media_storage_region,media_storage_endpoint,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url,$6,
         delivery_workers,delivery_batch,delivery_concurrency,inbox_workers,inbox_batch,inbox_concurrency,queue_idle_poll_seconds,process_delivery_concurrency,
@@ -2007,13 +1992,13 @@ async fn import_tenant(
         .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenants_domain_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
     sqlx::query(r#"INSERT INTO tenant_configuration(
         tenant_id,database_url,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,
-        redis_url,redis_coordination_url,redis_key_prefix,redis_process_metrics,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,resend_api_key,resend_from,
+        redis_url,redis_coordination_url,redis_key_prefix,redis_process_metrics,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,
         active_record_encryption_primary_key,active_record_encryption_key_derivation_salt,software_update_url,allowed_private_networks,sign_integrity_proofs,
         media_storage_region,media_storage_endpoint,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url,media_storage_key_prefix,
         delivery_workers,delivery_batch,delivery_concurrency,inbox_workers,inbox_batch,inbox_concurrency,queue_idle_poll_seconds,process_delivery_concurrency,
         max_concurrent_requests,process_max_tenants,process_database_connections)
       SELECT $1,$2,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,
-        redis_url,redis_coordination_url,$3,redis_process_metrics,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,resend_api_key,resend_from,
+        redis_url,redis_coordination_url,$3,redis_process_metrics,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,
         $4,$5,software_update_url,allowed_private_networks,sign_integrity_proofs,
         CASE WHEN $6 THEN $7 ELSE media_storage_region END,
         CASE WHEN $6 THEN $8 ELSE media_storage_endpoint END,
@@ -4611,7 +4596,6 @@ fn redact_tenant_toml(config: &mut TenantToml) {
         .map(redact_connection_url);
     config.media_storage.access_key_id = REDACTED.to_owned();
     config.media_storage.secret_access_key = REDACTED.to_owned();
-    config.resend.api_key = REDACTED.to_owned();
     if let Some(smtp) = config.smtp.as_mut() {
         smtp.username = REDACTED.to_owned();
         smtp.password = REDACTED.to_owned();

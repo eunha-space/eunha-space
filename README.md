@@ -58,10 +58,13 @@ described in [docs/connection-scaling.md](docs/connection-scaling.md).
 
 The public portal at `/` lets customers register, verify their email, and
 provision up to two instances. `/admin` remains operator-only. Verification
-mail uses Resend's HTTPS API and requires process-only configuration:
+mail uses SMTP and requires process-only configuration:
 
 ```sh
-EUNHA_SPACE_RESEND_API_KEY=...
+EUNHA_SPACE_SMTP_HOST=smtp.example.com
+EUNHA_SPACE_SMTP_PORT=465
+EUNHA_SPACE_SMTP_USERNAME=...
+EUNHA_SPACE_SMTP_PASSWORD=...
 EUNHA_SPACE_EMAIL_FROM='eunha space <noreply@eunha.space>'
 EUNHA_SPACE_PUBLIC_URL=https://eunha.space
 ```

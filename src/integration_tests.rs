@@ -797,3 +797,49 @@ async fn smtp_is_owner_scoped_custom_only_and_write_only(pool: PgPool) {
         StatusCode::UNAUTHORIZED
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn smtp_migration_preserves_owner_settings_and_converts_legacy_mail(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let legacy = tenant(&pool, runtime).await;
+    let custom = tenant(&pool, runtime).await;
+    for id in [legacy, custom] {
+        sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,resend_api_key,resend_from,media_storage_region,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url) VALUES($1,'postgresql://localhost/test','redis://localhost','legacy-private-key','mail@example.com','auto','media-key','media-secret','https://media.example.com')").bind(id).execute(&pool).await.unwrap();
+    }
+    sqlx::query("UPDATE tenant_configuration SET smtp_host='smtp.owner.example',smtp_port=587,smtp_username='owner-login',smtp_password='owner-private-password',smtp_from='mail@owner.example' WHERE tenant_id=$1").bind(custom).execute(&pool).await.unwrap();
+    sqlx::raw_sql(include_str!("../migrations/045_smtp_only.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (host, port, password) = sqlx::query_as::<_, (String, i32, String)>(
+        "SELECT smtp_host,smtp_port,smtp_password FROM tenant_configuration WHERE tenant_id=$1",
+    )
+    .bind(legacy)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (host.as_str(), port, password.as_str()),
+        ("smtp.resend.com", 465, "legacy-private-key")
+    );
+    let (host, password) = sqlx::query_as::<_, (String, String)>(
+        "SELECT smtp_host,smtp_password FROM tenant_configuration WHERE tenant_id=$1",
+    )
+    .bind(custom)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (host.as_str(), password.as_str()),
+        ("smtp.owner.example", "owner-private-password")
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT config_revision FROM tenants WHERE id=$1")
+            .bind(legacy)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        2
+    );
+}
