@@ -1,7 +1,6 @@
 //! Private, bounded scraping. Only known tenants and numeric readings are persisted.
 use super::*;
 use futures::{StreamExt, stream};
-use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, sqlx::FromRow)]
 pub(crate) struct Sample {
@@ -24,15 +23,17 @@ pub(crate) struct Sample {
 pub(crate) struct Scope {
     pub tenant_id: Option<Uuid>,
     pub instance_id: Option<Uuid>,
+    #[serde(flatten)]
+    pub range: usage_range::Range,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct History {
     eligible_tenants: usize,
     samples: Vec<Point>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Point {
     sampled_at: i64,
     reporting_tenants: usize,
@@ -58,86 +59,45 @@ pub(crate) async fn history(
     operator(&headers, &s.db).await?;
     let ids = sqlx::query_scalar::<_, Uuid>("SELECT t.id FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.lifecycle_state IN ('ready','failed') AND ($1::uuid IS NULL OR t.id=$1) AND ($2::uuid IS NULL OR r.instance_id=$2)")
         .bind(scope.tenant_id).bind(scope.instance_id).fetch_all(&s.db).await?;
-    let cutoff = now() - 600_000;
-    let rows = sqlx::query_as::<_, Sample>("SELECT * FROM tenant_service_samples WHERE tenant_id=ANY($1) AND sampled_at >= $2 ORDER BY sampled_at,tenant_id")
-        .bind(&ids).bind(cutoff-30000).fetch_all(&s.db).await?;
-    Ok(Json(aggregate(rows, ids.len(), cutoff)))
-}
-
-fn delta(
-    current: &Sample,
-    before: Option<&Sample>,
-    field: fn(&Sample) -> Option<f64>,
-) -> Option<f64> {
-    let before = before?;
-    if current.epoch.is_none()
-        || current.epoch != before.epoch
-        || !(1..=30000).contains(&(current.sampled_at - before.sampled_at))
-    {
-        return None;
-    }
-    let (a, b) = (field(current)?, field(before)?);
-    (a >= b).then_some((a - b) / ((current.sampled_at - before.sampled_at) as f64 / 1000.0))
-}
-
-fn aggregate(rows: Vec<Sample>, expected: usize, cutoff: i64) -> History {
-    let mut previous = HashMap::<Uuid, Sample>::new();
-    let mut buckets = BTreeMap::<i64, Vec<(Sample, [Option<f64>; 6])>>::new();
-    for row in rows {
-        let before = previous.get(&row.tenant_id);
-        let rates = [
-            delta(&row, before, |r| r.requests),
-            delta(&row, before, |r| r.errors),
-            delta(&row, before, |r| r.duration_sum),
-            delta(&row, before, |r| r.duration_count),
-            delta(&row, before, |r| r.aborted),
-            delta(&row, before, |r| r.rejected),
-        ];
-        previous.insert(row.tenant_id, row.clone());
-        if row.sampled_at >= cutoff {
-            buckets
-                .entry(row.sampled_at)
-                .or_default()
-                .push((row, rates));
-        }
-    }
-    let samples = buckets
-        .into_iter()
-        .map(|(sampled_at, rows)| {
-            let sum = |values: Vec<Option<f64>>| -> Option<f64> {
-                if expected == 0 || rows.len() != expected {
-                    return None;
-                }
-                values.into_iter().sum()
-            };
-            let rate = |index| sum(rows.iter().map(|(_, rates)| rates[index]).collect());
-            let requests = rate(0);
-            let error_percent = requests
-                .filter(|n| *n > 0.0)
-                .zip(rate(1))
-                .map(|(total, errors)| errors / total * 100.0);
-            let latency_ms = rate(3)
-                .filter(|n| *n > 0.0)
-                .zip(rate(2))
-                .map(|(count, sum)| sum / count * 1000.0);
-            Point {
-                sampled_at,
-                reporting_tenants: rows.iter().filter(|(r, _)| r.pool.is_some()).count(),
-                request_rate: requests,
-                error_percent,
-                latency_ms,
-                aborted_rate: rate(4),
-                rejected_rate: rate(5),
-                in_flight: sum(rows.iter().map(|(r, _)| r.in_flight).collect()),
-                pool: sum(rows.iter().map(|(r, _)| r.pool).collect()),
-                pool_idle: sum(rows.iter().map(|(r, _)| r.pool_idle).collect()),
-            }
-        })
-        .collect();
-    History {
-        eligible_tenants: expected,
-        samples,
-    }
+    let (cutoff, bucket) = scope.range.bounds(now())?;
+    let SqlJson(history)=sqlx::query_scalar::<_,SqlJson<History>>(r#"
+WITH previous AS (
+ SELECT *,lag(sampled_at) OVER w previous_at,lag(epoch) OVER w previous_epoch,
+ lag(requests) OVER w previous_requests,lag(errors) OVER w previous_errors,
+ lag(duration_sum) OVER w previous_sum,lag(duration_count) OVER w previous_count,
+ lag(aborted) OVER w previous_aborted,lag(rejected) OVER w previous_rejected
+ FROM tenant_service_samples WHERE tenant_id=ANY($1) AND sampled_at >= $2-30000
+ WINDOW w AS (PARTITION BY tenant_id ORDER BY sampled_at)
+), rates AS (
+ SELECT *, (sampled_at-previous_at)::double precision/1000 elapsed,
+ epoch IS NOT NULL AND epoch=previous_epoch AND sampled_at-previous_at BETWEEN 1 AND 30000 valid
+ FROM previous WHERE sampled_at >= $2
+), totals AS (
+ SELECT sampled_at,count(pool) reporting_tenants,
+ CASE WHEN count(pool)=$4 THEN sum(pool) END pool,
+ CASE WHEN count(pool_idle)=$4 THEN sum(pool_idle) END pool_idle,
+ CASE WHEN count(in_flight)=$4 THEN sum(in_flight) END in_flight,
+ CASE WHEN count(*) FILTER(WHERE valid AND requests>=previous_requests)=$4 THEN sum((requests-previous_requests)/elapsed) END request_rate,
+ CASE WHEN count(*) FILTER(WHERE valid AND errors>=previous_errors)=$4 THEN sum((errors-previous_errors)/elapsed) END error_rate,
+ CASE WHEN count(*) FILTER(WHERE valid AND duration_sum>=previous_sum)=$4 THEN sum((duration_sum-previous_sum)/elapsed) END sum_rate,
+ CASE WHEN count(*) FILTER(WHERE valid AND duration_count>=previous_count)=$4 THEN sum((duration_count-previous_count)/elapsed) END count_rate,
+ CASE WHEN count(*) FILTER(WHERE valid AND aborted>=previous_aborted)=$4 THEN sum((aborted-previous_aborted)/elapsed) END aborted_rate,
+ CASE WHEN count(*) FILTER(WHERE valid AND rejected>=previous_rejected)=$4 THEN sum((rejected-previous_rejected)/elapsed) END rejected_rate
+ FROM rates GROUP BY sampled_at
+), rolled AS (
+ SELECT max(sampled_at) sampled_at,min(reporting_tenants) reporting_tenants,
+ CASE WHEN count(pool)=count(*) THEN avg(pool) END pool,
+ CASE WHEN count(pool_idle)=count(*) THEN avg(pool_idle) END pool_idle,
+ CASE WHEN count(in_flight)=count(*) THEN avg(in_flight) END in_flight,
+ CASE WHEN count(request_rate)=count(*) THEN avg(request_rate) END request_rate,
+ CASE WHEN count(aborted_rate)=count(*) THEN avg(aborted_rate) END aborted_rate,
+ CASE WHEN count(rejected_rate)=count(*) THEN avg(rejected_rate) END rejected_rate,
+ CASE WHEN count(error_rate)=count(*) AND count(request_rate)=count(*) THEN sum(error_rate)/nullif(sum(request_rate),0)*100 END error_percent,
+ CASE WHEN count(sum_rate)=count(*) AND count(count_rate)=count(*) THEN sum(sum_rate)/nullif(sum(count_rate),0)*1000 END latency_ms
+ FROM totals GROUP BY sampled_at/$3
+) SELECT jsonb_build_object('eligible_tenants',$4,'samples',COALESCE((SELECT jsonb_agg(to_jsonb(r) ORDER BY sampled_at) FROM rolled r),'[]'::jsonb))
+"#).bind(&ids).bind(cutoff).bind(bucket).bind(ids.len() as i64).fetch_one(&s.db).await?;
+    Ok(Json(history))
 }
 
 #[derive(sqlx::FromRow)]
@@ -271,7 +231,7 @@ pub(crate) async fn collect(s: &Shared) -> Result<(), ApiError> {
     let mut tx = s.db.begin().await?;
     sqlx::query("INSERT INTO tenant_service_samples SELECT * FROM jsonb_populate_recordset(NULL::tenant_service_samples,$1) ON CONFLICT DO NOTHING").bind(SqlJson(rows)).execute(&mut *tx).await?;
     sqlx::query("DELETE FROM tenant_service_samples WHERE sampled_at<$1")
-        .bind(sampled_at - 86_400_000)
+        .bind(sampled_at - usage_range::RETENTION_MS)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -284,95 +244,5 @@ pub(crate) async fn sampler(s: Shared) {
             tracing::warn!("service metrics persistence failed");
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn rates_are_reset_aware_and_aggregates_are_weighted_and_complete() {
-        let id = Uuid::new_v4();
-        let other = Uuid::new_v4();
-        let base = Sample {
-            tenant_id: id,
-            sampled_at: 10000,
-            epoch: Some("blue:1".into()),
-            requests: Some(10.0),
-            errors: Some(1.0),
-            duration_sum: Some(1.0),
-            duration_count: Some(10.0),
-            pool: Some(2.0),
-            ..Sample::default()
-        };
-        let next = Sample {
-            sampled_at: 20000,
-            requests: Some(30.0),
-            errors: Some(3.0),
-            duration_sum: Some(5.0),
-            duration_count: Some(30.0),
-            ..base.clone()
-        };
-        let history = aggregate(vec![base.clone(), next.clone()], 1, 0);
-        assert_eq!(history.samples[1].request_rate, Some(2.0));
-        assert_eq!(history.samples[1].error_percent, Some(10.0));
-        assert_eq!(history.samples[1].latency_ms, Some(200.0));
-        let restart = Sample {
-            sampled_at: 30000,
-            epoch: Some("green:2".into()),
-            ..next.clone()
-        };
-        assert_eq!(delta(&restart, Some(&next), |r| r.requests), None);
-        let reset = Sample {
-            sampled_at: 40000,
-            requests: Some(0.0),
-            ..restart.clone()
-        };
-        assert_eq!(delta(&reset, Some(&restart), |r| r.requests), None);
-        let delayed = Sample {
-            sampled_at: 60001,
-            ..restart.clone()
-        };
-        assert_eq!(delta(&delayed, Some(&restart), |r| r.requests), None);
-        let failed = Sample {
-            sampled_at: 40000,
-            ..Sample::default()
-        };
-        assert_eq!(delta(&failed, Some(&restart), |r| r.requests), None);
-        assert_eq!(
-            aggregate(vec![base.clone(), next.clone()], 2, 0).samples[1].pool,
-            None
-        );
-        let sibling_base = Sample {
-            tenant_id: other,
-            ..base
-        };
-        let sibling_next = Sample {
-            tenant_id: other,
-            requests: Some(110.0),
-            duration_count: Some(110.0),
-            duration_sum: Some(11.0),
-            ..next.clone()
-        };
-        let all = aggregate(vec![sibling_base.clone(), sibling_next.clone()], 1, 0);
-        assert_eq!(all.samples[1].latency_ms, Some(100.0));
-        let both = aggregate(
-            vec![
-                sibling_base,
-                Sample {
-                    tenant_id: id,
-                    sampled_at: 10000,
-                    requests: Some(10.0),
-                    duration_count: Some(10.0),
-                    duration_sum: Some(1.0),
-                    ..next.clone()
-                },
-                sibling_next,
-                next,
-            ],
-            2,
-            0,
-        );
-        assert!((both.samples[1].latency_ms.unwrap() - 116.6666667).abs() < 0.001);
     }
 }

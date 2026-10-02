@@ -19,29 +19,30 @@ export function formatBytes(value: number) {
 }
 const number = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 1 });
 
-export function AggregateUsage({ instanceId, readings, expected, now, loaded }: {
-  instanceId?: string; readings: UsageReading[]; expected: number; now: number; loaded: boolean;
+export function AggregateUsage({ instanceId, readings, expected, now, loaded, minutes }: {
+  minutes: number; instanceId?: string; readings: UsageReading[]; expected: number; now: number; loaded: boolean;
 }) {
   const [history, setHistory] = useState<AggregateHistory>();
   const [error, setError] = useState(false);
   useEffect(() => {
+    setHistory(undefined);
     let disposed = false;
     let inFlight = false;
     async function load() {
       if (inFlight || document.hidden) return;
       inFlight = true;
       try {
-        const result = await api<AggregateHistory>(`/usage/history${instanceId ? `?instance_id=${encodeURIComponent(instanceId)}` : ""}`);
+        const result = await api<AggregateHistory>(`/usage/history?minutes=${minutes}${instanceId ? `&instance_id=${encodeURIComponent(instanceId)}` : ""}`);
         if (!disposed) { setHistory(result); setError(false); }
       } catch { if (!disposed) setError(true); }
       finally { inFlight = false; }
     }
     void load();
-    const timer = setInterval(() => void load(), 10000);
+    const timer = setInterval(() => void load(), minutes > 60 ? 60000 : 10000);
     const visible = () => { if (!document.hidden) void load(); };
     document.addEventListener("visibilitychange", visible);
     return () => { disposed = true; clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
-  }, [instanceId]);
+  }, [instanceId, minutes]);
   const eligible = history?.eligible_tenants ?? expected;
   const fresh = readings.filter(row => now - row.sampled_at <= 30000);
   const reporting = fresh.filter(row => row.database_bytes !== null).length;
@@ -67,10 +68,10 @@ export function AggregateUsage({ instanceId, readings, expected, now, loaded }: 
     {eligible === 0 && <p className="text-muted-foreground text-sm">No tenants eligible for sampling in this scope.</p>}
     {error && <p role="status" className="text-destructive text-sm">Aggregate history could not be refreshed. Previous graph readings may be stale.</p>}
     <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-      {metrics.map(metric => <UsageChart key={metric.field} title={metric.title} now={now}
+      {metrics.map(metric => <UsageChart windowMs={minutes * 60000} key={metric.field} title={metric.title} now={now}
         points={(history?.samples ?? []).map(row => ({ at: row.sampled_at, value: row[metric.field], note: `${metric.field === "rate" ? row.rate_reporting_tenants : row.reporting_tenants} / ${eligible} tenants reporting` }))}
         format={metric.format} color={metric.color} />)}
     </div>
-    <p className="text-muted-foreground text-xs">Last 10 minutes, in 10-second buckets. Cards sum fresh reporting tenants and mark partial coverage. Graphs sum reporting tenants; hover or focus a point for coverage. Missing all readings or sampling pauses produce gaps. Ready, failed, and retained tenants are included.</p>
+    <p className="text-muted-foreground text-xs">Selected range, with resolution adjusted for longer periods. Cards sum fresh reporting tenants and mark partial coverage. Graphs sum reporting tenants; hover or focus a point for coverage. Missing all readings or sampling pauses produce gaps. Ready, failed, and retained tenants are included.</p>
   </div>;
 }

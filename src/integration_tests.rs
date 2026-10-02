@@ -294,19 +294,29 @@ async fn usage_history_is_persisted_bounded_and_authenticated(pool: PgPool) {
     let now = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
     sqlx::query("INSERT INTO tenant_usage_samples(tenant_id,sampled_at,database_bytes,transactions) VALUES($1,$2,1024,10),($1,$3,NULL,NULL)").bind(id).bind(now-700_000).bind(now).execute(&pool).await.unwrap();
     let state = state(pool);
-    let Json(history) = usage::history(State(state.clone()), headers, Path(id))
-        .await
-        .unwrap();
+    let Json(history) = usage::history(
+        State(state.clone()),
+        headers,
+        Path(id),
+        Query(usage_range::Range::default()),
+    )
+    .await
+    .unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(
         serde_json::to_value(&history[0]).unwrap()["database_bytes"],
         serde_json::Value::Null
     );
     assert_eq!(
-        usage::history(State(state), HeaderMap::new(), Path(id))
-            .await
-            .unwrap_err()
-            .0,
+        usage::history(
+            State(state),
+            HeaderMap::new(),
+            Path(id),
+            Query(usage_range::Range::default())
+        )
+        .await
+        .unwrap_err()
+        .0,
         StatusCode::UNAUTHORIZED
     );
 }
@@ -328,9 +338,14 @@ async fn failed_metric_probe_persists_nulls_without_credentials(pool: PgPool) {
     assert!(serialized.contains("\"database_bytes\":null"));
     assert!(!serialized.contains("private"));
     assert!(!serialized.contains("postgresql"));
-    let Json(history) = usage::history(State(state), headers, Path(id))
-        .await
-        .unwrap();
+    let Json(history) = usage::history(
+        State(state),
+        headers,
+        Path(id),
+        Query(usage_range::Range::default()),
+    )
+    .await
+    .unwrap();
     assert_eq!(history.len(), 1);
 }
 
@@ -596,6 +611,7 @@ async fn fleet_history_groups_hosts_without_double_counting_or_hiding_gaps(pool:
         headers.clone(),
         Query(usage::AggregateScope {
             instance_id: Some(host),
+            range: usage_range::Range::default(),
         }),
     )
     .await
@@ -618,6 +634,7 @@ async fn fleet_history_groups_hosts_without_double_counting_or_hiding_gaps(pool:
         headers,
         Query(usage::AggregateScope {
             instance_id: Some(Uuid::new_v4()),
+            ..Default::default()
         }),
     )
     .await
@@ -633,5 +650,77 @@ async fn fleet_history_groups_hosts_without_double_counting_or_hiding_gaps(pool:
         .unwrap_err()
         .0,
         StatusCode::UNAUTHORIZED
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn usage_ranges_include_old_history_and_compute_rates_before_rollup(pool: PgPool) {
+    let (runtime, headers) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    sqlx::query("UPDATE tenants SET lifecycle_state='ready' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let now = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+    let at = (now / 3600000 - 48) * 3600000;
+    for (offset, counter) in [(10000, 10), (20000, 30), (30000, 50)] {
+        sqlx::query("INSERT INTO tenant_usage_samples(tenant_id,sampled_at,database_bytes,connections,active_connections,transactions,stats_reset) VALUES($1,$2,1024,2,1,$3,'reset')")
+            .bind(id).bind(at+offset).bind(counter as i64).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO tenant_service_samples(tenant_id,sampled_at,epoch,requests,errors,duration_sum,duration_count,pool,pool_idle,in_flight,aborted,rejected) VALUES($1,$2,'blue:1',$3,0,$3*0.1,$3,2,1,0,0,0)")
+            .bind(id).bind(at+offset).bind(counter as f64).execute(&pool).await.unwrap();
+    }
+    let s = state(pool);
+    let range = usage_range::Range {
+        minutes: Some(10080),
+    };
+    let Json(short) = usage::history(
+        State(s.clone()),
+        headers.clone(),
+        Path(id),
+        Query(Default::default()),
+    )
+    .await
+    .unwrap();
+    assert!(short.is_empty());
+    let Json(long) = usage::history(State(s.clone()), headers.clone(), Path(id), Query(range))
+        .await
+        .unwrap();
+    assert!(!long.is_empty());
+    assert!(long.len() <= 361);
+    // The first reading lacks a predecessor: the coarse bucket is a gap,
+    // rather than incorrectly calculating across a multi-minute interval.
+    assert!(serde_json::to_value(&long).unwrap()[0]["rate"].is_null());
+    let Json(service) = service_usage::history(
+        State(s.clone()),
+        headers.clone(),
+        Query(service_usage::Scope {
+            tenant_id: Some(id),
+            range,
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !serde_json::to_value(service).unwrap()["samples"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        usage::history(
+            State(s),
+            headers,
+            Path(id),
+            Query(usage_range::Range {
+                minutes: Some(40321)
+            })
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::BAD_REQUEST
     );
 }

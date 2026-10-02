@@ -44,6 +44,7 @@ mod integration_tests;
 mod service_usage;
 mod temporal;
 mod usage;
+mod usage_range;
 
 // SQLx embeds the complete migration set in this binary at compile time.
 
