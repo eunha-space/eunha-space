@@ -42,6 +42,7 @@ mod health;
 #[cfg(test)]
 mod integration_tests;
 mod service_usage;
+mod smtp;
 mod temporal;
 mod usage;
 mod usage_range;
@@ -1013,6 +1014,10 @@ async fn main() -> Result<()> {
             get(customer_tenants).post(customer_create_tenant),
         )
         .route("/customer/tenants/{id}", get(customer_tenant_detail))
+        .route(
+            "/customer/tenants/{id}/smtp",
+            get(smtp::get).put(smtp::save),
+        )
         .route(
             "/customer/tenants/{id}/owner/password",
             post(customer_reset_owner_password),
@@ -4608,6 +4613,7 @@ fn redact_tenant_toml(config: &mut TenantToml) {
     config.media_storage.secret_access_key = REDACTED.to_owned();
     config.resend.api_key = REDACTED.to_owned();
     if let Some(smtp) = config.smtp.as_mut() {
+        smtp.username = REDACTED.to_owned();
         smtp.password = REDACTED.to_owned();
     }
     if let Some(encryption) = config.active_record_encryption.as_mut() {

@@ -724,3 +724,76 @@ async fn usage_ranges_include_old_history_and_compute_rates_before_rollup(pool: 
         StatusCode::BAD_REQUEST
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn smtp_is_owner_scoped_custom_only_and_write_only(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    let owner = Uuid::new_v4();
+    sqlx::query("INSERT INTO customers(id,email,email_verified_at) VALUES($1,'smtp-owner@example.com',now())").bind(owner).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO customer_sessions(token_hash,customer_id,expires_at) VALUES($1,$2,now()+interval '1 hour')").bind(token_hash("smtp-session")).bind(owner).execute(&pool).await.unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::COOKIE,
+        "eunha_space_customer_session=smtp-session".parse().unwrap(),
+    );
+    sqlx::query("UPDATE tenants SET customer_id=$2,lifecycle_state='ready' WHERE id=$1")
+        .bind(id)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,resend_api_key,resend_from,media_storage_region,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url) VALUES($1,'postgresql://localhost/test','redis://localhost','resend-secret','mail@example.com','auto','media-key','media-secret','https://media.example.com')").bind(id).execute(&pool).await.unwrap();
+    let shared = state(pool.clone());
+    assert_eq!(
+        smtp::get(State(shared.clone()), headers.clone(), Path(id))
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::CONFLICT
+    );
+    sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary) VALUES($1,$2,'custom.example.com','custom','active',true)").bind(Uuid::new_v4()).bind(id).execute(&pool).await.unwrap();
+    let settings = serde_json::from_value(serde_json::json!({"host":"smtp.example.com","port":587,"username":"private-login","password":"private-password","from":"mail@custom.example.com"})).unwrap();
+    smtp::save(
+        State(shared.clone()),
+        headers.clone(),
+        Path(id),
+        Json(settings),
+    )
+    .await
+    .unwrap();
+    let Json(status) = smtp::get(State(shared.clone()), headers.clone(), Path(id))
+        .await
+        .unwrap();
+    assert_eq!(status["configured"], true);
+    assert!(!status.to_string().contains("private-"));
+    assert!(status.get("username").is_none());
+    assert!(status.get("password").is_none());
+    let (password, revision) = sqlx::query_as::<_, (String,i64)>("SELECT c.smtp_password,t.config_revision FROM tenant_configuration c JOIN tenants t ON t.id=c.tenant_id WHERE t.id=$1").bind(id).fetch_one(&pool).await.unwrap();
+    assert_eq!(password, "private-password");
+    assert_eq!(revision, 2);
+    let detail = sqlx::query_scalar::<_, serde_json::Value>(
+        "SELECT detail FROM operations WHERE tenant_id=$1 AND kind='smtp_update'",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(detail, serde_json::json!({}));
+    let other = tenant(&pool, runtime).await;
+    assert_eq!(
+        smtp::get(State(shared.clone()), headers, Path(other))
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        smtp::get(State(shared), HeaderMap::new(), Path(id))
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+}

@@ -43,6 +43,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Spinner } from "@/components/console/status";
+import { CustomerSmtp } from "@/CustomerSmtp";
 import { CustomerDomainChange } from "@/CustomerDomainChange";
 
 // Provisioning is tracked step by step, but a customer only needs the shape of
@@ -220,6 +221,7 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
             ? [domain, setup, account]
             : [setup, domain, account];
         })()}
+        {detail.tenant.lifecycle_state === "ready" && detail.domains.some((domain) => domain.kind === "custom" && domain.status === "active" && domain.is_primary) && <CustomerSmtp key={id} tenantId={id} />}
         <DeleteInstance
           tenant={detail.tenant}
           onChanged={() => setRevision((value) => value + 1)}

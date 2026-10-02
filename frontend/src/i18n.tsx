@@ -4,6 +4,16 @@ import { Button } from "@/components/ui/button";
 
 const en: Record<string, string> = {};
 const ko: Record<string, string> = {
+  "Email delivery": "이메일 발송",
+  "SMTP hostname": "SMTP 호스트 이름",
+  "Port": "포트",
+  "Sender email": "발신 이메일 주소",
+  "SMTP username": "SMTP 사용자 이름",
+  "SMTP password": "SMTP 비밀번호",
+  "Save SMTP settings": "SMTP 설정 저장",
+  "Saving…": "저장 중…",
+  "Saved. Your instance will apply these settings shortly.": "저장되었습니다. 곧 인스턴스에 설정이 적용됩니다.",
+  "Use your SMTP provider for instance emails. Port 465 uses TLS; port 587 requires STARTTLS. Enter both credentials whenever you save; saved credentials are never displayed.": "인스턴스 이메일을 내 SMTP 서비스로 발송합니다. 포트 465는 TLS를, 포트 587은 STARTTLS를 사용합니다. 저장할 때마다 사용자 이름과 비밀번호를 입력하세요. 저장된 인증 정보는 표시되지 않습니다.",
   "Your eunha space instances": "나의 eunha space 인스턴스",
   "Create your account": "계정 만들기",
   "Sign in to create and manage your instances.":
