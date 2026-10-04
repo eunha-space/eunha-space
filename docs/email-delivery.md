@@ -5,6 +5,14 @@ SMTP under **Email delivery** on the instance page. They supply a hostname,
 port, sender email address, username, and password. Port 465 uses implicit TLS;
 port 587 requires STARTTLS. Both verify the server certificate.
 
+Tenants whose primary domain is `eunha.space` or a subdomain use the shared
+control-plane SMTP credentials and `noreply@eunha.space` as their sender. New
+custom-domain tenants and imports start without SMTP settings; owners must
+save their own credentials before instance email can be sent. Provisioning
+never copies mail settings from another tenant. Moving from an eunha.space
+domain to a custom domain clears shared mail settings; moving back restores
+the shared defaults.
+
 Credentials are write-only: every save supplies both credentials, and neither
 is returned by the customer API or the operator configuration preview. Audit
 records contain only the operation and actor, without SMTP values.

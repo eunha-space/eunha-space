@@ -28,16 +28,23 @@ pub(crate) fn customer_email_config() -> Result<Option<CustomerEmailConfig>> {
         .map_err(|_| anyhow::anyhow!("Invalid control-plane email sender"))?;
     Ok(Some(CustomerEmailConfig {
         transport: transport
-            .credentials(Credentials::new(username, password))
+            .credentials(Credentials::new(username.clone(), password.clone()))
             .timeout(Some(Duration::from_secs(30)))
             .build(),
         from,
+        tenant_smtp: Settings {
+            host,
+            port: port.parse()?,
+            username,
+            password,
+            from: "noreply@eunha.space".into(),
+        },
         public_url: std::env::var("EUNHA_SPACE_PUBLIC_URL")
             .unwrap_or_else(|_| "https://eunha.space".into()),
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 pub(crate) struct Settings {
     host: String,
     port: i32,
@@ -153,4 +160,53 @@ mod tests {
         settings.from = "mail@example.com\r\nBcc: other@example.com".into();
         assert!(validate(&settings).is_err());
     }
+}
+
+pub(crate) fn uses_shared_mail(domain: &str) -> bool {
+    domain.eq_ignore_ascii_case("eunha.space")
+        || domain.to_ascii_lowercase().ends_with(".eunha.space")
+}
+
+pub(crate) async fn set_domain_defaults(
+    state: &Shared,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    domain: &str,
+) -> Result<(), ApiError> {
+    let settings = if uses_shared_mail(domain) {
+        Some(
+            &state
+                .customer_email
+                .as_ref()
+                .ok_or_else(|| {
+                    ApiError(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "Shared SMTP is not configured.".into(),
+                    )
+                })?
+                .tenant_smtp,
+        )
+    } else {
+        None
+    };
+    sqlx::query("UPDATE tenant_configuration SET smtp_host=$2,smtp_port=$3,smtp_username=$4,smtp_password=$5,smtp_from=$6 WHERE tenant_id=$1")
+        .bind(tenant_id).bind(settings.map(|s| &s.host)).bind(settings.map(|s| s.port))
+        .bind(settings.map(|s| &s.username)).bind(settings.map(|s| &s.password)).bind(settings.map(|s| &s.from))
+        .execute(&mut **tx).await?;
+    Ok(())
+}
+
+pub(crate) async fn change_domain_defaults(
+    state: &Shared,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    old_domain: &str,
+    new_domain: &str,
+) -> Result<()> {
+    if uses_shared_mail(old_domain) != uses_shared_mail(new_domain) {
+        set_domain_defaults(state, tx, tenant_id, new_domain)
+            .await
+            .map_err(|_| anyhow::anyhow!("SMTP defaults could not be updated"))?;
+    }
+    Ok(())
 }

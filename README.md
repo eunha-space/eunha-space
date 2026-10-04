@@ -1,8 +1,10 @@
 # eunha space
 
 The control plane for hosted Eunha instances. PostgreSQL's typed tenant,
-configuration, and R2-resource rows are authoritative; runtime TOML files are
-generated projections and never a second source of truth. A tenant's runtime
+configuration, and R2-resource rows are authoritative for hosting; site settings
+are authoritative in each tenant database. Runtime TOML files are generated
+projections and never a second source of truth. See [site settings](docs/site-settings.md)
+for the bootstrap import and the keys removed from runtime configuration. A tenant's runtime
 file is named by its tenant id, `<tenant id>.toml`. Eunha identifies a tenant
 by the domain inside the file, so the name only has to be unique and stable,
 which a name derived from the domain is not: hyphens are legal in domains, and

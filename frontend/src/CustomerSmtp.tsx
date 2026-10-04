@@ -30,7 +30,7 @@ export function CustomerSmtp({ tenantId }: { tenantId: string }) {
   return <Card>
     <CardHeader>
       <CardTitle>{t("Email delivery")}</CardTitle>
-      <CardDescription>{t("Use your SMTP provider for instance emails. Port 465 uses TLS; port 587 requires STARTTLS. Enter both credentials whenever you save; saved credentials are never displayed.")}</CardDescription>
+      <CardDescription>{t("Custom domains require your own SMTP credentials. Email delivery is unavailable until you save them.")} {t("Use your SMTP provider for instance emails. Port 465 uses TLS; port 587 requires STARTTLS. Enter both credentials whenever you save; saved credentials are never displayed.")}</CardDescription>
     </CardHeader>
     <CardContent>
       <form className="grid gap-4" onSubmit={async (event) => {

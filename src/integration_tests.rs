@@ -1128,3 +1128,71 @@ async fn domains_are_reusable_only_after_purge_completes(pool: PgPool) {
             .is_err()
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn mail_defaults_are_isolated_by_primary_domain(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,media_storage_region,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from) VALUES($1,'postgresql://localhost/test','redis://localhost','auto','key','secret','https://media.example','smtp.owner.example',587,'owner','owner-password','mail@owner.example')")
+        .bind(id).execute(&pool).await.unwrap();
+    let mut shared = state(pool.clone());
+    Arc::get_mut(&mut shared).unwrap().customer_email = Some(CustomerEmailConfig {
+        transport: lettre::AsyncSmtpTransport::<lettre::Tokio1Executor>::relay("smtp.example.com").unwrap().build(),
+        from: "noreply@eunha.space".parse().unwrap(),
+        public_url: "https://eunha.space".into(),
+        tenant_smtp: serde_json::from_value(serde_json::json!({"host":"smtp.shared.example","port":465,"username":"shared","password":"shared-password","from":"noreply@eunha.space"})).unwrap(),
+    });
+    let mut tx = pool.begin().await.unwrap();
+    smtp::set_domain_defaults(&shared, &mut tx, id, "new.eunha.space")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let row: (String, String, String) = sqlx::query_as(
+        "SELECT smtp_host,smtp_password,smtp_from FROM tenant_configuration WHERE tenant_id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        (
+            "smtp.shared.example".into(),
+            "shared-password".into(),
+            "noreply@eunha.space".into()
+        )
+    );
+    let mut tx = pool.begin().await.unwrap();
+    smtp::change_domain_defaults(&shared, &mut tx, id, "new.eunha.space", "custom.example")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let unset: bool = sqlx::query_scalar("SELECT smtp_host IS NULL AND smtp_port IS NULL AND smtp_username IS NULL AND smtp_password IS NULL AND smtp_from IS NULL FROM tenant_configuration WHERE tenant_id=$1").bind(id).fetch_one(&pool).await.unwrap();
+    assert!(unset);
+    sqlx::query("UPDATE tenant_configuration SET smtp_host='smtp.owner.example',smtp_port=587,smtp_username='owner',smtp_password='owner-password',smtp_from='mail@owner.example' WHERE tenant_id=$1").bind(id).execute(&pool).await.unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    smtp::change_domain_defaults(&shared, &mut tx, id, "custom.example", "other.example")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let retained: String =
+        sqlx::query_scalar("SELECT smtp_password FROM tenant_configuration WHERE tenant_id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(retained, "owner-password");
+    let mut tx = pool.begin().await.unwrap();
+    smtp::set_domain_defaults(&shared, &mut tx, id, "eunha.space.attacker.example")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let empty: bool =
+        sqlx::query_scalar("SELECT smtp_host IS NULL FROM tenant_configuration WHERE tenant_id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(empty);
+}

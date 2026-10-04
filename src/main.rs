@@ -42,6 +42,7 @@ mod health;
 #[cfg(test)]
 mod integration_tests;
 mod service_usage;
+mod site_settings;
 mod smtp;
 mod temporal;
 mod usage;
@@ -90,6 +91,7 @@ struct CustomerEmailConfig {
     transport: lettre::AsyncSmtpTransport<lettre::Tokio1Executor>,
     from: lettre::message::Mailbox,
     public_url: String,
+    tenant_smtp: smtp::Settings,
 }
 /// The operator-reachable Temporal Web UI, from `TEMPORAL_UI_URL`. The UI is
 /// never published to the Internet, so an unset variable just leaves the admin
@@ -567,23 +569,9 @@ struct InstanceToml {
     /// `alsoKnownAs` for a Move from them to be honoured. Served on nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     previous_domains: Vec<String>,
-    title: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    short_description: String,
-    contact_email: Option<String>,
-    #[serde(default = "default_true")]
-    registrations_open: bool,
-    #[serde(default)]
-    approval_required: bool,
     vapid_private_key: String,
     vapid_public_key: String,
     icon_url: Option<String>,
-    #[serde(default)]
-    privacy_policy: String,
-    #[serde(default)]
-    terms_of_service: String,
 }
 #[derive(Deserialize, Serialize)]
 struct WorkersToml {
@@ -780,17 +768,9 @@ fn typed_toml(
             domain: tenant.domain,
             aliases: tenant.aliases,
             previous_domains: tenant.previous_domains,
-            title: tenant.title,
-            description: tenant.description,
-            short_description: tenant.short_description,
-            contact_email: tenant.contact_email,
-            registrations_open: tenant.registrations_open,
-            approval_required: tenant.approval_required,
             vapid_private_key: required(tenant.vapid_private_key, "vapid_private_key")?,
             vapid_public_key: required(tenant.vapid_public_key, "vapid_public_key")?,
             icon_url: tenant.icon_url,
-            privacy_policy: tenant.privacy_policy,
-            terms_of_service: tenant.terms_of_service,
         },
         active_record_encryption: encryption,
         software_update_url: config.software_update_url,
@@ -1738,13 +1718,14 @@ async fn create_tenant_inner(
         delivery_workers,delivery_batch,delivery_concurrency,inbox_workers,inbox_batch,inbox_concurrency,queue_idle_poll_seconds,process_delivery_concurrency,
         max_concurrent_requests,process_max_tenants,process_database_connections)
       SELECT $1,$2,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,
-        redis_url,redis_coordination_url,$3,redis_process_metrics,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,
+        redis_url,redis_coordination_url,$3,redis_process_metrics,NULL,NULL,NULL,NULL,NULL,
         $4,$5,software_update_url,allowed_private_networks,sign_integrity_proofs,
         media_storage_region,media_storage_endpoint,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url,$6,
         delivery_workers,delivery_batch,delivery_concurrency,inbox_workers,inbox_batch,inbox_concurrency,queue_idle_poll_seconds,process_delivery_concurrency,
         max_concurrent_requests,process_max_tenants,process_database_connections FROM tenant_configuration WHERE tenant_id=$7"#)
         .bind(tenant_id).bind(database_url).bind(redis_prefix).bind(encryption_primary).bind(encryption_salt).bind(prefix).bind(template)
         .execute(&mut *tx).await?;
+    smtp::set_domain_defaults(s, &mut tx, tenant_id, &domain).await?;
     sqlx::query("INSERT INTO r2_buckets(tenant_id,bucket_name,lifecycle_state) SELECT $1,bucket_name,'provisioning' FROM r2_buckets WHERE tenant_id=$2")
         .bind(tenant_id).bind(template).execute(&mut *tx).await?;
     for (index, hostname) in provided_domains.iter().enumerate() {
@@ -1922,7 +1903,7 @@ async fn import_tenant(
         })?
         .cname_target
         .clone();
-    // Redis, mail and worker settings are the runtime's, not the instance's:
+    // Redis and worker settings are the runtime's, not the instance's:
     // they describe where it is hosted rather than who it is.
     let template = sqlx::query_scalar::<_, Uuid>(
         "SELECT t.id FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.runtime_id=$1 AND t.lifecycle_state='ready' ORDER BY t.created_at LIMIT 1",
@@ -1961,7 +1942,7 @@ async fn import_tenant(
         delivery_workers,delivery_batch,delivery_concurrency,inbox_workers,inbox_batch,inbox_concurrency,queue_idle_poll_seconds,process_delivery_concurrency,
         max_concurrent_requests,process_max_tenants,process_database_connections)
       SELECT $1,$2,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,
-        redis_url,redis_coordination_url,$3,redis_process_metrics,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,
+        redis_url,redis_coordination_url,$3,redis_process_metrics,NULL,NULL,NULL,NULL,NULL,
         $4,$5,software_update_url,allowed_private_networks,sign_integrity_proofs,
         CASE WHEN $6 THEN $7 ELSE media_storage_region END,
         CASE WHEN $6 THEN $8 ELSE media_storage_endpoint END,
@@ -1987,6 +1968,7 @@ async fn import_tenant(
         .bind(tenant_id).bind(brings_own_media).bind(media.as_ref().map(|m| m.bucket.trim())).bind(template)
         .execute(&mut *tx).await
         .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("r2_buckets_bucket_name_safe") { bad("That is not a usable bucket name.") } else { ApiError::from(error) })?;
+    smtp::set_domain_defaults(&s, &mut tx, tenant_id, &domain).await?;
     sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary,cname_target) VALUES($1,$2,$3,'custom','pending',true,$4)")
         .bind(Uuid::new_v4()).bind(tenant_id).bind(&domain).bind(&cname_target).execute(&mut *tx).await
         .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenant_domains_hostname_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
@@ -2607,8 +2589,13 @@ async fn reconcile_domain(state: &Shared, id: Uuid) -> Result<()> {
         .bind(id)
         .execute(&mut *tx)
         .await?;
+    let old_domain: String = sqlx::query_scalar("SELECT domain FROM tenants WHERE id=$1")
+        .bind(tenant_id)
+        .fetch_one(&mut *tx)
+        .await?;
     sqlx::query("UPDATE tenants SET domain=$1,aliases=ARRAY(SELECT hostname FROM tenant_domains WHERE tenant_id=$2 AND id<>$3 AND (kind IN ('provided','legacy') OR status='active') ORDER BY created_at),config_revision=config_revision+1,updated_at=now() WHERE id=$2")
         .bind(&hostname).bind(tenant_id).bind(id).execute(&mut *tx).await?;
+    smtp::change_domain_defaults(state, &mut tx, tenant_id, &old_domain, &hostname).await?;
     tx.commit().await?;
     if unserved {
         // Provisioning renders, starts and checks the tenant under this domain
@@ -3859,7 +3846,7 @@ async fn create_tenant_owner(state: &Shared, tenant_id: Uuid) -> Result<()> {
             existing.eq_ignore_ascii_case(&email),
             "owner username belongs to another account"
         );
-        return Ok(());
+        return render_provisioned_tenant(state, tenant_id).await;
     }
 
     tenant_account_command(
@@ -3876,7 +3863,8 @@ async fn create_tenant_owner(state: &Shared, tenant_id: Uuid) -> Result<()> {
         ],
     )
     .await
-    .map(drop)
+    .map(drop)?;
+    render_provisioned_tenant(state, tenant_id).await
 }
 
 /// Run an `eunha accounts` command that prints a password against one tenant,
@@ -4307,13 +4295,10 @@ async fn render_provisioned_tenant(state: &Shared, tenant_id: Uuid) -> Result<()
     );
     let domain = tenant.domain.clone();
     anyhow::ensure!(is_safe_domain(&domain), "invalid tenant domain");
-    let rendered = toml::to_string_pretty(&typed_toml(
-        tenant,
-        config,
-        bucket,
-        bind_address,
-        state.tenant_pooler(),
-    )?)?;
+    let site = site_settings::Seed::from(&tenant);
+    let typed = typed_toml(tenant, config, bucket, bind_address, state.tenant_pooler())?;
+    site_settings::import(&typed, &site, FsPath::new(&directory)).await?;
+    let rendered = toml::to_string_pretty(&typed)?;
     toml::from_str::<TenantToml>(&rendered)?;
     let directory = PathBuf::from(directory);
     anyhow::ensure!(
@@ -5829,6 +5814,7 @@ async fn render_tenant(
             "The stored runtime target is invalid.".into(),
         ));
     }
+    let site = site_settings::Seed::from(&tenant);
     let typed = typed_toml(
         tenant,
         config,
@@ -5837,6 +5823,18 @@ async fn render_tenant(
         s.tenant_pooler(),
     )
     .map_err(ApiError::from)?;
+    if site_settings::import(&typed, &site, FsPath::new(&tenant_directory))
+        .await
+        .is_err()
+    {
+        mark_operation_failed(
+            &s.db,
+            op,
+            "Site settings could not be imported into the tenant database.",
+        )
+        .await;
+        return Err(ApiError(StatusCode::CONFLICT, "Site settings could not be imported. Ensure the runtime supports settings import-config.".into()));
+    }
     let rendered_config = toml::to_string_pretty(&typed).map_err(ApiError::from)?;
     toml::from_str::<TenantToml>(&rendered_config).map_err(ApiError::from)?;
     let service_label = active_runtime_label(&service_label, router_enabled, &tenant_directory)

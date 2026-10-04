@@ -605,6 +605,14 @@ async fn switch(state: &Shared, tenant_id: Uuid, change: &Running) -> Result<boo
         .bind(&change.from_domain)
         .execute(&mut *tx)
         .await?;
+    crate::smtp::change_domain_defaults(
+        state,
+        &mut tx,
+        tenant_id,
+        &change.from_domain,
+        &change.to_domain,
+    )
+    .await?;
     tx.commit().await?;
     render_provisioned_tenant(state, tenant_id).await?;
     reload_provisioned_runtime(state, tenant_id).await?;

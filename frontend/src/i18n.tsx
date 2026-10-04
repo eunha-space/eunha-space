@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 
 const en: Record<string, string> = {};
 const ko: Record<string, string> = {
+  "Custom domains require your own SMTP credentials. Email delivery is unavailable until you save them.": "커스텀 도메인은 직접 SMTP 인증 정보를 설정해야 합니다. 저장하기 전까지 이메일을 발송할 수 없습니다.",
   "Email delivery": "이메일 발송",
   "SMTP hostname": "SMTP 호스트 이름",
   "Port": "포트",
