@@ -42,7 +42,6 @@ mod health;
 #[cfg(test)]
 mod integration_tests;
 mod service_usage;
-mod site_settings;
 mod smtp;
 mod temporal;
 mod usage;
@@ -203,7 +202,6 @@ mod error_tests {
 struct TenantSummary {
     id: Uuid,
     domain: String,
-    title: String,
     lifecycle_state: String,
     desired_state: String,
     observed_state: String,
@@ -302,7 +300,6 @@ struct CustomerTenantRequest {
     /// The `*.eunha.space` label, when the customer is not bringing a domain.
     #[serde(default)]
     subdomain: String,
-    title: String,
     custom_domain: Option<String>,
     owner_username: String,
 }
@@ -315,13 +312,7 @@ struct AutomaticRelease {
 #[derive(Deserialize)]
 struct NewTenant {
     subdomain: String,
-    title: String,
-    contact_email: Option<String>,
     runtime_id: Uuid,
-    #[serde(default = "default_true")]
-    registrations_open: bool,
-    #[serde(default)]
-    approval_required: bool,
 }
 
 /// An existing Mastodon instance taken over rather than created.
@@ -338,7 +329,6 @@ struct TenantImport {
     /// identity is on it and remote servers know them there, so an import is
     /// never also a move.
     domain: String,
-    title: String,
     runtime_id: Uuid,
     /// A custom-format `pg_dump` already staged on the runtime host.
     dump_path: String,
@@ -347,7 +337,6 @@ struct TenantImport {
     /// `media_storage`: the instance's media either moves here or stays where
     /// it is, and it cannot do both.
     media_path: Option<String>,
-    contact_email: Option<String>,
     /// The account in the dump that speaks for the instance. Recorded, never
     /// created: an imported instance arrives with its owner.
     owner_username: Option<String>,
@@ -364,10 +353,6 @@ struct TenantImport {
     /// goes on serving it rather than being copied here. Nothing provisions it
     /// and the purge refuses to delete from it.
     media_storage: Option<ImportedMediaStorage>,
-    #[serde(default)]
-    registrations_open: bool,
-    #[serde(default)]
-    approval_required: bool,
 }
 
 /// The object storage an imported instance already keeps its media in. It is
@@ -437,7 +422,6 @@ struct CustomerProvisioningStep {
 struct CustomerTenantInfo {
     id: Uuid,
     domain: String,
-    title: String,
     lifecycle_state: String,
     observed_state: String,
     #[serde(with = "time::serde::rfc3339")]
@@ -676,17 +660,9 @@ struct StoredTenant {
     aliases: Vec<String>,
     #[serde(default)]
     previous_domains: Vec<String>,
-    title: String,
-    description: String,
-    short_description: String,
-    contact_email: Option<String>,
-    registrations_open: bool,
-    approval_required: bool,
     vapid_private_key: Option<String>,
     vapid_public_key: Option<String>,
     icon_url: Option<String>,
-    privacy_policy: String,
-    terms_of_service: String,
     lifecycle_state: String,
 }
 fn required(value: Option<String>, name: &str) -> Result<String> {
@@ -1402,7 +1378,7 @@ async fn customer_tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     let (id, _) = customer(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.user_id=$1 AND t.lifecycle_state NOT IN ('purging','purged') ORDER BY t.created_at").bind(id).fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.user_id=$1 AND t.lifecycle_state NOT IN ('purging','purged') ORDER BY t.created_at").bind(id).fetch_all(&s.db).await?))
 }
 
 async fn customer_tenant_detail(
@@ -1411,7 +1387,7 @@ async fn customer_tenant_detail(
     Path(id): Path<Uuid>,
 ) -> Result<Json<CustomerTenantDetail>, ApiError> {
     let (user_id, _) = customer(&headers, &s.db).await?;
-    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,t.owner_email,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.purge_scheduled_for,t.abandoned_custom_domain FROM tenants t JOIN users c ON c.id=t.user_id WHERE t.id=$1 AND t.user_id=$2 AND t.lifecycle_state NOT IN ('purging','purged')")
+    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.lifecycle_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,t.owner_email,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.purge_scheduled_for,t.abandoned_custom_domain FROM tenants t JOIN users c ON c.id=t.user_id WHERE t.id=$1 AND t.user_id=$2 AND t.lifecycle_state NOT IN ('purging','purged')")
         .bind(id)
         .bind(user_id)
         .fetch_optional(&s.db)
@@ -1438,7 +1414,7 @@ async fn tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     admin_user(&headers, &s.db).await?;
-    let mut tenants: Vec<TenantSummary> = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain,EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=t.id) imported,d.workflow_id temporal_workflow_id,d.workflow_kind temporal_workflow_kind,d.attempts temporal_dispatch_attempts,CASE WHEN t.lifecycle_state='provisioning' THEN (SELECT step FROM provisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,array_position(ARRAY['database','migrate','import','render','media','reload','health','routing','owner'],step) LIMIT 1) WHEN t.lifecycle_state IN ('deprovisioning','retained','purging') THEN (SELECT step FROM deprovisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,step LIMIT 1) END lifecycle_step FROM tenants t JOIN runtimes r ON r.id=t.runtime_id LEFT JOIN LATERAL (SELECT workflow_id,workflow_kind,attempts FROM temporal_dispatches WHERE tenant_id=t.id ORDER BY created_at DESC LIMIT 1) d ON true ORDER BY t.domain")
+    let mut tenants: Vec<TenantSummary> = sqlx::query_as("SELECT t.id,t.domain,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain,EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=t.id) imported,d.workflow_id temporal_workflow_id,d.workflow_kind temporal_workflow_kind,d.attempts temporal_dispatch_attempts,CASE WHEN t.lifecycle_state='provisioning' THEN (SELECT step FROM provisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,array_position(ARRAY['database','migrate','import','render','media','reload','health','routing','owner'],step) LIMIT 1) WHEN t.lifecycle_state IN ('deprovisioning','retained','purging') THEN (SELECT step FROM deprovisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,step LIMIT 1) END lifecycle_step FROM tenants t JOIN runtimes r ON r.id=t.runtime_id LEFT JOIN LATERAL (SELECT workflow_id,workflow_kind,attempts FROM temporal_dispatches WHERE tenant_id=t.id ORDER BY created_at DESC LIMIT 1) d ON true ORDER BY t.domain")
         .fetch_all(&s.db)
         .await?;
     if let Some(ui) = &s.temporal_ui {
@@ -1505,7 +1481,7 @@ async fn create_tenant(
     Json(body): Json<NewTenant>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
-    create_tenant_inner(&s, body, Some(admin_user_id), None, None, None).await
+    create_tenant_inner(&s, body, Some(admin_user_id), None, None, None, None).await
 }
 
 async fn customer_create_tenant(
@@ -1537,19 +1513,13 @@ async fn customer_create_tenant(
         &s,
         NewTenant {
             subdomain: body.subdomain,
-            title: body.title,
-            contact_email: Some(email),
             runtime_id,
-            // Mastodon's default `registrations_mode` is `none`: a new server
-            // is closed until its Owner decides otherwise, so nobody can sign
-            // up ahead of the account provisioning creates for the customer.
-            registrations_open: false,
-            approval_required: false,
         },
         None,
         Some(user_id),
         body.custom_domain,
         Some(owner_username),
+        Some(email),
     )
     .await
 }
@@ -1561,22 +1531,9 @@ async fn create_tenant_inner(
     user_id: Option<Uuid>,
     custom_domain: Option<String>,
     owner_username: Option<String>,
+    owner_email: Option<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     body.subdomain = body.subdomain.trim().to_ascii_lowercase();
-    body.title = body.title.trim().to_owned();
-    body.contact_email = body
-        .contact_email
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-    let owner_email = owner_username
-        .as_ref()
-        .and_then(|_| body.contact_email.clone());
-    if body.title.is_empty() || body.title.len() > 200 {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "Enter a valid domain and title.".into(),
-        ));
-    }
     let custom_domain = custom_domain
         .map(|value| value.trim().trim_end_matches('.').to_ascii_lowercase())
         .filter(|value| !value.is_empty());
@@ -1613,7 +1570,7 @@ async fn create_tenant_inner(
         {
             return Err(ApiError(
                 StatusCode::BAD_REQUEST,
-                "Enter a valid domain and title.".into(),
+                "Enter a valid domain.".into(),
             ));
         }
         if sqlx::query_scalar::<_, bool>(
@@ -1705,9 +1662,8 @@ async fn create_tenant_inner(
             ));
         }
     }
-    sqlx::query("INSERT INTO tenants(id,domain,aliases,title,runtime_id,desired_state,observed_state,lifecycle_state,contact_email,registrations_open,approval_required,vapid_private_key,vapid_public_key,user_id,owner_username,owner_email) VALUES($1,$2,$3,$4,$5,'running','unknown','provisioning',$6,$7,$8,$9,$10,$11,$12,$13)")
-        .bind(tenant_id).bind(&domain).bind(&aliases).bind(&body.title).bind(body.runtime_id)
-        .bind(&body.contact_email).bind(body.registrations_open).bind(body.approval_required)
+    sqlx::query("INSERT INTO tenants(id,domain,aliases,runtime_id,desired_state,observed_state,lifecycle_state,vapid_private_key,vapid_public_key,user_id,owner_username,owner_email) VALUES($1,$2,$3,$4,'running','unknown','provisioning',$5,$6,$7,$8,$9)")
+        .bind(tenant_id).bind(&domain).bind(&aliases).bind(body.runtime_id)
         .bind(vapid_private).bind(vapid_public).bind(user_id).bind(&owner_username).bind(owner_email).execute(&mut *tx).await
         .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenants_domain_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
     sqlx::query(r#"INSERT INTO tenant_configuration(
@@ -1787,10 +1743,7 @@ async fn import_tenant(
             "An imported instance keeps its own domain, which cannot be a platform one.",
         ));
     }
-    let title = body.title.trim().to_owned();
-    if title.is_empty() || title.len() > 200 {
-        return Err(bad("Enter a title."));
-    }
+
     let dump_path = body.dump_path.trim().to_owned();
     if !is_safe_absolute_path(FsPath::new(&dump_path))
         || !dump_path
@@ -1923,15 +1876,9 @@ async fn import_tenant(
     let redis_prefix = tenant_redis_key_prefix(tenant_id);
     let brings_own_media = body.media_storage.is_some();
     let media = body.media_storage;
-    let contact_email = body
-        .contact_email
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty());
-
     let mut tx = s.db.begin().await?;
-    sqlx::query("INSERT INTO tenants(id,domain,title,runtime_id,desired_state,observed_state,lifecycle_state,contact_email,registrations_open,approval_required,vapid_private_key,vapid_public_key,owner_username) VALUES($1,$2,$3,$4,'running','unknown','provisioning',$5,$6,$7,$8,$9,$10)")
-        .bind(tenant_id).bind(&domain).bind(&title).bind(body.runtime_id)
-        .bind(&contact_email).bind(body.registrations_open).bind(body.approval_required)
+    sqlx::query("INSERT INTO tenants(id,domain,runtime_id,desired_state,observed_state,lifecycle_state,vapid_private_key,vapid_public_key,owner_username) VALUES($1,$2,$3,'running','unknown','provisioning',$4,$5,$6)")
+        .bind(tenant_id).bind(&domain).bind(body.runtime_id)
         .bind(vapid_private).bind(vapid_public).bind(&owner_username).execute(&mut *tx).await
         .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenants_domain_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
     sqlx::query(r#"INSERT INTO tenant_configuration(
@@ -3846,7 +3793,7 @@ async fn create_tenant_owner(state: &Shared, tenant_id: Uuid) -> Result<()> {
             existing.eq_ignore_ascii_case(&email),
             "owner username belongs to another account"
         );
-        return render_provisioned_tenant(state, tenant_id).await;
+        return Ok(());
     }
 
     tenant_account_command(
@@ -3863,8 +3810,7 @@ async fn create_tenant_owner(state: &Shared, tenant_id: Uuid) -> Result<()> {
         ],
     )
     .await
-    .map(drop)?;
-    render_provisioned_tenant(state, tenant_id).await
+    .map(drop)
 }
 
 /// Run an `eunha accounts` command that prints a password against one tenant,
@@ -4295,9 +4241,7 @@ async fn render_provisioned_tenant(state: &Shared, tenant_id: Uuid) -> Result<()
     );
     let domain = tenant.domain.clone();
     anyhow::ensure!(is_safe_domain(&domain), "invalid tenant domain");
-    let site = site_settings::Seed::from(&tenant);
     let typed = typed_toml(tenant, config, bucket, bind_address, state.tenant_pooler())?;
-    site_settings::import(&typed, &site, FsPath::new(&directory)).await?;
     let rendered = toml::to_string_pretty(&typed)?;
     toml::from_str::<TenantToml>(&rendered)?;
     let directory = PathBuf::from(directory);
@@ -5814,7 +5758,6 @@ async fn render_tenant(
             "The stored runtime target is invalid.".into(),
         ));
     }
-    let site = site_settings::Seed::from(&tenant);
     let typed = typed_toml(
         tenant,
         config,
@@ -5823,18 +5766,6 @@ async fn render_tenant(
         s.tenant_pooler(),
     )
     .map_err(ApiError::from)?;
-    if site_settings::import(&typed, &site, FsPath::new(&tenant_directory))
-        .await
-        .is_err()
-    {
-        mark_operation_failed(
-            &s.db,
-            op,
-            "Site settings could not be imported into the tenant database.",
-        )
-        .await;
-        return Err(ApiError(StatusCode::CONFLICT, "Site settings could not be imported. Ensure the runtime supports settings import-config.".into()));
-    }
     let rendered_config = toml::to_string_pretty(&typed).map_err(ApiError::from)?;
     toml::from_str::<TenantToml>(&rendered_config).map_err(ApiError::from)?;
     let service_label = active_runtime_label(&service_label, router_enabled, &tenant_directory)

@@ -189,7 +189,19 @@ async fn fixture(pool: &PgPool) -> (Uuid, HeaderMap) {
 
 async fn tenant(pool: &PgPool, runtime: Uuid) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO tenants(id,domain,title,runtime_id,desired_state,observed_state) VALUES($1,$2,'Test',$3,'running','unknown')").bind(id).bind(format!("{}.example", id.simple())).bind(runtime).execute(pool).await.unwrap();
+    let legacy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='tenants' AND column_name='title')").fetch_one(pool).await.unwrap();
+    let statement = if legacy {
+        "INSERT INTO tenants(id,domain,title,runtime_id,desired_state,observed_state) VALUES($1,$2,'Test',$3,'running','unknown')"
+    } else {
+        "INSERT INTO tenants(id,domain,runtime_id,desired_state,observed_state) VALUES($1,$2,$3,'running','unknown')"
+    };
+    sqlx::query(statement)
+        .bind(id)
+        .bind(format!("{}.example", id.simple()))
+        .bind(runtime)
+        .execute(pool)
+        .await
+        .unwrap();
     id
 }
 
@@ -1100,7 +1112,7 @@ async fn domains_are_reusable_only_after_purge_completes(pool: PgPool) {
             .execute(&pool)
             .await
             .unwrap();
-        let error = sqlx::query("INSERT INTO tenants(id,domain,title,runtime_id,desired_state,observed_state) VALUES($1,$2,'Replacement',$3,'running','unknown')")
+        let error = sqlx::query("INSERT INTO tenants(id,domain,runtime_id,desired_state,observed_state) VALUES($1,$2,$3,'running','unknown')")
             .bind(replacement).bind(&domain).bind(runtime).execute(&pool).await.unwrap_err();
         assert_eq!(
             error.as_database_error().unwrap().constraint(),
@@ -1112,7 +1124,7 @@ async fn domains_are_reusable_only_after_purge_completes(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tenants(id,domain,title,runtime_id,desired_state,observed_state) VALUES($1,$2,'Replacement',$3,'running','unknown')")
+    sqlx::query("INSERT INTO tenants(id,domain,runtime_id,desired_state,observed_state) VALUES($1,$2,$3,'running','unknown')")
         .bind(replacement).bind(&domain).bind(runtime).execute(&pool).await.unwrap();
     let preserved: String = sqlx::query_scalar("SELECT domain FROM tenants WHERE id=$1")
         .bind(old)
@@ -1195,4 +1207,27 @@ async fn mail_defaults_are_isolated_by_primary_domain(pool: PgPool) {
             .await
             .unwrap();
     assert!(empty);
+}
+
+#[sqlx::test(migrations = false)]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn site_settings_columns_are_removed(pool: PgPool) {
+    for migration in sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.version < 52)
+    {
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+    }
+    let (runtime, _) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    sqlx::raw_sql(include_str!(
+        "../migrations/052_remove_site_configuration.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let columns: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_name IN ('tenants','tenant_configuration') AND column_name IN ('title','description','short_description','contact_email','registrations_open','approval_required','privacy_policy','terms_of_service')")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(columns, 0);
+    finish_provisioning(&state(pool.clone()), id).await;
 }

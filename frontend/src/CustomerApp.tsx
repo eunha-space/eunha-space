@@ -304,9 +304,9 @@ export function CustomerApp() {
                   href={`/instances/${t.id}`}
                   className="bg-muted/50 hover:bg-muted rounded-md p-3 transition-colors"
                 >
-                  <strong>{t.title}</strong>
+                  <strong>{instanceAddress(t)}</strong>
                   <p className="text-muted-foreground text-sm">
-                    {instanceAddress(t)} · {i18n._(instanceStatus(t))}
+                    {i18n._(instanceStatus(t))}
                   </p>
                 </a>
               ))}

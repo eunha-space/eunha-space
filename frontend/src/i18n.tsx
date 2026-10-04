@@ -125,7 +125,7 @@ const ko: Record<string, string> = {
   Value: "값",
   "Eunha hostname": "호스트명",
   Name: "이름",
-  "Instance name": "인스턴스 이름",
+  "Configure site settings inside Eunha after setup.": "설정이 완료되면 Eunha에서 인스턴스 설정을 변경하세요.",
   "No instance limit.": "인스턴스 수 제한이 없습니다.",
   Address: "주소",
   "eunha space address": "은하 도메인",

@@ -149,7 +149,7 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
         </Button>
         <div className="flex flex-wrap items-center gap-3">
           <h1 className="text-2xl font-semibold tracking-tight">
-            {detail.tenant.title}
+            {instanceAddress(detail.tenant)}
           </h1>
           <Badge
             variant={status === "Ready" ? "secondary" : "outline"}

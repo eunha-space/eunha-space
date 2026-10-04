@@ -109,7 +109,7 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
       (tenant) =>
         matches(tenant, filter) &&
         (needle === "" ||
-          `${instanceAddress(tenant)} ${tenant.title} ${tenant.runtime_name} ${hostByRuntime.get(tenant.runtime_name) ?? ""}`
+          `${instanceAddress(tenant)} ${tenant.runtime_name} ${hostByRuntime.get(tenant.runtime_name) ?? ""}`
             .toLowerCase()
             .includes(needle)),
     );
@@ -256,9 +256,7 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                     <h3 className="truncate text-sm font-semibold" title={instanceAddress(tenant)}>
                       {instanceAddress(tenant)}
                     </h3>
-                    <span className="text-muted-foreground truncate text-xs" title={tenant.title}>
-                      {tenant.title}
-                    </span>
+
                     {tenant.imported && (
                       <RowBadge className="text-muted-foreground" title="Taken over from an existing Mastodon instance; its database and media predate the platform.">
                         Imported
@@ -496,20 +494,15 @@ function PurgeDialog({ tenant, busy, act }: { tenant: Tenant; busy: boolean; act
 function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy: boolean; act: Props["act"] }) {
   const [open, setOpen] = useState(false);
   const [subdomain, setSubdomain] = useState("");
-  const [title, setTitle] = useState("");
-  const [email, setEmail] = useState("");
   const [runtimeId, setRuntimeId] = useState("");
-  const [registrationsOpen, setRegistrationsOpen] = useState(true);
-  const [approvalRequired, setApprovalRequired] = useState(false);
   const selectedRuntime = runtimeId || runtimes[0]?.id || "";
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     const ok = await act("/tenants", "create-tenant", {
-      subdomain, title, contact_email: email || null, runtime_id: selectedRuntime,
-      registrations_open: registrationsOpen, approval_required: approvalRequired,
+      subdomain, runtime_id: selectedRuntime,
     });
-    if (ok) { setOpen(false); setSubdomain(""); setTitle(""); setEmail(""); }
+    if (ok) { setOpen(false); setSubdomain(""); }
   }
 
   return (
@@ -519,15 +512,11 @@ function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
         <form onSubmit={submit} className="grid gap-5">
           <DialogHeader>
             <DialogTitle>Provision a tenant</DialogTitle>
-            <DialogDescription>The control plane creates isolated PostgreSQL credentials and UUID-scoped Redis and media keys, then migrates and activates the tenant.</DialogDescription>
+            <DialogDescription>The control plane creates isolated PostgreSQL credentials and UUID-scoped Redis and media keys, then migrates and activates the tenant. Configure site settings inside Eunha after setup.</DialogDescription>
           </DialogHeader>
           <div className="grid gap-4">
             <div className="grid gap-2"><Label htmlFor="tenant-subdomain">Eunha hostname</Label><div className="flex items-center"><Input id="tenant-subdomain" className="rounded-r-none" value={subdomain} onChange={(e) => setSubdomain(e.target.value.toLowerCase())} placeholder="example" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" required /><span className="border-input bg-muted text-muted-foreground flex h-9 items-center rounded-r-md border border-l-0 px-3 text-sm">.eunha.space</span></div></div>
-            <div className="grid gap-2"><Label htmlFor="tenant-title">Name</Label><Input id="tenant-title" value={title} onChange={(e) => setTitle(e.target.value)} required /></div>
-            <div className="grid gap-2"><Label htmlFor="tenant-email">Contact email</Label><Input id="tenant-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
             <div className="grid gap-2"><Label htmlFor="tenant-runtime">Runtime</Label><select id="tenant-runtime" className="border-input bg-background h-9 rounded-md border px-3 text-sm" value={selectedRuntime} onChange={(e) => setRuntimeId(e.target.value)} required>{runtimes.map((runtime) => <option key={runtime.id} value={runtime.id}>{runtime.instance_name} / {runtime.name}</option>)}</select></div>
-            <div className="flex items-center justify-between gap-4"><Label htmlFor="registrations-open">Open registrations</Label><Switch id="registrations-open" checked={registrationsOpen} onCheckedChange={setRegistrationsOpen} /></div>
-            <div className="flex items-center justify-between gap-4"><Label htmlFor="approval-required">Require approval</Label><Switch id="approval-required" checked={approvalRequired} onCheckedChange={setApprovalRequired} /></div>
           </div>
           <DialogFooter><Button type="submit" disabled={busy || !selectedRuntime}>{busy ? "Provisioning…" : "Provision tenant"}</Button></DialogFooter>
         </form>
@@ -549,8 +538,6 @@ function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
 function ImportTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy: boolean; act: Props["act"] }) {
   const [open, setOpen] = useState(false);
   const [domain, setDomain] = useState("");
-  const [title, setTitle] = useState("");
-  const [email, setEmail] = useState("");
   const [runtimeId, setRuntimeId] = useState("");
   const [dumpPath, setDumpPath] = useState("");
   const [mediaPath, setMediaPath] = useState("");
@@ -564,7 +551,7 @@ function ImportTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     const ok = await act("/tenants/import", "import-tenant", {
-      domain, title, contact_email: email || null, runtime_id: selectedRuntime,
+      domain, runtime_id: selectedRuntime,
       dump_path: dumpPath, media_path: mediaPath || null,
       owner_username: ownerUsername || null,
       active_record_encryption_primary_key: encryptionKey,
@@ -573,7 +560,7 @@ function ImportTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
     });
     if (ok) {
       setOpen(false);
-      setDomain(""); setTitle(""); setEmail(""); setDumpPath(""); setMediaPath("");
+      setDomain(""); setDumpPath(""); setMediaPath("");
       setOwnerUsername(""); setEncryptionKey(""); setEncryptionSalt("");
       setVapidPrivate(""); setVapidPublic("");
     }
@@ -594,8 +581,6 @@ function ImportTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
               <Input id="import-domain" value={domain} onChange={(e) => setDomain(e.target.value.toLowerCase())} placeholder="seoul.earth" required />
               <p className="text-muted-foreground text-xs">It keeps this domain. Its accounts&rsquo; identity is on it and remote servers know them there, so an import is never also a move.</p>
             </div>
-            <div className="grid gap-2"><Label htmlFor="import-title">Name</Label><Input id="import-title" value={title} onChange={(e) => setTitle(e.target.value)} required /></div>
-            <div className="grid gap-2"><Label htmlFor="import-email">Contact email</Label><Input id="import-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} /></div>
             <div className="grid gap-2"><Label htmlFor="import-runtime">Runtime</Label><select id="import-runtime" className="border-input bg-background h-9 rounded-md border px-3 text-sm" value={selectedRuntime} onChange={(e) => setRuntimeId(e.target.value)} required>{runtimes.map((runtime) => <option key={runtime.id} value={runtime.id}>{runtime.instance_name} / {runtime.name}</option>)}</select></div>
             <Separator />
             <div className="grid gap-2">

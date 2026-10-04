@@ -3,7 +3,6 @@ export type TenantState = "healthy" | "unhealthy" | "disabled" | "unknown";
 export type Tenant = {
   id: string;
   domain: string;
-  title: string;
   lifecycle_state:
     | "provisioning"
     | "ready"
@@ -123,7 +122,6 @@ export type CustomerTenantDetail = {
     Tenant,
     | "id"
     | "domain"
-    | "title"
     | "lifecycle_state"
     | "observed_state"
     | "updated_at"

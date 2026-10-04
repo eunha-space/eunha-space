@@ -22,7 +22,6 @@ export function CustomerCreateInstance(
     "provided",
   );
   const [subdomain, setSubdomain] = useState("");
-  const [title, setTitle] = useState("");
   const [customDomain, setCustomDomain] = useState("");
   const [dnsCheck, setDnsCheck] = useState<
     { hostname: string; points_to_target: boolean | null; target: string } | null
@@ -42,7 +41,6 @@ export function CustomerCreateInstance(
         method: "POST",
         body: JSON.stringify({
           subdomain: addressKind === "provided" ? subdomain : "",
-          title,
           custom_domain: addressKind === "custom" ? customDomain : null,
           owner_username: ownerUsername,
         }),
@@ -81,6 +79,7 @@ export function CustomerCreateInstance(
         </h1>
         <p className="text-muted-foreground text-sm">
           {i18n._(instanceUsage(i18n.locale, activeInstances, customer.instance_limit))}
+          {" "}{t("Configure site settings inside Eunha after setup.")}
         </p>
       </div>
       {reachedInstanceLimit
@@ -172,15 +171,6 @@ export function CustomerCreateInstance(
                     )}
                   </div>
                 )}
-                <div className="grid gap-2">
-                  <Label htmlFor="title">{t("Instance name")}</Label>
-                  <Input
-                    id="title"
-                    value={title}
-                    onChange={(e) => setTitle(e.target.value)}
-                    required
-                  />
-                </div>
                 <div className="grid gap-2">
                   <Label htmlFor="owner">{t("Admin username")}</Label>
                   <Input
