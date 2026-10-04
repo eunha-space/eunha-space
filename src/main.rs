@@ -3522,7 +3522,7 @@ async fn delete_redis_keys(url: &str, pattern: &str) -> redis::RedisResult<usize
 }
 
 /// Discard the tenant's configuration and remaining secrets. The tenant row
-/// stays as a purged record that keeps its domain reserved.
+/// stays as a purged record; its domain becomes reusable when purge completes.
 async fn purge_tenant_configuration(state: &Shared, tenant_id: Uuid) -> Result<Option<String>> {
     let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM tenant_configuration WHERE tenant_id=$1")
@@ -3536,13 +3536,6 @@ async fn purge_tenant_configuration(state: &Shared, tenant_id: Uuid) -> Result<O
     .execute(&mut *tx)
     .await?;
     sqlx::query("UPDATE tenants SET vapid_private_key=NULL,vapid_public_key=NULL,updated_at=now() WHERE id=$1")
-        .bind(tenant_id)
-        .execute(&mut *tx)
-        .await?;
-    // A purged tenant keeps its domain reserved because remote servers remember
-    // the accounts that lived there. One that was never set up had no accounts,
-    // so its domain goes back to whoever controls it.
-    sqlx::query("UPDATE tenants SET domain=id::text||'.invalid',aliases='{}' WHERE id=$1 AND domain<>id::text||'.invalid' AND NOT EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=tenants.id AND p.step='database' AND p.status='succeeded') AND EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=tenants.id)")
         .bind(tenant_id)
         .execute(&mut *tx)
         .await?;

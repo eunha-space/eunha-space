@@ -461,7 +461,7 @@ function PurgeDialog({ tenant, busy, act }: { tenant: Tenant; busy: boolean; act
               ? "This permanently destroys the tenant: "
               : "This takes the tenant offline immediately, with no grace period for its customer, and permanently destroys it: "}
             its Cloudflare hostnames, database and role, media, Redis keys and configuration.
-            It cannot be restored afterwards. The domain stays reserved so it is never reused.
+            It cannot be restored afterwards. The domain becomes available for reuse once purging is complete.
           </DialogDescription>
         </DialogHeader>
         <form

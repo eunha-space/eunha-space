@@ -4,6 +4,10 @@ PostgreSQL is the source of truth for tenant state. Temporal records durable
 workflow progress and timers; it never replaces the tenant row as the authority.
 The provision, deprovision, and purge operations are audited separately.
 
+Domains can be reused after purge completes. Disabled, retained, and purging
+tenants continue reserving their primary names. Purged records retain their
+original names, but no longer prevent another tenant from using them.
+
 ```mermaid
 stateDiagram-v2
     [*] --> provisioning: tenant created or restored

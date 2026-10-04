@@ -323,7 +323,7 @@ async fn usage_history_is_persisted_bounded_and_authenticated(pool: PgPool) {
 async fn failed_metric_probe_persists_nulls_without_credentials(pool: PgPool) {
     let (runtime, headers) = fixture(&pool).await;
     let id = tenant(&pool, runtime).await;
-    sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,resend_api_key,resend_from,media_storage_region,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url) VALUES($1,'postgresql://tenant:private-secret@127.0.0.1:1/missing','redis://127.0.0.1','private-key','test@example','auto','private-id','private-media-secret','https://media.example')")
+    sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,media_storage_region,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url) VALUES($1,'postgresql://tenant:private-secret@127.0.0.1:1/missing','redis://127.0.0.1','smtp.example.com',465,'smtp-user','private-key','test@example','auto','private-id','private-media-secret','https://media.example')")
         .bind(id).execute(&pool).await.unwrap();
     let state = state(pool.clone());
     usage::collect(&state).await.unwrap();
@@ -547,7 +547,7 @@ async fn fleet_history_groups_hosts_without_double_counting_or_hiding_gaps(pool:
         tenant(&pool, runtime).await,
     ];
     for id in ids {
-        sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,resend_api_key,resend_from,media_storage_region,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url) VALUES($1,'postgresql://private-secret@localhost/test','redis://localhost','private-key','test@example','auto','private-id','private-media-secret','https://media.example')")
+        sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,media_storage_region,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url) VALUES($1,'postgresql://private-secret@localhost/test','redis://localhost','smtp.example.com',465,'smtp-user','private-key','test@example','auto','private-id','private-media-secret','https://media.example')")
             .bind(id).execute(&pool).await.unwrap();
     }
     sqlx::query("UPDATE tenants SET lifecycle_state='provisioning' WHERE id=$1")
@@ -747,7 +747,7 @@ async fn smtp_is_owner_scoped_custom_only_and_write_only(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,resend_api_key,resend_from,media_storage_region,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url) VALUES($1,'postgresql://localhost/test','redis://localhost','resend-secret','mail@example.com','auto','media-key','media-secret','https://media.example.com')").bind(id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,media_storage_region,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url) VALUES($1,'postgresql://localhost/test','redis://localhost','smtp.example.com',465,'smtp-user','smtp-secret','mail@example.com','auto','media-key','media-secret','https://media.example.com')").bind(id).execute(&pool).await.unwrap();
     let shared = state(pool.clone());
     assert_eq!(
         smtp::get(State(shared.clone()), headers.clone(), Path(id))
@@ -801,9 +801,15 @@ async fn smtp_is_owner_scoped_custom_only_and_write_only(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
+#[sqlx::test(migrations = false)]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
 async fn smtp_migration_preserves_owner_settings_and_converts_legacy_mail(pool: PgPool) {
+    for migration in sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.version < 49)
+    {
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+    }
     let (runtime, _) = fixture(&pool).await;
     let legacy = tenant(&pool, runtime).await;
     let custom = tenant(&pool, runtime).await;
@@ -845,8 +851,27 @@ async fn smtp_migration_preserves_owner_settings_and_converts_legacy_mail(pool: 
             .unwrap(),
         2
     );
+    sqlx::raw_sql(include_str!("../migrations/049_drop_resend.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let columns: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='tenant_configuration' AND column_name IN ('resend_api_key','resend_from')")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(columns, 0);
+    for (id, expected_host, expected_password) in [
+        (legacy, "smtp.resend.com", "legacy-private-key"),
+        (custom, "smtp.owner.example", "owner-private-password"),
+    ] {
+        let row: (String, String) = sqlx::query_as(
+            "SELECT smtp_host,smtp_password FROM tenant_configuration WHERE tenant_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(row, (expected_host.into(), expected_password.into()));
+    }
 }
-
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
 async fn admin_middleware_uses_user_sessions_and_checks_current_role(pool: PgPool) {
@@ -1051,6 +1076,53 @@ async fn users_migration_preserves_sessions_roles_and_historical_actors(pool: Pg
     assert!(
         sqlx::query("UPDATE users SET is_admin=true WHERE id=$1")
             .bind(legacy_id)
+            .execute(&pool)
+            .await
+            .is_err()
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn domains_are_reusable_only_after_purge_completes(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let old = tenant(&pool, runtime).await;
+    let domain: String = sqlx::query_scalar("SELECT domain FROM tenants WHERE id=$1")
+        .bind(old)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let replacement = Uuid::new_v4();
+    for lifecycle in ["ready", "retained", "purging"] {
+        sqlx::query("UPDATE tenants SET lifecycle_state=$2,desired_state='disabled' WHERE id=$1")
+            .bind(old)
+            .bind(lifecycle)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = sqlx::query("INSERT INTO tenants(id,domain,title,runtime_id,desired_state,observed_state) VALUES($1,$2,'Replacement',$3,'running','unknown')")
+            .bind(replacement).bind(&domain).bind(runtime).execute(&pool).await.unwrap_err();
+        assert_eq!(
+            error.as_database_error().unwrap().constraint(),
+            Some("tenants_domain_key")
+        );
+    }
+    sqlx::query("UPDATE tenants SET lifecycle_state='purged' WHERE id=$1")
+        .bind(old)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO tenants(id,domain,title,runtime_id,desired_state,observed_state) VALUES($1,$2,'Replacement',$3,'running','unknown')")
+        .bind(replacement).bind(&domain).bind(runtime).execute(&pool).await.unwrap();
+    let preserved: String = sqlx::query_scalar("SELECT domain FROM tenants WHERE id=$1")
+        .bind(old)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(preserved, domain);
+    assert!(
+        sqlx::query("UPDATE tenants SET lifecycle_state='ready' WHERE id=$1")
+            .bind(old)
             .execute(&pool)
             .await
             .is_err()

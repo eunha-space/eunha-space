@@ -23,6 +23,6 @@ error. Configure control-plane SMTP through the `EUNHA_SPACE_SMTP_HOST`,
 
 Migration 045 maps legacy provider credentials to their SMTP endpoint for
 existing tenants that have no SMTP settings. Existing custom SMTP settings stay
-intact. Legacy database columns remain for rollback compatibility and are no
-longer read or rendered by the control plane. Deploy the updated control plane
+intact. Migration 049 removes the unused legacy provider columns; SMTP settings
+remain intact. Deploy the updated control plane
 before the SMTP-only runtime so reconciliation can generate SMTP settings.
