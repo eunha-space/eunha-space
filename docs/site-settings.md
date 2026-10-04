@@ -21,6 +21,7 @@ and reconciliation. Migration 052 removes all eight legacy columns from
 Inventory identifies instances by their hostname.
 
 Runtime TOML retains domain names, aliases, previous domains, VAPID keys,
-`icon_url`, infrastructure, and SMTP settings. The owner's login email comes
+infrastructure, and SMTP settings. App icons, thumbnails, and favicons are
+uploaded in Eunha’s admin settings; migration 053 removes the `icon_url` fallback. The owner's login email comes
 from the customer's verified account and is separate from the site's public
 contact email.

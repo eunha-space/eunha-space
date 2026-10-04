@@ -1226,7 +1226,11 @@ async fn site_settings_columns_are_removed(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let columns: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_name IN ('tenants','tenant_configuration') AND column_name IN ('title','description','short_description','contact_email','registrations_open','approval_required','privacy_policy','terms_of_service')")
+    sqlx::raw_sql(include_str!("../migrations/053_remove_icon_url.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let columns: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_name IN ('tenants','tenant_configuration') AND column_name IN ('title','description','short_description','contact_email','registrations_open','approval_required','privacy_policy','terms_of_service','icon_url')")
         .fetch_one(&pool).await.unwrap();
     assert_eq!(columns, 0);
     finish_provisioning(&state(pool.clone()), id).await;

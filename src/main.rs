@@ -555,7 +555,6 @@ struct InstanceToml {
     previous_domains: Vec<String>,
     vapid_private_key: String,
     vapid_public_key: String,
-    icon_url: Option<String>,
 }
 #[derive(Deserialize, Serialize)]
 struct WorkersToml {
@@ -662,7 +661,6 @@ struct StoredTenant {
     previous_domains: Vec<String>,
     vapid_private_key: Option<String>,
     vapid_public_key: Option<String>,
-    icon_url: Option<String>,
     lifecycle_state: String,
 }
 fn required(value: Option<String>, name: &str) -> Result<String> {
@@ -746,7 +744,6 @@ fn typed_toml(
             previous_domains: tenant.previous_domains,
             vapid_private_key: required(tenant.vapid_private_key, "vapid_private_key")?,
             vapid_public_key: required(tenant.vapid_public_key, "vapid_public_key")?,
-            icon_url: tenant.icon_url,
         },
         active_record_encryption: encryption,
         software_update_url: config.software_update_url,
