@@ -73,6 +73,15 @@ function matches(tenant: Tenant, filter: string): boolean {
 export function Tenants({ tenants, runtimes, busy, act }: Props) {
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
+  const [showInactive, setShowInactive] = useState(false);
+  const includedTenants = useMemo(
+    () => tenants.filter((tenant) => showInactive || (
+      tenant.lifecycle_state !== "purged" &&
+      tenant.desired_state !== "disabled" &&
+      tenant.observed_state !== "disabled"
+    )),
+    [tenants, showInactive],
+  );
 
   const hostByRuntime = useMemo(
     () => new Map(runtimes.map((runtime) => [runtime.name, runtime.instance_name])),
@@ -86,17 +95,17 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
 
   const counts = useMemo(
     () => ({
-      all: tenants.length,
-      healthy: tenants.filter((t) => t.observed_state === "healthy").length,
-      attention: tenants.filter((t) => NEEDS_ATTENTION.has(t.observed_state)).length,
-      pending: tenants.filter(pendingRender).length,
+      all: includedTenants.length,
+      healthy: includedTenants.filter((t) => t.observed_state === "healthy").length,
+      attention: includedTenants.filter((t) => NEEDS_ATTENTION.has(t.observed_state)).length,
+      pending: includedTenants.filter(pendingRender).length,
     }),
-    [tenants],
+    [includedTenants],
   );
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    return tenants.filter(
+    return includedTenants.filter(
       (tenant) =>
         matches(tenant, filter) &&
         (needle === "" ||
@@ -104,7 +113,7 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
             .toLowerCase()
             .includes(needle)),
     );
-  }, [tenants, filter, query, hostByRuntime]);
+  }, [includedTenants, filter, query, hostByRuntime]);
 
   const groups = useMemo(() => {
     if (!groupByInstance) return [["", visible]] as [string, Tenant[]][];
@@ -166,6 +175,12 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
           <div className="flex flex-wrap items-center gap-2">
             <CreateTenantDialog runtimes={runtimes} busy={busy === "create-tenant"} act={act} />
             <ImportTenantDialog runtimes={runtimes} busy={busy === "import-tenant"} act={act} />
+            <div className="flex items-center gap-2">
+              <Switch id="show-inactive" checked={showInactive} onCheckedChange={setShowInactive} />
+              <Label htmlFor="show-inactive" className="text-muted-foreground whitespace-nowrap">
+                Show purged / disabled
+              </Label>
+            </div>
             <div className="flex items-center gap-2">
               <Switch
                 id="group-by-instance"
