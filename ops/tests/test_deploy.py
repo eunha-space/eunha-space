@@ -52,6 +52,36 @@ class DeploymentTests(unittest.TestCase):
             deploy.deploy(self.original)
             return restart.call_count
 
+    def test_pull_main_fast_forwards_and_checks_remote_commit(self):
+        with patch.object(deploy.subprocess, "check_output", side_effect=["main\n", "", "abc123\n", "abc123\n"]), patch.object(deploy, "run") as command:
+            deploy.pull_main()
+        command.assert_called_once_with(["git", "pull", "--ff-only", "origin", "main"], cwd=self.root, capture_output=True)
+
+    def test_pull_main_rejects_local_changes_before_network_or_deployment(self):
+        for changes in [" M src/main.rs\n", "?? new-file\n"]:
+            with self.subTest(changes=changes), patch.object(deploy.subprocess, "check_output", side_effect=["main\n", changes]), patch.object(deploy, "run") as command:
+                with self.assertRaisesRegex(RuntimeError, "clean checkout"):
+                    deploy.pull_main()
+                command.assert_not_called()
+
+    def test_pull_main_rejects_other_branches(self):
+        with patch.object(deploy.subprocess, "check_output", return_value="feature\n"), patch.object(deploy, "run") as command:
+            with self.assertRaisesRegex(RuntimeError, "main branch"):
+                deploy.pull_main()
+            command.assert_not_called()
+
+    def test_pull_main_rejects_local_commits_ahead_of_origin(self):
+        with patch.object(deploy.subprocess, "check_output", side_effect=["main\n", "", "local\n", "remote\n"]), patch.object(deploy, "run"):
+            with self.assertRaisesRegex(RuntimeError, "match origin/main"):
+                deploy.pull_main()
+
+    def test_pull_failure_never_reaches_deployment(self):
+        with patch.object(deploy, "pull_main", side_effect=RuntimeError("pull failed")), patch.object(deploy, "deploy") as activate:
+            with self.assertRaisesRegex(RuntimeError, "pull failed"):
+                deploy.main()
+            activate.assert_not_called()
+
+
     def test_restart_waits_for_launchd_to_finish_shutdown(self):
         results = [SimpleNamespace(returncode=0), SimpleNamespace(returncode=5), SimpleNamespace(returncode=0)]
         with patch.object(deploy.subprocess, "run", side_effect=results) as command, patch.object(deploy, "run") as checked, patch.object(deploy.time, "sleep") as sleep:

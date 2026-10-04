@@ -77,7 +77,7 @@ async fn authorize(
     id: Uuid,
     owner: Uuid,
 ) -> Result<(), ApiError> {
-    let eligible = sqlx::query_scalar::<_, bool>("SELECT t.lifecycle_state='ready' AND EXISTS(SELECT 1 FROM tenant_domains d WHERE d.tenant_id=t.id AND d.kind='custom' AND d.status='active' AND d.is_primary) FROM tenants t WHERE t.id=$1 AND t.customer_id=$2 FOR UPDATE")
+    let eligible = sqlx::query_scalar::<_, bool>("SELECT t.lifecycle_state='ready' AND EXISTS(SELECT 1 FROM tenant_domains d WHERE d.tenant_id=t.id AND d.kind='custom' AND d.status='active' AND d.is_primary) FROM tenants t WHERE t.id=$1 AND t.user_id=$2 FOR UPDATE")
         .bind(id).bind(owner).fetch_optional(&mut **tx).await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Instance not found".into()))?;
     if !eligible {
@@ -128,7 +128,7 @@ pub(crate) async fn save(
         .bind(id)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,requested_by_customer,started_at,finished_at) VALUES($1,$2,'smtp_update','succeeded',$3,now(),now())")
+    sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,requested_by,started_at,finished_at) VALUES($1,$2,'smtp_update','succeeded',$3,now(),now())")
         .bind(Uuid::new_v4()).bind(id).bind(owner).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)

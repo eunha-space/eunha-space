@@ -118,8 +118,7 @@ pub(crate) async fn request_budget(
     let path = path.strip_prefix("/api").unwrap_or(path);
     let limited = matches!(
         path,
-        "/session"
-            | "/customer/register"
+        "/customer/register"
             | "/customer/session"
             | "/customer/verify"
             | "/customer/password"
@@ -171,4 +170,35 @@ mod address_tests {
             "127.0.0.1"
         );
     }
+}
+
+/// All admin API routes share the customer session and require its admin role.
+pub(crate) async fn require_admin(
+    State(s): State<Shared>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    match admin_user(request.headers(), &s.db).await {
+        Ok(_) => next.run(request).await,
+        Err(error) => error.into_response(),
+    }
+}
+
+pub(crate) async fn require_admin_page(
+    State(s): State<Shared>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut response = match admin_user(request.headers(), &s.db).await {
+        Ok(_) => next.run(request).await,
+        Err(ApiError(StatusCode::UNAUTHORIZED, _)) => {
+            axum::response::Redirect::to("/").into_response()
+        }
+        Err(error) => error.into_response(),
+    };
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response
 }

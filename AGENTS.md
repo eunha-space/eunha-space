@@ -13,3 +13,7 @@ backup; destructive purge is a separate explicitly confirmed operation. A
 customer's confirmed deletion schedules that purge seven days later, and
 restoring the instance before then cancels it.
 
+Production deployment host: `ssh 100.113.148.66`. The checkout is
+`~/Git/eunha-space`; run `./deploy.sh` there to deploy the control plane.
+Deployment pulls `origin/main` and requires a clean `main` checkout. Push
+changes to `origin/main` before deploying; do not copy patches to production.

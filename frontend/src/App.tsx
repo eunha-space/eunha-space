@@ -13,6 +13,7 @@ import {
   api,
   ApiError,
   errorMessage,
+  type Customer,
   type Operation,
   type Runtime,
   type Tenant,
@@ -20,7 +21,6 @@ import {
 import { relativeTime } from "@/format";
 import { Usage } from "@/Usage";
 import { Instances } from "@/Instances";
-import { Login } from "@/Login";
 import { Operations } from "@/Operations";
 import { Releases } from "@/Releases";
 import { Tenants } from "@/Tenants";
@@ -63,20 +63,21 @@ export function App() {
     inFlight.current = true;
     if (options.manual) setRefreshing(true);
     try {
-      const me = await api<{ username: string }>("/session/me");
+      const me = await api<Customer>("/customer/session/me");
+      if (!me.is_admin) { location.replace("/"); return; }
       const [nextTenants, nextRuntimes, nextOperations] = await Promise.all([
         api<Tenant[]>("/tenants"),
         api<Runtime[]>("/runtimes"),
         api<Operation[]>("/operations"),
       ]);
-      setSession({ state: "signed-in", username: me.username });
+      setSession({ state: "signed-in", username: me.email });
       setTenants(nextTenants);
       setRuntimes(nextRuntimes);
       setOperations(nextOperations);
       setUpdatedAt(new Date().toISOString());
       setNow(Date.now());
     } catch (failure) {
-      if (failure instanceof ApiError && failure.status === 401) {
+      if (failure instanceof ApiError && (failure.status === 401 || failure.status === 403)) {
         setSession({ state: "signed-out" });
         setError("");
       } else {
@@ -190,11 +191,12 @@ export function App() {
   }
 
   if (session.state === "signed-out") {
-    return <Login done={() => void load({ manual: true })} />;
+    location.replace("/");
+    return null;
   }
 
   async function signOut() {
-    await api("/session", { method: "DELETE" });
+    await api("/customer/session", { method: "DELETE" });
     setSession({ state: "signed-out" });
   }
 

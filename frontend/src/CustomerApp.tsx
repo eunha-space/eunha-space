@@ -334,6 +334,9 @@ function CustomerHeader(
         </div>
       </div>
       <div className="flex gap-2">
+        {customer.is_admin && (
+          <Button variant="outline" render={<a href="/admin" />}>{i18n._("Control plane")}</Button>
+        )}
         <LanguageToggle />
         <ThemeToggle />
         <Button

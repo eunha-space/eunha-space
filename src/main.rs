@@ -57,8 +57,9 @@ struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create or replace an operator password from EUNHA_SPACE_ADMIN_PASSWORD.
-    SetOperator { username: String },
+    /// Create or replace an administrator password from EUNHA_SPACE_ADMIN_PASSWORD.
+    #[command(alias = "set-operator")]
+    SetAdmin { email: String },
 }
 
 #[derive(Clone)]
@@ -274,12 +275,6 @@ struct OperationEvent {
     message: String,
     #[serde(with = "time::serde::rfc3339")]
     created_at: OffsetDateTime,
-}
-
-#[derive(Deserialize)]
-struct Login {
-    username: String,
-    password: String,
 }
 
 #[derive(Deserialize)]
@@ -858,7 +853,7 @@ async fn main() -> Result<()> {
     sqlx::migrate!().run(&db).await?;
 
     match args.command {
-        Some(Command::SetOperator { username }) => return set_operator(&db, &username).await,
+        Some(Command::SetAdmin { email }) => return set_admin(&db, &email).await,
         None => {}
     }
 
@@ -978,9 +973,7 @@ async fn main() -> Result<()> {
         tracing::warn!("Temporal is not configured; tenant lifecycle work will remain queued");
     }
     health::supervise(state.clone(), "domain_reconciler", domain_reconciler);
-    let api = Router::new()
-        .route("/session", post(login).delete(logout))
-        .route("/session/me", get(me))
+    let customer_api = Router::new()
         .route("/customer/register", post(customer_register))
         .route("/customer/verify", get(customer_verify))
         .route(
@@ -1019,7 +1012,8 @@ async fn main() -> Result<()> {
             "/customer/tenants/{id}/domain-change/cancel",
             post(domain_change::customer_cancel),
         )
-        .route("/customer/dns-check", get(customer_dns_check))
+        .route("/customer/dns-check", get(customer_dns_check));
+    let admin_api = Router::new()
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/usage", get(usage::usage))
         .route("/usage/history", get(usage::aggregate_history))
@@ -1058,6 +1052,12 @@ async fn main() -> Result<()> {
         )
         .route("/operations/{id}/events", get(operation_events))
         .route("/operations", get(operations))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_admin,
+        ));
+    let api = customer_api
+        .merge(admin_api)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::request_budget,
@@ -1071,13 +1071,19 @@ async fn main() -> Result<()> {
         std::env::var("CONTROL_FRONTEND_DIRECTORY").unwrap_or_else(|_| "frontend/dist".into()),
     );
     let index = ServeFile::new(frontend_directory.join("index.html"));
+    let admin_pages = Router::new()
+        .route_service("/admin", index.clone())
+        .route_service("/admin/{*section}", index.clone())
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_admin_page,
+        ));
     let app = Router::new()
+        .merge(admin_pages)
         .nest("/api", api)
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
         .route_service("/", index.clone())
-        .route_service("/admin", index.clone())
-        .route_service("/admin/{*section}", index.clone())
         .route_service("/signup", index.clone())
         .route_service("/verify", index.clone())
         .route_service("/account", index)
@@ -1102,7 +1108,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn set_operator(db: &PgPool, username: &str) -> Result<()> {
+async fn set_admin(db: &PgPool, email: &str) -> Result<()> {
     let password = std::env::var("EUNHA_SPACE_ADMIN_PASSWORD")
         .context("EUNHA_SPACE_ADMIN_PASSWORD is required")?;
     anyhow::ensure!(
@@ -1112,81 +1118,40 @@ async fn set_operator(db: &PgPool, username: &str) -> Result<()> {
     let salt = SaltString::generate(&mut OsRng);
     let hash = Argon2::default()
         .hash_password(password.as_bytes(), &salt)
-        .map_err(|e| anyhow::anyhow!("hashing operator password: {e}"))?
+        .map_err(|e| anyhow::anyhow!("hashing administrator password: {e}"))?
         .to_string();
-    sqlx::query("INSERT INTO operators(id, username, password_hash) VALUES($1,$2,$3) ON CONFLICT(username) DO UPDATE SET password_hash=excluded.password_hash")
-        .bind(Uuid::new_v4()).bind(username).bind(hash).execute(db).await?;
-    println!("Operator {username} is ready.");
+    let email = email.trim().to_ascii_lowercase();
+    anyhow::ensure!(
+        email.contains('@') && email.len() <= 254,
+        "Use the administrator's email address."
+    );
+    let mut tx = db.begin().await?;
+    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,is_admin) VALUES($1,$2,$3,now(),true) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash,email_verified_at=now(),is_admin=true")
+        .bind(Uuid::new_v4()).bind(&email).bind(hash).execute(&mut *tx).await?;
+    sqlx::query("DELETE FROM user_sessions WHERE user_id=(SELECT id FROM users WHERE email=$1)")
+        .bind(&email)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    println!("Administrator {email} is ready. Sign in with the customer account.");
     Ok(())
 }
 
 fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
-fn cookie_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(header::COOKIE)?
-        .to_str()
-        .ok()?
-        .split(';')
-        .map(str::trim)
-        .find_map(|v| v.strip_prefix("eunha_space_session="))
-}
-async fn operator(headers: &HeaderMap, db: &PgPool) -> Result<(Uuid, String), ApiError> {
-    let token = cookie_token(headers)
-        .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "Sign in required".into()))?;
-    sqlx::query_as::<_, (Uuid,String)>("SELECT o.id,o.username FROM sessions s JOIN operators o ON o.id=s.operator_id WHERE s.token_hash=$1 AND s.expires_at>now()")
-        .bind(token_hash(token)).fetch_optional(db).await?.ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "Session expired".into()))
-}
-async fn login(State(s): State<Shared>, Json(body): Json<Login>) -> Result<Response, ApiError> {
-    auth::limit(&s.db, "operator-login", &body.username, 10).await?;
-    let row = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT id,password_hash FROM operators WHERE username=$1",
-    )
-    .bind(&body.username)
-    .fetch_optional(&s.db)
-    .await?;
-    let Some((id, hash)) = row else {
-        return Err(ApiError(
-            StatusCode::UNAUTHORIZED,
-            "Invalid credentials".into(),
-        ));
-    };
-    if !auth::verify(body.password.clone(), hash).await? {
-        return Err(ApiError(
-            StatusCode::UNAUTHORIZED,
-            "Invalid credentials".into(),
-        ));
-    }
-    let mut bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut bytes);
-    let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    sqlx::query("INSERT INTO sessions(token_hash,operator_id,expires_at) VALUES($1,$2,now()+interval '12 hours')")
-        .bind(token_hash(&token)).bind(id).execute(&s.db).await?;
-    Ok(([(header::SET_COOKIE, format!("eunha_space_session={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=43200"))], Json(serde_json::json!({"username": body.username}))).into_response())
-}
-async fn logout(State(s): State<Shared>, headers: HeaderMap) -> Result<Response, ApiError> {
-    if let Some(token) = cookie_token(&headers) {
-        sqlx::query("DELETE FROM sessions WHERE token_hash=$1")
-            .bind(token_hash(token))
-            .execute(&s.db)
-            .await?;
-    }
-    Ok((
-        [(
-            header::SET_COOKIE,
-            "eunha_space_session=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0",
-        )],
-        StatusCode::NO_CONTENT,
-    )
-        .into_response())
-}
-async fn me(
-    State(s): State<Shared>,
-    headers: HeaderMap,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let (_, username) = operator(&headers, &s.db).await?;
-    Ok(Json(serde_json::json!({"username": username})))
+async fn admin_user(headers: &HeaderMap, db: &PgPool) -> Result<(Uuid, String), ApiError> {
+    let (id, _) = customer(headers, db).await?;
+    sqlx::query_as("SELECT id,email FROM users WHERE id=$1 AND is_admin")
+        .bind(id)
+        .fetch_optional(db)
+        .await?
+        .ok_or_else(|| {
+            ApiError(
+                StatusCode::FORBIDDEN,
+                "Administrator access required".into(),
+            )
+        })
 }
 
 fn customer_token(headers: &HeaderMap) -> Option<&str> {
@@ -1202,7 +1167,7 @@ fn customer_token(headers: &HeaderMap) -> Option<&str> {
 async fn customer(headers: &HeaderMap, db: &PgPool) -> Result<(Uuid, String), ApiError> {
     let token = customer_token(headers)
         .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "Sign in required".into()))?;
-    sqlx::query_as("SELECT c.id,c.email FROM customer_sessions s JOIN customers c ON c.id=s.customer_id WHERE s.token_hash=$1 AND s.expires_at>now() AND c.email_verified_at IS NOT NULL")
+    sqlx::query_as("SELECT c.id,c.email FROM user_sessions s JOIN users c ON c.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND c.email_verified_at IS NOT NULL")
         .bind(token_hash(token)).fetch_optional(db).await?.ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "Session expired".into()))
 }
 
@@ -1213,7 +1178,7 @@ async fn customer_email_link_session(headers: &HeaderMap, db: &PgPool) -> Result
         return Ok(false);
     };
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT from_email_link FROM customer_sessions WHERE token_hash=$1 AND expires_at>now()",
+        "SELECT from_email_link FROM user_sessions WHERE token_hash=$1 AND expires_at>now()",
     )
     .bind(token_hash(token))
     .fetch_optional(db)
@@ -1234,14 +1199,13 @@ async fn customer_register(
         ));
     }
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO customers(id,email,password_hash) VALUES($1,$2,NULL)")
+    sqlx::query("INSERT INTO users(id,email,password_hash) VALUES($1,$2,NULL)")
         .bind(id)
         .bind(&body.email)
         .execute(&s.db)
         .await
         .map_err(|error| {
-            if error.as_database_error().and_then(|e| e.constraint()) == Some("customers_email_key")
-            {
+            if error.as_database_error().and_then(|e| e.constraint()) == Some("users_email_key") {
                 ApiError(
                     StatusCode::CONFLICT,
                     "An account with that email already exists.".into(),
@@ -1253,7 +1217,7 @@ async fn customer_register(
     if let Err(error) =
         send_customer_link(&s, id, &body.email, "Verify your eunha space email").await
     {
-        sqlx::query("DELETE FROM customers WHERE id=$1")
+        sqlx::query("DELETE FROM users WHERE id=$1")
             .bind(id)
             .execute(&s.db)
             .await?;
@@ -1264,7 +1228,7 @@ async fn customer_register(
 
 async fn send_customer_link(
     s: &Shared,
-    customer_id: Uuid,
+    user_id: Uuid,
     email: &str,
     subject: &str,
 ) -> Result<(), ApiError> {
@@ -1277,11 +1241,11 @@ async fn send_customer_link(
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    sqlx::query("DELETE FROM customer_email_verifications WHERE customer_id=$1")
-        .bind(customer_id)
+    sqlx::query("DELETE FROM user_email_verifications WHERE user_id=$1")
+        .bind(user_id)
         .execute(&s.db)
         .await?;
-    sqlx::query("INSERT INTO customer_email_verifications(token_hash,customer_id,expires_at) VALUES($1,$2,now()+interval '30 minutes')").bind(token_hash(&token)).bind(customer_id).execute(&s.db).await?;
+    sqlx::query("INSERT INTO user_email_verifications(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '30 minutes')").bind(token_hash(&token)).bind(user_id).execute(&s.db).await?;
     let url = format!(
         "{}/verify?token={}",
         mail.public_url.trim_end_matches('/'),
@@ -1307,21 +1271,21 @@ async fn customer_verify(
     State(s): State<Shared>,
     Query(query): Query<VerificationQuery>,
 ) -> Result<Response, ApiError> {
-    let customer_id=sqlx::query_scalar::<_,Uuid>("UPDATE customers c SET email_verified_at=COALESCE(email_verified_at,now()) FROM customer_email_verifications v WHERE v.customer_id=c.id AND v.token_hash=$1 AND v.expires_at>now() RETURNING c.id").bind(token_hash(&query.token)).fetch_optional(&s.db).await?;
-    let Some(customer_id) = customer_id else {
+    let user_id=sqlx::query_scalar::<_,Uuid>("UPDATE users c SET email_verified_at=COALESCE(email_verified_at,now()) FROM user_email_verifications v WHERE v.user_id=c.id AND v.token_hash=$1 AND v.expires_at>now() RETURNING c.id").bind(token_hash(&query.token)).fetch_optional(&s.db).await?;
+    let Some(user_id) = user_id else {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "That verification link is invalid or expired.".into(),
         ));
     };
-    sqlx::query("DELETE FROM customer_email_verifications WHERE token_hash=$1")
+    sqlx::query("DELETE FROM user_email_verifications WHERE token_hash=$1")
         .bind(token_hash(&query.token))
         .execute(&s.db)
         .await?;
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    sqlx::query("INSERT INTO customer_sessions(token_hash,customer_id,expires_at,from_email_link) VALUES($1,$2,now()+interval '30 days',true)").bind(token_hash(&token)).bind(customer_id).execute(&s.db).await?;
+    sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at,from_email_link) VALUES($1,$2,now()+interval '30 days',true)").bind(token_hash(&token)).bind(user_id).execute(&s.db).await?;
     Ok(([(header::SET_COOKIE,format!("eunha_space_customer_session={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000"))],StatusCode::NO_CONTENT).into_response())
 }
 
@@ -1332,7 +1296,7 @@ async fn customer_login(
     body.email = body.email.trim().to_ascii_lowercase();
     auth::limit(&s.db, "customer-auth", &body.email, 10).await?;
     let row = sqlx::query_as::<_, (Uuid, Option<String>, bool)>(
-        "SELECT id,password_hash,email_verified_at IS NOT NULL FROM customers WHERE email=$1",
+        "SELECT id,password_hash,email_verified_at IS NOT NULL FROM users WHERE email=$1",
     )
     .bind(&body.email)
     .fetch_optional(&s.db)
@@ -1368,7 +1332,7 @@ async fn customer_login(
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     let token = bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    sqlx::query("INSERT INTO customer_sessions(token_hash,customer_id,expires_at) VALUES($1,$2,now()+interval '30 days')").bind(token_hash(&token)).bind(id).execute(&s.db).await?;
+    sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '30 days')").bind(token_hash(&token)).bind(id).execute(&s.db).await?;
     Ok(([(header::SET_COOKIE,format!("eunha_space_customer_session={token}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000"))],Json(serde_json::json!({"email":body.email}))).into_response())
 }
 
@@ -1386,7 +1350,7 @@ async fn customer_set_password(
         ));
     }
     let existing =
-        sqlx::query_scalar::<_, Option<String>>("SELECT password_hash FROM customers WHERE id=$1")
+        sqlx::query_scalar::<_, Option<String>>("SELECT password_hash FROM users WHERE id=$1")
             .bind(id)
             .fetch_one(&s.db)
             .await?;
@@ -1402,14 +1366,14 @@ async fn customer_set_password(
         }
     }
     let hash = auth::hash(body.password.clone()).await?;
-    sqlx::query("UPDATE customers SET password_hash=$1 WHERE id=$2")
+    sqlx::query("UPDATE users SET password_hash=$1 WHERE id=$2")
         .bind(hash)
         .bind(id)
         .execute(&s.db)
         .await?;
     // A new password ends every other session: whoever reset it keeps theirs,
     // and anyone signed in with the old one is turned out.
-    sqlx::query("DELETE FROM customer_sessions WHERE customer_id=$1 AND token_hash<>$2")
+    sqlx::query("DELETE FROM user_sessions WHERE user_id=$1 AND token_hash<>$2")
         .bind(id)
         .bind(token_hash(customer_token(&headers).unwrap_or_default()))
         .execute(&s.db)
@@ -1422,7 +1386,7 @@ async fn customer_logout(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     if let Some(token) = customer_token(&headers) {
-        sqlx::query("DELETE FROM customer_sessions WHERE token_hash=$1")
+        sqlx::query("DELETE FROM user_sessions WHERE token_hash=$1")
             .bind(token_hash(token))
             .execute(&s.db)
             .await?;
@@ -1441,8 +1405,8 @@ async fn customer_me(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (id, email) = customer(&headers, &s.db).await?;
-    let (has_password, instance_limit) = sqlx::query_as::<_, (bool, Option<i64>)>(
-        "SELECT password_hash IS NOT NULL,instance_limit FROM customers WHERE id=$1",
+    let (has_password, instance_limit, is_admin) = sqlx::query_as::<_, (bool, Option<i64>, bool)>(
+        "SELECT password_hash IS NOT NULL,instance_limit,is_admin FROM users WHERE id=$1",
     )
     .bind(id)
     .fetch_one(&s.db)
@@ -1450,7 +1414,7 @@ async fn customer_me(
     let requires_current_password =
         has_password && !customer_email_link_session(&headers, &s.db).await?;
     Ok(Json(
-        serde_json::json!({"email":email,"instance_limit":instance_limit,"has_password":has_password,"requires_current_password":requires_current_password}),
+        serde_json::json!({"email":email,"is_admin":is_admin,"instance_limit":instance_limit,"has_password":has_password,"requires_current_password":requires_current_password}),
     ))
 }
 async fn customer_tenants(
@@ -1458,7 +1422,7 @@ async fn customer_tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     let (id, _) = customer(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.customer_id=$1 AND t.lifecycle_state NOT IN ('purging','purged') ORDER BY t.created_at").bind(id).fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.user_id=$1 AND t.lifecycle_state NOT IN ('purging','purged') ORDER BY t.created_at").bind(id).fetch_all(&s.db).await?))
 }
 
 async fn customer_tenant_detail(
@@ -1466,10 +1430,10 @@ async fn customer_tenant_detail(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<CustomerTenantDetail>, ApiError> {
-    let (customer_id, _) = customer(&headers, &s.db).await?;
-    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,t.owner_email,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.purge_scheduled_for,t.abandoned_custom_domain FROM tenants t JOIN customers c ON c.id=t.customer_id WHERE t.id=$1 AND t.customer_id=$2 AND t.lifecycle_state NOT IN ('purging','purged')")
+    let (user_id, _) = customer(&headers, &s.db).await?;
+    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,t.owner_email,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.purge_scheduled_for,t.abandoned_custom_domain FROM tenants t JOIN users c ON c.id=t.user_id WHERE t.id=$1 AND t.user_id=$2 AND t.lifecycle_state NOT IN ('purging','purged')")
         .bind(id)
-        .bind(customer_id)
+        .bind(user_id)
         .fetch_optional(&s.db)
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Instance not found".into()))?;
@@ -1493,7 +1457,7 @@ async fn tenants(
     State(s): State<Shared>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
-    operator(&headers, &s.db).await?;
+    admin_user(&headers, &s.db).await?;
     let mut tenants: Vec<TenantSummary> = sqlx::query_as("SELECT t.id,t.domain,t.title,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain,EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=t.id) imported,d.workflow_id temporal_workflow_id,d.workflow_kind temporal_workflow_kind,d.attempts temporal_dispatch_attempts,CASE WHEN t.lifecycle_state='provisioning' THEN (SELECT step FROM provisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,array_position(ARRAY['database','migrate','import','render','media','reload','health','routing','owner'],step) LIMIT 1) WHEN t.lifecycle_state IN ('deprovisioning','retained','purging') THEN (SELECT step FROM deprovisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,step LIMIT 1) END lifecycle_step FROM tenants t JOIN runtimes r ON r.id=t.runtime_id LEFT JOIN LATERAL (SELECT workflow_id,workflow_kind,attempts FROM temporal_dispatches WHERE tenant_id=t.id ORDER BY created_at DESC LIMIT 1) d ON true ORDER BY t.domain")
         .fetch_all(&s.db)
         .await?;
@@ -1560,8 +1524,8 @@ async fn create_tenant(
     headers: HeaderMap,
     Json(body): Json<NewTenant>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let (operator_id, _) = operator(&headers, &s.db).await?;
-    create_tenant_inner(&s, body, Some(operator_id), None, None, None).await
+    let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
+    create_tenant_inner(&s, body, Some(admin_user_id), None, None, None).await
 }
 
 async fn customer_create_tenant(
@@ -1569,13 +1533,12 @@ async fn customer_create_tenant(
     headers: HeaderMap,
     Json(body): Json<CustomerTenantRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let (customer_id, email) = customer(&headers, &s.db).await?;
-    let has_password = sqlx::query_scalar::<_, bool>(
-        "SELECT password_hash IS NOT NULL FROM customers WHERE id=$1",
-    )
-    .bind(customer_id)
-    .fetch_one(&s.db)
-    .await?;
+    let (user_id, email) = customer(&headers, &s.db).await?;
+    let has_password =
+        sqlx::query_scalar::<_, bool>("SELECT password_hash IS NOT NULL FROM users WHERE id=$1")
+            .bind(user_id)
+            .fetch_one(&s.db)
+            .await?;
     if !has_password {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
@@ -1604,7 +1567,7 @@ async fn customer_create_tenant(
             approval_required: false,
         },
         None,
-        Some(customer_id),
+        Some(user_id),
         body.custom_domain,
         Some(owner_username),
     )
@@ -1614,8 +1577,8 @@ async fn customer_create_tenant(
 async fn create_tenant_inner(
     s: &Shared,
     mut body: NewTenant,
-    operator_id: Option<Uuid>,
-    customer_id: Option<Uuid>,
+    admin_user_id: Option<Uuid>,
+    user_id: Option<Uuid>,
     custom_domain: Option<String>,
     owner_username: Option<String>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
@@ -1748,13 +1711,13 @@ async fn create_tenant_inner(
     let redis_prefix = tenant_redis_key_prefix(tenant_id);
 
     let mut tx = s.db.begin().await?;
-    if let Some(customer_id) = customer_id {
+    if let Some(user_id) = user_id {
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))")
-            .bind(customer_id)
+            .bind(user_id)
             .execute(&mut *tx)
             .await?;
-        let instance_limit = customer_instance_limit(&mut tx, customer_id).await?;
-        let instance_count = customer_instance_count(&mut tx, customer_id).await?;
+        let instance_limit = customer_instance_limit(&mut tx, user_id).await?;
+        let instance_count = customer_instance_count(&mut tx, user_id).await?;
         if instance_limit.is_some_and(|limit| instance_count >= limit) {
             return Err(ApiError(
                 StatusCode::CONFLICT,
@@ -1762,10 +1725,10 @@ async fn create_tenant_inner(
             ));
         }
     }
-    sqlx::query("INSERT INTO tenants(id,domain,aliases,title,runtime_id,desired_state,observed_state,lifecycle_state,contact_email,registrations_open,approval_required,vapid_private_key,vapid_public_key,customer_id,owner_username,owner_email) VALUES($1,$2,$3,$4,$5,'running','unknown','provisioning',$6,$7,$8,$9,$10,$11,$12,$13)")
+    sqlx::query("INSERT INTO tenants(id,domain,aliases,title,runtime_id,desired_state,observed_state,lifecycle_state,contact_email,registrations_open,approval_required,vapid_private_key,vapid_public_key,user_id,owner_username,owner_email) VALUES($1,$2,$3,$4,$5,'running','unknown','provisioning',$6,$7,$8,$9,$10,$11,$12,$13)")
         .bind(tenant_id).bind(&domain).bind(&aliases).bind(&body.title).bind(body.runtime_id)
         .bind(&body.contact_email).bind(body.registrations_open).bind(body.approval_required)
-        .bind(vapid_private).bind(vapid_public).bind(customer_id).bind(&owner_username).bind(owner_email).execute(&mut *tx).await
+        .bind(vapid_private).bind(vapid_public).bind(user_id).bind(&owner_username).bind(owner_email).execute(&mut *tx).await
         .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenants_domain_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
     sqlx::query(r#"INSERT INTO tenant_configuration(
         tenant_id,database_url,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,
@@ -1793,8 +1756,8 @@ async fn create_tenant_inner(
             .bind(Uuid::new_v4()).bind(tenant_id).bind(hostname).bind(&cname_target).execute(&mut *tx).await
             .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenant_domains_hostname_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
     }
-    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,requested_by_customer,detail,started_at) VALUES($1,$2,$3,'tenant_provision','running',$4,$5,jsonb_build_object('domain',$6),now())")
-        .bind(operation_id).bind(tenant_id).bind(body.runtime_id).bind(operator_id).bind(customer_id).bind(&domain).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) VALUES($1,$2,$3,'tenant_provision','running',COALESCE($4::uuid,$5::uuid),jsonb_build_object('domain',$6),now())")
+        .bind(operation_id).bind(tenant_id).bind(body.runtime_id).bind(admin_user_id).bind(user_id).bind(&domain).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['database','migrate','render','reload','health','routing'] || CASE WHEN $2 THEN ARRAY['owner'] ELSE ARRAY[]::text[] END)")
         .bind(tenant_id).bind(owner_username.is_some()).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Tenant reserved; provisioning queued.')")
@@ -1826,7 +1789,7 @@ async fn import_tenant(
     headers: HeaderMap,
     Json(body): Json<TenantImport>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
     let bad = |message: &str| ApiError(StatusCode::BAD_REQUEST, message.into());
 
     let domain = body
@@ -2048,7 +2011,7 @@ async fn import_tenant(
     // every failure, event and retry path finds the operation by that name. The
     // detail is what says the instance came from somewhere.
     sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) VALUES($1,$2,$3,'tenant_provision','running',$4,jsonb_build_object('domain',$5,'imported',true),now())")
-        .bind(operation_id).bind(tenant_id).bind(body.runtime_id).bind(operator_id).bind(&domain).execute(&mut *tx).await?;
+        .bind(operation_id).bind(tenant_id).bind(body.runtime_id).bind(admin_user_id).bind(&domain).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['database','migrate','import','render'] || CASE WHEN $2 THEN ARRAY['media'] ELSE ARRAY[]::text[] END || ARRAY['reload','health','routing'])")
         .bind(tenant_id).bind(media_path.is_some()).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,$2)")
@@ -2071,7 +2034,7 @@ async fn retry_provisioning(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
     let operation_id = Uuid::new_v4();
     let mut tx = s.db.begin().await?;
     let changed = sqlx::query("UPDATE tenants SET lifecycle_state='provisioning',updated_at=now() WHERE id=$1 AND lifecycle_state='failed'")
@@ -2088,7 +2051,7 @@ async fn retry_provisioning(
     sqlx::query("UPDATE tenant_domains SET status='pending',attempts=0,error=NULL,next_check_at=NULL,updated_at=now()-interval '1 minute' WHERE tenant_id=$1 AND kind='provided' AND status='failed'")
         .bind(id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,started_at) SELECT $1,t.id,t.runtime_id,'tenant_provision','running',$2,now() FROM tenants t WHERE t.id=$3")
-        .bind(operation_id).bind(operator_id).bind(id).execute(&mut *tx).await?;
+        .bind(operation_id).bind(admin_user_id).bind(id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Provisioning retry queued.')")
         .bind(operation_id).execute(&mut *tx).await?;
     enqueue_temporal_dispatch(&mut tx, id, "provision").await?;
@@ -2101,7 +2064,7 @@ async fn tenant_domains(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<TenantDomain>>, ApiError> {
-    operator(&headers, &s.db).await?;
+    admin_user(&headers, &s.db).await?;
     Ok(Json(sqlx::query_as("SELECT id,hostname,kind,status,is_primary,cloudflare_status,ssl_status,cname_target,ownership_name,ownership_value,error FROM tenant_domains WHERE tenant_id=$1 ORDER BY is_primary DESC,created_at")
         .bind(id).fetch_all(&s.db).await?))
 }
@@ -2111,7 +2074,7 @@ async fn adopt_legacy_domain(
     headers: HeaderMap,
     Path((tenant_id, domain_id)): Path<(Uuid, Uuid)>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
     let cloudflare = s.cloudflare.as_ref().ok_or_else(|| {
         ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2135,7 +2098,7 @@ async fn adopt_legacy_domain(
         )
     })?;
     sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) SELECT $1,t.id,t.runtime_id,'custom_domain_attach','running',$2,jsonb_build_object('hostname',$3,'mode','adopt_legacy_primary'),now() FROM tenants t WHERE t.id=$4")
-        .bind(operation_id).bind(operator_id).bind(&hostname).bind(tenant_id).execute(&mut *tx).await?;
+        .bind(operation_id).bind(admin_user_id).bind(&hostname).bind(tenant_id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Legacy primary domain queued for Cloudflare for SaaS adoption; ActivityPub identity is unchanged.')")
         .bind(operation_id).execute(&mut *tx).await?;
     tx.commit().await?;
@@ -2764,12 +2727,12 @@ fn cname_points_to(body: &serde_json::Value, target: &str) -> bool {
 /// frees its slot while its data is retained.
 async fn customer_instance_count(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    customer_id: Uuid,
+    user_id: Uuid,
 ) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar::<_, i64>(
-        "SELECT count(*) FROM tenants WHERE customer_id=$1 AND lifecycle_state NOT IN ('deprovisioning','retained','purging','purged')",
+        "SELECT count(*) FROM tenants WHERE user_id=$1 AND lifecycle_state NOT IN ('deprovisioning','retained','purging','purged')",
     )
-    .bind(customer_id)
+    .bind(user_id)
     .fetch_one(&mut **tx)
     .await
 }
@@ -2777,10 +2740,10 @@ async fn customer_instance_count(
 /// A null limit grants the customer unlimited instances.
 async fn customer_instance_limit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    customer_id: Uuid,
+    user_id: Uuid,
 ) -> Result<Option<i64>, sqlx::Error> {
-    sqlx::query_scalar("SELECT instance_limit FROM customers WHERE id=$1")
-        .bind(customer_id)
+    sqlx::query_scalar("SELECT instance_limit FROM users WHERE id=$1")
+        .bind(user_id)
         .fetch_one(&mut **tx)
         .await
 }
@@ -2792,17 +2755,17 @@ async fn customer_delete_instance(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let (customer_id, _) = customer(&headers, &s.db).await?;
+    let (user_id, _) = customer(&headers, &s.db).await?;
     let mut tx = s.db.begin().await?;
-    let deletable = sqlx::query_scalar::<_, bool>("SELECT true FROM tenants WHERE id=$1 AND customer_id=$2 AND lifecycle_state IN ('provisioning','ready','failed') FOR UPDATE")
-        .bind(id).bind(customer_id).fetch_optional(&mut *tx).await?.is_some();
+    let deletable = sqlx::query_scalar::<_, bool>("SELECT true FROM tenants WHERE id=$1 AND user_id=$2 AND lifecycle_state IN ('provisioning','ready','failed') FOR UPDATE")
+        .bind(id).bind(user_id).fetch_optional(&mut *tx).await?.is_some();
     if !deletable {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "This instance is already deleted.".into(),
         ));
     }
-    begin_deprovisioning(&mut tx, id, None, Some(customer_id)).await?;
+    begin_deprovisioning(&mut tx, id, None, Some(user_id)).await?;
     tx.commit().await?;
     temporal::wake_provisioning(&s, id).await;
     Ok(StatusCode::ACCEPTED)
@@ -2815,10 +2778,10 @@ async fn customer_purge_instance(
     Path(id): Path<Uuid>,
     Json(body): Json<PurgeConfirmation>,
 ) -> Result<StatusCode, ApiError> {
-    let (customer_id, _) = customer(&headers, &s.db).await?;
+    let (user_id, _) = customer(&headers, &s.db).await?;
     let mut tx = s.db.begin().await?;
-    let address = sqlx::query_scalar::<_, String>("SELECT COALESCE(abandoned_custom_domain,domain) FROM tenants WHERE id=$1 AND customer_id=$2 AND lifecycle_state='retained' FOR UPDATE")
-        .bind(id).bind(customer_id).fetch_optional(&mut *tx).await?
+    let address = sqlx::query_scalar::<_, String>("SELECT COALESCE(abandoned_custom_domain,domain) FROM tenants WHERE id=$1 AND user_id=$2 AND lifecycle_state='retained' FOR UPDATE")
+        .bind(id).bind(user_id).fetch_optional(&mut *tx).await?
         .ok_or_else(|| ApiError(StatusCode::CONFLICT, "Only a deleted instance can be deleted permanently.".into()))?;
     if !body.confirm_domain.trim().eq_ignore_ascii_case(&address) {
         return Err(ApiError(
@@ -2830,7 +2793,7 @@ async fn customer_purge_instance(
         &mut tx,
         id,
         None,
-        Some(customer_id),
+        Some(user_id),
         true,
         "Permanent deletion confirmed by the customer; the instance's data is being destroyed.",
     )
@@ -2845,29 +2808,29 @@ async fn customer_restore(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let (customer_id, _) = customer(&headers, &s.db).await?;
+    let (user_id, _) = customer(&headers, &s.db).await?;
     let mut tx = s.db.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))")
-        .bind(customer_id)
+        .bind(user_id)
         .execute(&mut *tx)
         .await?;
-    let retained = sqlx::query_scalar::<_, bool>("SELECT true FROM tenants WHERE id=$1 AND customer_id=$2 AND lifecycle_state='retained' FOR UPDATE")
-        .bind(id).bind(customer_id).fetch_optional(&mut *tx).await?.is_some();
+    let retained = sqlx::query_scalar::<_, bool>("SELECT true FROM tenants WHERE id=$1 AND user_id=$2 AND lifecycle_state='retained' FOR UPDATE")
+        .bind(id).bind(user_id).fetch_optional(&mut *tx).await?.is_some();
     if !retained {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "Only a deleted instance can be restored.".into(),
         ));
     }
-    let instance_limit = customer_instance_limit(&mut tx, customer_id).await?;
-    let instance_count = customer_instance_count(&mut tx, customer_id).await?;
+    let instance_limit = customer_instance_limit(&mut tx, user_id).await?;
+    let instance_count = customer_instance_count(&mut tx, user_id).await?;
     if instance_limit.is_some_and(|limit| instance_count >= limit) {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "Delete another instance before restoring this one.".into(),
         ));
     }
-    queue_restore(&s, &mut tx, id, None, Some(customer_id)).await?;
+    queue_restore(&s, &mut tx, id, None, Some(user_id)).await?;
     tx.commit().await?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -2880,7 +2843,7 @@ async fn restore_tenant(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
     let mut tx = s.db.begin().await?;
     let retained = sqlx::query_scalar::<_, bool>(
         "SELECT true FROM tenants WHERE id=$1 AND lifecycle_state='retained' FOR UPDATE",
@@ -2895,7 +2858,7 @@ async fn restore_tenant(
             "Only a retained tenant can be restored.".into(),
         ));
     }
-    queue_restore(&s, &mut tx, id, Some(operator_id), None).await?;
+    queue_restore(&s, &mut tx, id, Some(admin_user_id), None).await?;
     tx.commit().await?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -2907,7 +2870,7 @@ async fn deprovision_tenant(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
     let mut tx = s.db.begin().await?;
     let deletable = sqlx::query_scalar::<_, bool>(
         "SELECT true FROM tenants WHERE id=$1 AND lifecycle_state IN ('provisioning','ready','failed') FOR UPDATE",
@@ -2922,7 +2885,7 @@ async fn deprovision_tenant(
             "This tenant is already deleted or being deleted.".into(),
         ));
     }
-    begin_deprovisioning(&mut tx, id, Some(operator_id), None).await?;
+    begin_deprovisioning(&mut tx, id, Some(admin_user_id), None).await?;
     tx.commit().await?;
     temporal::wake_provisioning(&s, id).await;
     Ok(StatusCode::ACCEPTED)
@@ -2935,8 +2898,8 @@ async fn queue_restore(
     s: &Shared,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: Uuid,
-    operator_id: Option<Uuid>,
-    customer_id: Option<Uuid>,
+    admin_user_id: Option<Uuid>,
+    user_id: Option<Uuid>,
 ) -> Result<(), ApiError> {
     // An instance deleted because its custom domain never validated was never
     // set up. Restoring it tries that domain again, with a new window, rather
@@ -2991,8 +2954,8 @@ async fn queue_restore(
         .execute(&mut **tx)
         .await?;
     let operation_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,requested_by_customer,detail,started_at) SELECT $1,t.id,t.runtime_id,'tenant_provision','running',$2,$3,jsonb_build_object('mode','restore'),now() FROM tenants t WHERE t.id=$4")
-        .bind(operation_id).bind(operator_id).bind(customer_id).bind(tenant_id).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) SELECT $1,t.id,t.runtime_id,'tenant_provision','running',COALESCE($2::uuid,$3::uuid),jsonb_build_object('mode','restore'),now() FROM tenants t WHERE t.id=$4")
+        .bind(operation_id).bind(admin_user_id).bind(user_id).bind(tenant_id).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Restore queued; retained data is served again once the instance is healthy.')")
         .bind(operation_id).execute(&mut **tx).await?;
     enqueue_temporal_dispatch(tx, tenant_id, "provision").await?;
@@ -3005,16 +2968,16 @@ async fn queue_restore(
 async fn begin_deprovisioning(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: Uuid,
-    operator_id: Option<Uuid>,
-    customer_id: Option<Uuid>,
+    admin_user_id: Option<Uuid>,
+    user_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(&format!("UPDATE tenants SET lifecycle_state='deprovisioning',desired_state='deprovisioning',observed_state='disabled',observed_at=now(),observation_error=NULL,purge_scheduled_for=now()+interval '{RETENTION_BEFORE_PURGE}',updated_at=now() WHERE id=$1"))
         .bind(tenant_id).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO deprovisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['unrender','reload','offline']) ON CONFLICT (tenant_id,step) DO UPDATE SET status='pending',attempts=0,error=NULL,started_at=NULL,finished_at=NULL,updated_at=now()")
         .bind(tenant_id).execute(&mut **tx).await?;
     let operation_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,requested_by_customer,started_at) SELECT $1,t.id,t.runtime_id,'tenant_deprovision','running',$2,$3,now() FROM tenants t WHERE t.id=$4")
-        .bind(operation_id).bind(operator_id).bind(customer_id).bind(tenant_id).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,started_at) SELECT $1,t.id,t.runtime_id,'tenant_deprovision','running',COALESCE($2::uuid,$3::uuid),now() FROM tenants t WHERE t.id=$4")
+        .bind(operation_id).bind(admin_user_id).bind(user_id).bind(tenant_id).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Deprovisioning started; data is retained.')")
         .bind(operation_id).execute(&mut **tx).await?;
     enqueue_temporal_dispatch(tx, tenant_id, "deprovision").await?;
@@ -3224,7 +3187,7 @@ async fn purge_tenant(
     Path(id): Path<Uuid>,
     Json(body): Json<PurgeConfirmation>,
 ) -> Result<StatusCode, ApiError> {
-    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
     let mut tx = s.db.begin().await?;
     // A tenant already on its way offline finishes that first; anything else,
     // served or not, can be purged.
@@ -3251,7 +3214,7 @@ async fn purge_tenant(
     start_purge(
         &mut tx,
         id,
-        Some(operator_id),
+        Some(admin_user_id),
         None,
         retained,
         "Purge confirmed; the tenant's data is being destroyed.",
@@ -3266,8 +3229,8 @@ async fn purge_tenant(
 async fn start_purge(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: Uuid,
-    operator_id: Option<Uuid>,
-    customer_id: Option<Uuid>,
+    admin_user_id: Option<Uuid>,
+    user_id: Option<Uuid>,
     retained: bool,
     reason: &str,
 ) -> Result<(), sqlx::Error> {
@@ -3282,8 +3245,8 @@ async fn start_purge(
             .bind(tenant_id).execute(&mut **tx).await?;
     }
     let operation_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,requested_by_customer,detail,started_at) SELECT $1,t.id,t.runtime_id,'tenant_purge','running',$2,$3,jsonb_build_object('domain',COALESCE(t.abandoned_custom_domain,t.domain)),now() FROM tenants t WHERE t.id=$4")
-        .bind(operation_id).bind(operator_id).bind(customer_id).bind(tenant_id).execute(&mut **tx).await?;
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) SELECT $1,t.id,t.runtime_id,'tenant_purge','running',COALESCE($2::uuid,$3::uuid),jsonb_build_object('domain',COALESCE(t.abandoned_custom_domain,t.domain)),now() FROM tenants t WHERE t.id=$4")
+        .bind(operation_id).bind(admin_user_id).bind(user_id).bind(tenant_id).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,$2)")
         .bind(operation_id)
         .bind(reason)
@@ -3986,12 +3949,12 @@ async fn customer_reset_owner_password(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
-    let (customer_id, _) = customer(&headers, &s.db).await?;
+    let (user_id, _) = customer(&headers, &s.db).await?;
     let owner = sqlx::query_as::<_, (Option<String>, Option<String>, bool, Uuid)>(
-        "SELECT t.owner_username,t.owner_email,t.lifecycle_state='ready' AND EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded'),t.runtime_id FROM tenants t WHERE t.id=$1 AND t.customer_id=$2",
+        "SELECT t.owner_username,t.owner_email,t.lifecycle_state='ready' AND EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded'),t.runtime_id FROM tenants t WHERE t.id=$1 AND t.user_id=$2",
     )
     .bind(id)
-    .bind(customer_id)
+    .bind(user_id)
     .fetch_optional(&s.db)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Instance not found".into()))?;
@@ -4003,8 +3966,8 @@ async fn customer_reset_owner_password(
     };
 
     let operation_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by_customer,detail,started_at) VALUES($1,$2,$3,'owner_password_reset','running',$4,jsonb_build_object('username',$5::text),now())")
-        .bind(operation_id).bind(id).bind(runtime_id).bind(customer_id).bind(&username).execute(&s.db).await?;
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) VALUES($1,$2,$3,'owner_password_reset','running',$4,jsonb_build_object('username',$5::text),now())")
+        .bind(operation_id).bind(id).bind(runtime_id).bind(user_id).bind(&username).execute(&s.db).await?;
     let password = match tenant_account_command(
         &s,
         id,
@@ -4546,7 +4509,7 @@ async fn operations(
     State(s): State<Shared>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<OperationSummary>>, ApiError> {
-    operator(&headers, &s.db).await?;
+    admin_user(&headers, &s.db).await?;
     Ok(Json(sqlx::query_as("SELECT o.id,t.domain,r.name runtime_name,o.kind,o.status,o.error,o.created_at FROM operations o LEFT JOIN tenants t ON t.id=o.tenant_id LEFT JOIN runtimes r ON r.id=o.runtime_id ORDER BY o.created_at DESC LIMIT 50").fetch_all(&s.db).await?))
 }
 
@@ -4618,13 +4581,13 @@ struct TenantConfiguration {
 }
 
 /// Renders exactly what a reconciliation would write, minus every secret, so
-/// operators can read a tenant's effective configuration from the console.
+/// administrators can read a tenant's effective configuration from the console.
 async fn tenant_configuration(
     State(s): State<Shared>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TenantConfiguration>, ApiError> {
-    operator(&headers, &s.db).await?;
+    admin_user(&headers, &s.db).await?;
     let row = sqlx::query_as::<_, (SqlJson<StoredTenant>, SqlJson<StoredConfig>, String, String, i64, Option<i64>)>(
         "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,r.bind_address,t.config_revision,t.rendered_revision FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
     )
@@ -4659,7 +4622,7 @@ async fn operation_events(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<OperationEvent>>, ApiError> {
-    operator(&headers, &s.db).await?;
+    admin_user(&headers, &s.db).await?;
     Ok(Json(
         sqlx::query_as(
             "SELECT id,message,created_at FROM operation_events WHERE operation_id=$1 ORDER BY id",
@@ -4674,7 +4637,7 @@ async fn runtimes(
     State(s): State<Shared>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<RuntimeSummary>>, ApiError> {
-    operator(&headers, &s.db).await?;
+    admin_user(&headers, &s.db).await?;
     Ok(Json(sqlx::query_as("SELECT r.id,r.instance_id,r.name,i.name instance_name,i.address instance_address,r.bind_address,r.service_label,r.tenant_directory,r.origin_hostname,r.router_enabled,r.blue_bind_address,r.green_bind_address,(SELECT count(*) FROM tenants WHERE runtime_id=r.id) tenant_count,r.auto_deploy_enabled,r.deployed_ref,o.id release_operation_id,o.status release_status,e.message release_message FROM runtimes r JOIN instances i ON i.id=r.instance_id LEFT JOIN LATERAL (SELECT id,status FROM operations WHERE runtime_id=r.id AND kind='runtime_release' ORDER BY created_at DESC LIMIT 1) o ON true LEFT JOIN LATERAL (SELECT string_agg(message,E'\\n' ORDER BY id) message FROM operation_events WHERE operation_id=o.id) e ON true ORDER BY i.name,r.name").fetch_all(&s.db).await?))
 }
 
@@ -4684,7 +4647,7 @@ async fn set_automatic_release(
     Path(id): Path<Uuid>,
     Json(body): Json<AutomaticRelease>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
     let changed = sqlx::query("UPDATE runtimes SET auto_deploy_enabled=$1 WHERE id=$2")
         .bind(body.enabled)
         .bind(id)
@@ -4695,7 +4658,7 @@ async fn set_automatic_release(
         return Err(ApiError(StatusCode::NOT_FOUND, "Runtime not found.".into()));
     }
     sqlx::query("INSERT INTO operations(id,runtime_id,kind,status,requested_by,detail,finished_at) VALUES($1,$2,'release_policy','succeeded',$3,jsonb_build_object('auto_deploy_enabled',$4),now())")
-        .bind(Uuid::new_v4()).bind(id).bind(operator_id).bind(body.enabled).execute(&s.db).await?;
+        .bind(Uuid::new_v4()).bind(id).bind(admin_user_id).bind(body.enabled).execute(&s.db).await?;
     Ok(Json(
         serde_json::json!({"auto_deploy_enabled": body.enabled}),
     ))
@@ -4706,8 +4669,8 @@ async fn release_runtime(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let (operator_id, _) = operator(&headers, &s.db).await?;
-    let operation_id = queue_runtime_release(s, id, Some(operator_id), "manual").await?;
+    let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
+    let operation_id = queue_runtime_release(s, id, Some(admin_user_id), "manual").await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(serde_json::json!({"operation_id": operation_id})),
@@ -5455,7 +5418,7 @@ async fn check_tenant(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
     let row = sqlx::query_as::<_, (String,String)>("SELECT t.domain,r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1").bind(id).fetch_optional(&s.db).await?.ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Tenant not found".into()))?;
     let served = sqlx::query_scalar::<_, bool>(
         "SELECT lifecycle_state NOT IN ('deprovisioning','retained','purging','purged') FROM tenants WHERE id=$1",
@@ -5470,7 +5433,7 @@ async fn check_tenant(
         ));
     }
     let op = Uuid::new_v4();
-    sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,requested_by,started_at) VALUES($1,$2,'health_check','running',$3,now())").bind(op).bind(id).bind(operator_id).execute(&s.db).await?;
+    sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,requested_by,started_at) VALUES($1,$2,'health_check','running',$3,now())").bind(op).bind(id).bind(admin_user_id).execute(&s.db).await?;
     let url = format!("http://{}/api/v2/instance", row.1);
     let healthy = s
         .client
@@ -5507,7 +5470,7 @@ async fn health_reconciler(state: Shared) {
         )
         .execute(&state.db)
         .await;
-        let _ = sqlx::query("DELETE FROM sessions WHERE expires_at <= now()")
+        let _ = sqlx::query("DELETE FROM user_sessions WHERE expires_at <= now()")
             .execute(&state.db)
             .await;
         let _ = sqlx::query("UPDATE tenants SET observed_state='disabled',observed_at=now(),observation_error=NULL WHERE desired_state='disabled' AND observed_state IS DISTINCT FROM 'disabled'")
@@ -5799,7 +5762,7 @@ async fn render_tenant(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let (operator_id, _) = operator(&headers, &s.db).await?;
+    let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
     let row = sqlx::query_as::<_, (SqlJson<StoredTenant>, SqlJson<StoredConfig>, String, String, String, String, String, bool, i64, Uuid)>(
         "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,i.address,r.tenant_directory,r.service_label,r.bind_address,r.router_enabled,t.config_revision,r.id FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
     )
@@ -5848,7 +5811,7 @@ async fn render_tenant(
     let tenant_file_name = tenant_file_name(id);
     let op = Uuid::new_v4();
     sqlx::query("INSERT INTO operations(id,tenant_id,kind,status,requested_by,started_at) VALUES($1,$2,'render','running',$3,now())")
-        .bind(op).bind(id).bind(operator_id).execute(&s.db).await?;
+        .bind(op).bind(id).bind(admin_user_id).execute(&s.db).await?;
 
     let configured_host = std::env::var("CONTROL_RUNTIME_HOST").unwrap_or_default();
     if configured_host.is_empty() || configured_host != runtime_host {

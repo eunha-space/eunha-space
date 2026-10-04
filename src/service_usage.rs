@@ -56,7 +56,7 @@ pub(crate) async fn history(
     headers: HeaderMap,
     Query(scope): Query<Scope>,
 ) -> Result<Json<History>, ApiError> {
-    operator(&headers, &s.db).await?;
+    admin_user(&headers, &s.db).await?;
     let ids = sqlx::query_scalar::<_, Uuid>("SELECT t.id FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.lifecycle_state IN ('ready','failed') AND ($1::uuid IS NULL OR t.id=$1) AND ($2::uuid IS NULL OR r.instance_id=$2)")
         .bind(scope.tenant_id).bind(scope.instance_id).fetch_all(&s.db).await?;
     let (cutoff, bucket) = scope.range.bounds(now())?;

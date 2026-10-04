@@ -27,8 +27,12 @@ Password hashing runs on blocking threads with at most four concurrent jobs.
 
 ## Deployment and rollback
 
-Pull the requested commit on the production host, then run `./deploy.sh`. It
-uses mise, runs unit tests, and builds into `.control-releases/<release-id>`.
+Run `./deploy.sh` on the production host (`ssh 100.113.148.66`, checkout
+`~/Git/eunha-space`). Under the deployment lock it pulls `origin/main` with
+`--ff-only` and requires a clean `main` checkout matching that remote commit.
+Local changes, local commits, and diverged branches prevent deployment without
+discarding work. It uses mise, runs unit tests, and builds into
+`.control-releases/<release-id>`.
 The deployed executable and frontend assets are activated together through an
 atomic `current` link. Assets from the prior release remain available to open
 browser sessions. The original launchd environment is preserved, adding release,

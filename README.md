@@ -180,12 +180,20 @@ primary domain. Set `CLOUDFLARE_API_BASE` to point the custom-hostname API at a
 local stand-in for testing; it defaults to `https://api.cloudflare.com/client/v4`.
 Retrying failed provisioning also re-checks provided hostnames that failed.
 
-Create the first operator without putting a password in shell history:
+Administrators sign in through their user account using the same session as
+customers. Admin APIs and pages require `users.is_admin`. Accounts, sessions,
+and email verification links live in `users`, `user_sessions`, and
+`user_email_verifications`. Tenant ownership and operation actors reference
+users; historical operator identities without an account are retained as
+users with no email, credentials, or admin access for audit attribution.
+The existing customer API URLs and cookie name remain compatible.
+
+Create or update an administrator customer account without putting a password in shell history:
 
 ```sh
 read -s EUNHA_SPACE_ADMIN_PASSWORD
 export EUNHA_SPACE_ADMIN_PASSWORD
-cargo run -- set-operator admin
+mise exec -- cargo run -- set-admin admin@example.com
 unset EUNHA_SPACE_ADMIN_PASSWORD
 ```
 

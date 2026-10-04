@@ -26,7 +26,7 @@ pub(crate) async fn usage(
     State(s): State<Shared>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<Usage>>, ApiError> {
-    operator(&headers, &s.db).await?;
+    admin_user(&headers, &s.db).await?;
     let rows = s.usage.lock().await.rows.clone();
     Ok(Json(rows))
 }
@@ -37,7 +37,7 @@ pub(crate) async fn history(
     Path(id): Path<Uuid>,
     Query(range): Query<usage_range::Range>,
 ) -> Result<Json<Vec<Usage>>, ApiError> {
-    operator(&headers, &s.db).await?;
+    admin_user(&headers, &s.db).await?;
     let (cutoff, bucket) = range.bounds(now_millis())?;
     let rows=sqlx::query_as::<_, Usage>(r#"WITH previous AS (
 SELECT *,lag(sampled_at) OVER w previous_at,lag(transactions) OVER w previous_transactions,lag(stats_reset) OVER w previous_reset
@@ -86,7 +86,7 @@ pub(crate) async fn aggregate_history(
     headers: HeaderMap,
     Query(scope): Query<AggregateScope>,
 ) -> Result<Json<AggregateHistory>, ApiError> {
-    operator(&headers, &s.db).await?;
+    admin_user(&headers, &s.db).await?;
     let (cutoff, bucket) = scope.range.bounds(now_millis())?;
     // One statement gives inventory and samples a consistent snapshot. Select
     // the latest reading per tenant/bucket so retries cannot double-count usage.

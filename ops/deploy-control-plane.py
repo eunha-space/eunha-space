@@ -27,6 +27,26 @@ def run(args, **kwargs):
     return subprocess.run(args, check=True, **kwargs)
 
 
+def pull_main():
+    branch = subprocess.check_output(
+        ["git", "branch", "--show-current"], cwd=ROOT, text=True,
+    ).strip()
+    if branch != "main":
+        raise RuntimeError("Deployment requires the main branch")
+    changes = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=all"], cwd=ROOT, text=True,
+    )
+    if changes.strip():
+        raise RuntimeError("Deployment requires a clean checkout")
+    run(["git", "pull", "--ff-only", "origin", "main"], cwd=ROOT, capture_output=True)
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    upstream = subprocess.check_output(
+        ["git", "rev-parse", "refs/remotes/origin/main"], cwd=ROOT, text=True,
+    ).strip()
+    if head != upstream:
+        raise RuntimeError("Deployment requires HEAD to match origin/main")
+
+
 def atomic_link(target, destination=None):
     destination = destination or CURRENT
     temporary = destination.with_name(destination.name + ".next")
@@ -109,6 +129,7 @@ def main():
     import fcntl
     with (RELEASES / "deploy.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        pull_main()
         deploy(original)
 
 

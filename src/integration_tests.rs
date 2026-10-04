@@ -169,23 +169,20 @@ fn state(pool: PgPool) -> Shared {
 async fn fixture(pool: &PgPool) -> (Uuid, HeaderMap) {
     let instance = Uuid::new_v4();
     let runtime = Uuid::new_v4();
-    let operator_id = Uuid::new_v4();
     sqlx::query("INSERT INTO instances(id,name,address) VALUES($1,'test','127.0.0.1')")
         .bind(instance)
         .execute(pool)
         .await
         .unwrap();
     sqlx::query("INSERT INTO runtimes(id,name,instance_id,tenant_directory,service_label,binary_path,bind_address,blue_bind_address,green_bind_address,origin_hostname) VALUES($1,'test',$2,'/tmp/test','test.runtime','/tmp/test/eunha','127.0.0.1:60000','127.0.0.1:61000','127.0.0.1:61001','test.origin.example')").bind(runtime).bind(instance).execute(pool).await.unwrap();
-    sqlx::query("INSERT INTO operators(id,username,password_hash) VALUES($1,'test','unused')")
-        .bind(operator_id)
-        .execute(pool)
-        .await
-        .unwrap();
-    sqlx::query("INSERT INTO sessions(token_hash,operator_id,expires_at) VALUES($1,$2,now()+interval '1 hour')").bind(token_hash("test-session")).bind(operator_id).execute(pool).await.unwrap();
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,is_admin) VALUES($1,'admin@example.com','unused',now(),true)")
+        .bind(user_id).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '1 hour')").bind(token_hash("test-session")).bind(user_id).execute(pool).await.unwrap();
     let mut headers = HeaderMap::new();
     headers.insert(
         header::COOKIE,
-        "eunha_space_session=test-session".parse().unwrap(),
+        "eunha_space_customer_session=test-session".parse().unwrap(),
     );
     (runtime, headers)
 }
@@ -731,14 +728,20 @@ async fn smtp_is_owner_scoped_custom_only_and_write_only(pool: PgPool) {
     let (runtime, _) = fixture(&pool).await;
     let id = tenant(&pool, runtime).await;
     let owner = Uuid::new_v4();
-    sqlx::query("INSERT INTO customers(id,email,email_verified_at) VALUES($1,'smtp-owner@example.com',now())").bind(owner).execute(&pool).await.unwrap();
-    sqlx::query("INSERT INTO customer_sessions(token_hash,customer_id,expires_at) VALUES($1,$2,now()+interval '1 hour')").bind(token_hash("smtp-session")).bind(owner).execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO users(id,email,email_verified_at) VALUES($1,'smtp-owner@example.com',now())",
+    )
+    .bind(owner)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '1 hour')").bind(token_hash("smtp-session")).bind(owner).execute(&pool).await.unwrap();
     let mut headers = HeaderMap::new();
     headers.insert(
         header::COOKIE,
         "eunha_space_customer_session=smtp-session".parse().unwrap(),
     );
-    sqlx::query("UPDATE tenants SET customer_id=$2,lifecycle_state='ready' WHERE id=$1")
+    sqlx::query("UPDATE tenants SET user_id=$2,lifecycle_state='ready' WHERE id=$1")
         .bind(id)
         .bind(owner)
         .execute(&pool)
@@ -841,5 +844,209 @@ async fn smtp_migration_preserves_owner_settings_and_converts_legacy_mail(pool: 
             .await
             .unwrap(),
         2
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn admin_middleware_uses_user_sessions_and_checks_current_role(pool: PgPool) {
+    let (_, headers) = fixture(&pool).await;
+    let shared = state(pool.clone());
+    let app = Router::new()
+        .route("/api/admin", get(|| async { StatusCode::NO_CONTENT }))
+        .route_layer(axum::middleware::from_fn_with_state(
+            shared.clone(),
+            auth::require_admin,
+        ))
+        .merge(
+            Router::new()
+                .route("/admin", get(|| async { StatusCode::NO_CONTENT }))
+                .route(
+                    "/admin/{*section}",
+                    get(|| async { StatusCode::NO_CONTENT }),
+                )
+                .route_layer(axum::middleware::from_fn_with_state(
+                    shared.clone(),
+                    auth::require_admin_page,
+                )),
+        )
+        .with_state(shared.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    assert_eq!(
+        client
+            .get(format!("{base}/api/admin"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let response = client
+        .get(format!("{base}/admin/tenants"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(response.headers()[header::LOCATION], "/");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let cookie = headers[header::COOKIE].to_str().unwrap();
+    for path in ["/api/admin", "/admin", "/admin/tenants"] {
+        assert_eq!(
+            client
+                .get(format!("{base}{path}"))
+                .header(header::COOKIE, cookie)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+    }
+    // Both authorization paths reject expiry and unverified accounts.
+    sqlx::query("UPDATE user_sessions SET expires_at=now()-interval '1 second'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .get(format!("{base}/api/admin"))
+            .header(header::COOKIE, cookie)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    sqlx::query("UPDATE user_sessions SET expires_at=now()+interval '1 hour'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE users SET email_verified_at=NULL")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(admin_user(&headers, &pool).await.is_err());
+    sqlx::query("UPDATE users SET email_verified_at=now(),is_admin=false")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(customer(&headers, &pool).await.is_ok());
+    for path in ["/api/admin", "/admin", "/admin/tenants"] {
+        assert_eq!(
+            client
+                .get(format!("{base}{path}"))
+                .header(header::COOKIE, cookie)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+    }
+    let Json(me) = customer_me(State(shared.clone()), headers.clone())
+        .await
+        .unwrap();
+    assert_eq!(me["is_admin"], false);
+    customer_logout(State(shared), headers.clone())
+        .await
+        .unwrap();
+    assert!(customer(&headers, &pool).await.is_err());
+    server.abort();
+}
+
+#[sqlx::test(migrations = false)]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn users_migration_preserves_sessions_roles_and_historical_actors(pool: PgPool) {
+    let migrations = sqlx::migrate!("./migrations");
+    for migration in migrations.iter().filter(|m| m.version < 47) {
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+    }
+    let admin_id = Uuid::new_v4();
+    let operator_id = Uuid::new_v4();
+    let legacy_id = Uuid::new_v4();
+    let customer_id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO operators(id,username) VALUES($1,'admin@example.com'),($2,'old-admin')",
+    )
+    .bind(operator_id)
+    .bind(legacy_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO customers(id,email,password_hash,email_verified_at,operator_id) VALUES($1,'admin@example.com','preserved',now(),$2),($3,'customer@example.com',NULL,now(),NULL)")
+        .bind(admin_id).bind(operator_id).bind(customer_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO customer_sessions(token_hash,customer_id,expires_at,from_email_link) VALUES($1,$2,now()+interval '1 hour',true)")
+        .bind(token_hash("migration-session")).bind(admin_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO customer_email_verifications(token_hash,customer_id,expires_at) VALUES($1,$2,now()+interval '1 hour')")
+        .bind(token_hash("migration-link")).bind(customer_id).execute(&pool).await.unwrap();
+    let admin_op = Uuid::new_v4();
+    let legacy_op = Uuid::new_v4();
+    let customer_op = Uuid::new_v4();
+    sqlx::query("INSERT INTO operations(id,kind,status,requested_by,requested_by_customer) VALUES($1,'health_check','succeeded',$2,NULL),($3,'health_check','succeeded',$4,NULL),($5,'health_check','succeeded',NULL,$6)")
+        .bind(admin_op).bind(operator_id).bind(legacy_op).bind(legacy_id).bind(customer_op).bind(customer_id).execute(&pool).await.unwrap();
+    sqlx::raw_sql(include_str!("../migrations/047_users.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    for (operation_id, expected_actor) in [
+        (admin_op, admin_id),
+        (legacy_op, legacy_id),
+        (customer_op, customer_id),
+    ] {
+        let actor: Uuid = sqlx::query_scalar("SELECT requested_by FROM operations WHERE id=$1")
+            .bind(operation_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(actor, expected_actor);
+    }
+    let (email, hash, is_admin): (String, String, bool) =
+        sqlx::query_as("SELECT email,password_hash,is_admin FROM users WHERE id=$1")
+            .bind(admin_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(email, "admin@example.com");
+    assert_eq!(hash, "preserved");
+    assert!(is_admin);
+    let legacy: (Option<String>, Option<String>, bool, String) = sqlx::query_as(
+        "SELECT email,password_hash,is_admin,legacy_username FROM users WHERE id=$1",
+    )
+    .bind(legacy_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(legacy, (None, None, false, "old-admin".into()));
+    let link_owner: Uuid =
+        sqlx::query_scalar("SELECT user_id FROM user_email_verifications WHERE token_hash=$1")
+            .bind(token_hash("migration-link"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(link_owner, customer_id);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::COOKIE,
+        "eunha_space_customer_session=migration-session"
+            .parse()
+            .unwrap(),
+    );
+    assert_eq!(admin_user(&headers, &pool).await.unwrap().0, admin_id);
+    assert!(customer_email_link_session(&headers, &pool).await.unwrap());
+    let old_tables: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('operators','customers','customer_sessions','customer_email_verifications')")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(old_tables, 0);
+    assert!(
+        sqlx::query("UPDATE users SET is_admin=true WHERE id=$1")
+            .bind(legacy_id)
+            .execute(&pool)
+            .await
+            .is_err()
     );
 }

@@ -26,9 +26,9 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    ApiError, ProvisionStepOutcome, Shared, customer, enqueue_temporal_dispatch,
-    healthcheck_provisioned_tenant, is_safe_domain, is_valid_domain, operator,
-    reload_provisioned_runtime, render_provisioned_tenant,
+    ApiError, ProvisionStepOutcome, Shared, admin_user, customer, enqueue_temporal_dispatch,
+    healthcheck_provisioned_tenant, is_safe_domain, is_valid_domain, reload_provisioned_runtime,
+    render_provisioned_tenant,
 };
 
 /// The steps of a domain change, in order.
@@ -137,8 +137,8 @@ async fn start(
     s: &Shared,
     tenant_id: Uuid,
     request: DomainChangeRequest,
-    operator_id: Option<Uuid>,
-    customer_id: Option<Uuid>,
+    admin_user_id: Option<Uuid>,
+    user_id: Option<Uuid>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let (kind, hostnames) = requested_hostnames(s, &request)?;
     let to_domain = hostnames[0].clone();
@@ -171,14 +171,14 @@ async fn start(
 
     let mut tx = s.db.begin().await?;
     let tenant = sqlx::query_as::<_, (String, String, Option<Uuid>, Uuid)>(
-        "SELECT domain,lifecycle_state,customer_id,runtime_id FROM tenants WHERE id=$1 FOR UPDATE",
+        "SELECT domain,lifecycle_state,user_id,runtime_id FROM tenants WHERE id=$1 FOR UPDATE",
     )
     .bind(tenant_id)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Instance not found".into()))?;
     let (from_domain, lifecycle, owner, runtime_id) = tenant;
-    if customer_id.is_some() && owner != customer_id {
+    if user_id.is_some() && owner != user_id {
         return Err(ApiError(StatusCode::NOT_FOUND, "Instance not found".into()));
     }
     if lifecycle != "ready" {
@@ -194,8 +194,8 @@ async fn start(
         ));
     }
     let operation_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,requested_by_customer,detail,started_at) VALUES($1,$2,$3,'domain_change','running',$4,$5,jsonb_build_object('from',$6::text,'to',$7::text),now())")
-        .bind(operation_id).bind(tenant_id).bind(runtime_id).bind(operator_id).bind(customer_id)
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) VALUES($1,$2,$3,'domain_change','running',COALESCE($4::uuid,$5::uuid),jsonb_build_object('from',$6::text,'to',$7::text),now())")
+        .bind(operation_id).bind(tenant_id).bind(runtime_id).bind(admin_user_id).bind(user_id)
         .bind(&from_domain).bind(&to_domain).execute(&mut *tx).await?;
     let change_id = Uuid::new_v4();
     sqlx::query("INSERT INTO domain_changes(id,tenant_id,operation_id,from_domain,to_domain) VALUES($1,$2,$3,$4,$5)")
@@ -241,8 +241,8 @@ pub(crate) async fn customer_start(
     Path(id): Path<Uuid>,
     Json(request): Json<DomainChangeRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let (customer_id, _) = customer(&headers, &s.db).await?;
-    start(&s, id, request, None, Some(customer_id)).await
+    let (user_id, _) = customer(&headers, &s.db).await?;
+    start(&s, id, request, None, Some(user_id)).await
 }
 
 pub(crate) async fn operator_start(
@@ -251,8 +251,8 @@ pub(crate) async fn operator_start(
     Path(id): Path<Uuid>,
     Json(request): Json<DomainChangeRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let (operator_id, _) = operator(&headers, &s.db).await?;
-    start(&s, id, request, Some(operator_id), None).await
+    let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
+    start(&s, id, request, Some(admin_user_id), None).await
 }
 
 /// Take up again a change that failed after it began moving the instance.
@@ -262,7 +262,7 @@ pub(crate) async fn operator_retry(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    operator(&headers, &s.db).await?;
+    admin_user(&headers, &s.db).await?;
     let mut tx = s.db.begin().await?;
     let operation_id = sqlx::query_scalar::<_, Uuid>(
         "UPDATE domain_changes SET status='running',error=NULL,finished_at=NULL,updated_at=now() WHERE id=(SELECT id FROM domain_changes WHERE tenant_id=$1 ORDER BY created_at DESC LIMIT 1) AND status='failed' AND step<>'attach' RETURNING operation_id",
@@ -296,7 +296,7 @@ pub(crate) async fn operator_latest(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Option<DomainChangeSummary>>, ApiError> {
-    operator(&headers, &s.db).await?;
+    admin_user(&headers, &s.db).await?;
     Ok(Json(latest(&s.db, id).await?))
 }
 
@@ -306,14 +306,14 @@ pub(crate) async fn operator_latest(
 async fn cancel(
     s: &Shared,
     tenant_id: Uuid,
-    customer_id: Option<Uuid>,
+    user_id: Option<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     let mut tx = s.db.begin().await?;
     let change = sqlx::query_as::<_, (Uuid, String, Uuid)>(
-        "SELECT c.id,c.step,c.operation_id FROM domain_changes c JOIN tenants t ON t.id=c.tenant_id WHERE c.tenant_id=$1 AND c.status='running' AND ($2::uuid IS NULL OR t.customer_id=$2) FOR UPDATE OF c",
+        "SELECT c.id,c.step,c.operation_id FROM domain_changes c JOIN tenants t ON t.id=c.tenant_id WHERE c.tenant_id=$1 AND c.status='running' AND ($2::uuid IS NULL OR t.user_id=$2) FOR UPDATE OF c",
     )
     .bind(tenant_id)
-    .bind(customer_id)
+    .bind(user_id)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "No domain change is running.".into()))?;
@@ -335,8 +335,8 @@ pub(crate) async fn customer_cancel(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    let (customer_id, _) = customer(&headers, &s.db).await?;
-    cancel(&s, id, Some(customer_id)).await
+    let (user_id, _) = customer(&headers, &s.db).await?;
+    cancel(&s, id, Some(user_id)).await
 }
 
 pub(crate) async fn operator_cancel(
@@ -344,7 +344,7 @@ pub(crate) async fn operator_cancel(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    operator(&headers, &s.db).await?;
+    admin_user(&headers, &s.db).await?;
     cancel(&s, id, None).await
 }
 
