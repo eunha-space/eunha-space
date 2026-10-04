@@ -32,7 +32,6 @@ import { Mark, ThemeToggle } from "@/components/console/brand";
 import { Spinner } from "@/components/console/status";
 import { cn } from "cn";
 import { useLingui } from "@lingui/react";
-import { LanguageToggle } from "@/i18n";
 
 type Session =
   | { state: "loading" }
@@ -262,7 +261,6 @@ export function App() {
               {session.username}
             </span>
             <div className="flex items-center gap-1">
-              <LanguageToggle />
               <ThemeToggle />
               <Button
                 variant="outline"

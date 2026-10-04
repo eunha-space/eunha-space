@@ -187,7 +187,8 @@ const ko: Record<string, string> = {
 };
 i18n.load("en", en);
 i18n.load("ko", ko);
-const initial = localStorage.getItem("locale") ||
+const adminPage = location.pathname === "/admin" || location.pathname.startsWith("/admin/");
+const initial = adminPage ? "en" : localStorage.getItem("locale") ||
   (navigator.language.startsWith("ko") ? "ko" : "en");
 i18n.activate(initial);
 document.documentElement.lang = initial;
