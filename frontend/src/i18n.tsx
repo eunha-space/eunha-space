@@ -172,18 +172,7 @@ const ko: Record<string, string> = {
     "아직 이 도메인 확인을 마치지 못했습니다. 계속 시도하겠습니다.",
   "Use a password with at least 14 characters.":
     "14자 이상의 비밀번호를 사용하세요.",
-  "Control plane": "제어판",
-  "Sign in to manage the Eunha runtime fleet.":
-    "Eunha 런타임을 관리하려면 로그인하세요.",
-  Operator: "운영자",
-  "Signing in…": "로그인 중…",
-  Tenants: "테넌트",
-  Instances: "인스턴스",
-  Releases: "릴리스",
-  Operations: "작업",
-  "Sign out": "로그아웃",
-  "Refresh now": "새로고침",
-  "Runtime fleet": "런타임 플릿",
+
 };
 i18n.load("en", en);
 i18n.load("ko", ko);
