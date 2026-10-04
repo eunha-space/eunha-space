@@ -994,6 +994,10 @@ async fn users_migration_preserves_sessions_roles_and_historical_actors(pool: Pg
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/048_drop_legacy_username.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
     for (operation_id, expected_actor) in [
         (admin_op, admin_id),
         (legacy_op, legacy_id),
@@ -1015,14 +1019,16 @@ async fn users_migration_preserves_sessions_roles_and_historical_actors(pool: Pg
     assert_eq!(email, "admin@example.com");
     assert_eq!(hash, "preserved");
     assert!(is_admin);
-    let legacy: (Option<String>, Option<String>, bool, String) = sqlx::query_as(
-        "SELECT email,password_hash,is_admin,legacy_username FROM users WHERE id=$1",
-    )
-    .bind(legacy_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    assert_eq!(legacy, (None, None, false, "old-admin".into()));
+    let legacy: (Option<String>, Option<String>, bool) =
+        sqlx::query_as("SELECT email,password_hash,is_admin FROM users WHERE id=$1")
+            .bind(legacy_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(legacy, (None, None, false));
+    let legacy_columns: i64 = sqlx::query_scalar("SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='users' AND column_name='legacy_username'")
+        .fetch_one(&pool).await.unwrap();
+    assert_eq!(legacy_columns, 0);
     let link_owner: Uuid =
         sqlx::query_scalar("SELECT user_id FROM user_email_verifications WHERE token_hash=$1")
             .bind(token_hash("migration-link"))
