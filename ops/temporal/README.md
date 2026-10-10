@@ -70,6 +70,17 @@ configured UI. An unset or non-`http(s)` value disables the links rather than
 guessing an address; the UI is not on the public Internet, and `/admin` is
 operator-only, so nothing about it is exposed to customers.
 
+The compose file publishes the UI on loopback only. Tailscale publishes it to
+the tailnet, so it does not matter whether Docker or Tailscale starts first
+after a reboot; a port bound to the Tailscale address directly is silently
+dropped when the container starts before that address exists. Once per host:
+
+```sh
+tailscale serve --bg --tcp 8080 tcp://127.0.0.1:8080
+```
+
+Tailscale keeps the setting across restarts; `tailscale serve status` shows it.
+
 `docker-compose.production.yml` is for a host with a local PostgreSQL service
 and OrbStack/Docker. It connects through `host.docker.internal`, keeps only the
 Temporal gRPC endpoint and UI on loopback, and creates the `eunha-space`

@@ -68,4 +68,3 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
     ports:
       - "127.0.0.1:8080:8080"
-      - "100.113.148.66:8080:8080"
