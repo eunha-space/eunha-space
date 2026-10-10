@@ -37,6 +37,7 @@ use tower_http::{
 use uuid::Uuid;
 
 mod auth;
+mod ci_release;
 mod domain_change;
 mod health;
 #[cfg(test)]
@@ -4837,18 +4838,22 @@ async fn release_event(db: &PgPool, operation_id: Uuid, message: &str) {
         .await;
 }
 
-fn central_paths() -> Result<(PathBuf, PathBuf), String> {
+fn control_root() -> Result<PathBuf, String> {
     let exe = std::env::current_exe()
         .map_err(|_| "Control-plane release directory is unavailable.".to_string())?;
-    let root = match std::env::var("CONTROL_PROJECT_ROOT") {
-        Ok(root) => PathBuf::from(root),
-        Err(_) => exe
+    match std::env::var("CONTROL_PROJECT_ROOT") {
+        Ok(root) => Ok(PathBuf::from(root)),
+        Err(_) => Ok(exe
             .parent()
             .and_then(FsPath::parent)
             .and_then(FsPath::parent)
             .ok_or_else(|| "Control-plane release directory is unavailable.".to_string())?
-            .to_path_buf(),
-    };
+            .to_path_buf()),
+    }
+}
+
+fn central_paths() -> Result<(PathBuf, PathBuf), String> {
+    let root = control_root()?;
     let source = root
         .parent()
         .ok_or_else(|| "Central Eunha source directory is unavailable.".to_string())?
@@ -4860,6 +4865,9 @@ fn central_paths() -> Result<(PathBuf, PathBuf), String> {
 }
 
 async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathBuf), String> {
+    if let Some(ci) = ci_release::Source::from_env()? {
+        return fetch_ci_release(db, operation_id, &ci).await;
+    }
     let (root, source) = central_paths()?;
     let source_text = source.to_string_lossy().to_string();
     let status = tokio::process::Command::new("git")
@@ -4915,26 +4923,8 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
     )
     .await;
     let artifact = root.join("releases").join(&reference);
-    if artifact.join("eunha").is_file()
-        && artifact.join("eunha-runtime-router").is_file()
-        && artifact.join("frontend/dist/index.html").is_file()
-    {
-        tokio::fs::copy(
-            root.join("ops/eunha-runtime-router"),
-            artifact.join("eunha-runtime-router"),
-        )
-        .await
-        .map_err(|_| "Could not refresh the runtime router helper.".to_string())?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            tokio::fs::set_permissions(
-                artifact.join("eunha-runtime-router"),
-                std::fs::Permissions::from_mode(0o755),
-            )
-            .await
-            .map_err(|_| "Could not secure the runtime router helper.".to_string())?;
-        }
+    if is_complete_release(&artifact) {
+        stage_router_helper(&root, &artifact).await?;
         release_event(
             db,
             operation_id,
@@ -5008,22 +4998,7 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
     tokio::fs::copy(source.join("target/release/eunha"), staging.join("eunha"))
         .await
         .map_err(|_| "Could not stage the central Eunha binary.".to_string())?;
-    tokio::fs::copy(
-        root.join("ops/eunha-runtime-router"),
-        staging.join("eunha-runtime-router"),
-    )
-    .await
-    .map_err(|_| "Could not stage the runtime router helper.".to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(
-            staging.join("eunha-runtime-router"),
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .await
-        .map_err(|_| "Could not secure the runtime router helper.".to_string())?;
-    }
+    stage_router_helper(&root, &staging).await?;
     command_status(
         "Frontend artifact staging",
         "cp",
@@ -5035,6 +5010,110 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
         Some(&source),
     )
     .await?;
+    tokio::fs::rename(&staging, &artifact)
+        .await
+        .map_err(|_| "Could not publish the central Eunha release.".to_string())?;
+    Ok((reference, artifact))
+}
+
+fn is_complete_release(artifact: &FsPath) -> bool {
+    artifact.join("eunha").is_file()
+        && artifact.join("eunha-runtime-router").is_file()
+        && artifact.join("frontend/dist/index.html").is_file()
+}
+
+/// The router helper ships with the control plane rather than with Eunha, so
+/// every release, reused or new, gets the current one.
+async fn stage_router_helper(root: &FsPath, release: &FsPath) -> Result<(), String> {
+    tokio::fs::copy(
+        root.join("ops/eunha-runtime-router"),
+        release.join("eunha-runtime-router"),
+    )
+    .await
+    .map_err(|_| "Could not stage the runtime router helper.".to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(
+            release.join("eunha-runtime-router"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .await
+        .map_err(|_| "Could not secure the runtime router helper.".to_string())?;
+    }
+    Ok(())
+}
+
+/// How long a release waits for CI to finish building the commit it resolved.
+/// The Release job's own timeout is an hour; the rest covers its queue.
+const CI_BUILD_WAIT: Duration = Duration::from_secs(75 * 60);
+const CI_BUILD_POLL: Duration = Duration::from_secs(30);
+
+async fn fetch_ci_release(
+    db: &PgPool,
+    operation_id: Uuid,
+    ci: &ci_release::Source,
+) -> Result<(String, PathBuf), String> {
+    let root = control_root()?;
+    release_event(
+        db,
+        operation_id,
+        &format!("Resolving main of {} on GitHub.", ci.repository()),
+    )
+    .await;
+    let reference = ci.main_commit().await?;
+    release_event(
+        db,
+        operation_id,
+        &format!("Resolved main to release {}.", &reference[..12]),
+    )
+    .await;
+    let artifact = root.join("releases").join(&reference);
+    if is_complete_release(&artifact) {
+        stage_router_helper(&root, &artifact).await?;
+        release_event(
+            db,
+            operation_id,
+            "A verified central build already exists; reusing it.",
+        )
+        .await;
+        return Ok((reference, artifact));
+    }
+    let started = tokio::time::Instant::now();
+    let mut reported = None;
+    let build = loop {
+        match ci.build(&reference).await? {
+            ci_release::Build::Ready(build) => break build,
+            ci_release::Build::Pending(state) => {
+                if started.elapsed() > CI_BUILD_WAIT {
+                    return Err(format!("CI's build of this commit still {state}."));
+                }
+                if reported != Some(state) {
+                    release_event(db, operation_id, &format!("CI's build {state}; waiting.")).await;
+                    reported = Some(state);
+                }
+                tokio::time::sleep(CI_BUILD_POLL).await;
+            }
+        }
+    };
+    release_event(db, operation_id, "Downloading CI's build.").await;
+    let staging = root.join("releases").join(format!(".{reference}.staging"));
+    let _ = tokio::fs::remove_dir_all(&staging).await;
+    tokio::fs::create_dir_all(&staging)
+        .await
+        .map_err(|_| "Could not stage the central Eunha release.".to_string())?;
+    ci.download(&build, &staging).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(
+            staging.join("eunha"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .await
+        .map_err(|_| "Could not secure the central Eunha binary.".to_string())?;
+    }
+    stage_router_helper(&root, &staging).await?;
     tokio::fs::rename(&staging, &artifact)
         .await
         .map_err(|_| "Could not publish the central Eunha release.".to_string())?;
@@ -5314,6 +5393,9 @@ async fn automatic_release_reconciler(state: Shared) {
 }
 
 async fn latest_remote_ref() -> Option<String> {
+    if let Some(ci) = ci_release::Source::from_env().ok()? {
+        return ci.main_commit().await.ok();
+    }
     let (_, source) = central_paths().ok()?;
     let source = source.to_string_lossy().to_string();
     let output = tokio::process::Command::new("git")
