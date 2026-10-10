@@ -176,7 +176,7 @@ def ci_artifact(token, commit):
 
 def unpack_ci_build(token, artifact, release):
     """Unpack the control plane and its frontend into the release directory."""
-    archive = github(token, artifact["archive_download_url"], accept="application/octet-stream", timeout=600)
+    archive = github(token, artifact["archive_download_url"], timeout=600)
     digest = artifact.get("digest")
     if digest and digest.lower() != "sha256:" + hashlib.sha256(archive).hexdigest():
         raise RuntimeError("CI's release artifact does not match its digest")
