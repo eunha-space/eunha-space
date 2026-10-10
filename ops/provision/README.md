@@ -42,5 +42,5 @@ the ones eunha cares about.
 **It provisions no secrets.** The control plane reads its database URL,
 Cloudflare and SMTP credentials from its own LaunchAgent, which is host
 configuration and stays off the repository. A new host still needs that file,
-Temporal (`ops/temporal`), cloudflared's tunnel credentials, and the backup
+a Temporal server (see `ops/temporal`), cloudflared's tunnel credentials, and the backup
 job's storage credentials, all by hand.
