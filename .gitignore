@@ -11,5 +11,4 @@
 ops/temporal/.env.dev
 ops/temporal/.env.production
 
-/.control-releases
 __pycache__/

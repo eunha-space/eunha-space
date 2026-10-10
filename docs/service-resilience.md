@@ -11,10 +11,8 @@ booleans and a release identifier; no addresses, credentials, or driver errors.
 
 Background controllers are supervised and restarted after an unexpected exit.
 The admin console checks readiness every thirty seconds and displays a warning
-when dependency availability or background progress fails. On macOS run
-`python3 ops/install-health-watchdog.py` to install a minute-by-minute host check.
-It logs readiness changes to `~/Library/Logs/eunha-space/health.log` and reports
-failure through the launchd job's exit status. It does not restart the service
+when dependency availability or background progress fails. The host checks
+readiness every minute and logs its changes; it does not restart the service
 when a dependency fails. An external uptime monitor can probe `/health/ready`.
 
 API driver errors become fixed public messages with correlation IDs. Logs retain
@@ -27,43 +25,25 @@ Password hashing runs on blocking threads with at most four concurrent jobs.
 
 ## Deployment and rollback
 
-Run `./deploy.sh` on the production host (`ssh 100.113.148.66`, checkout
-`~/Git/eunha-space`). Under the deployment lock it pulls `origin/main` with
-`--ff-only` and requires a clean `main` checkout matching that remote commit.
-Local changes, local commits, and diverged branches prevent deployment without
-discarding work. It uses mise, runs unit tests, and builds into
-`.control-releases/<release-id>`.
-With `CONTROL_GITHUB_TOKEN` in the launchd environment it compiles nothing:
-it waits up to 75 minutes for the `Checks` run for that commit, whose
-`release` job builds on macOS arm64 only after the tests pass, then unpacks
-that run's `eunha-space-macos-arm64` artifact after checking its digest. It
-waits before taking the maintenance lease, so runtime releases are not held
-off for the CI run. A failed run, or an expired or incomplete artifact,
-stops the deployment before anything switches.
-The deployed executable and frontend assets are activated together through an
-atomic `current` link. Assets from the prior release remain available to open
-browser sessions. The original launchd environment is preserved, adding release,
-frontend, and project-root paths. Initial adoption snapshots the legacy binary
-and assets before rebuilding. Readiness must return the new release ID within
-two minutes; otherwise the prior executable, assets, and launchd configuration
-are restored and checked. After a successful switch, releases other than
-`current`, `previous`, and the five newest are deleted.
+A deploy activates what the `release` job of `Checks` built for a commit on
+`origin/main`, after its tests passed; nothing is compiled on the host. What it
+guarantees, and what the code relies on:
 
-A PostgreSQL maintenance lease blocks new runtime releases during the build and
-switch; admission is serialized with the lease transition using an advisory
-transaction lock. Existing runtime releases prevent deployment. The lease is
-renewed before switching and expires after thirty minutes if the deployer dies.
-The deployer also uses a local process lock. Database migrations must remain
-backward compatible with the prior binary: rollback does not undo migrations.
-The first adoption pauses automatic runtime deployment and restores its policies
-afterward, because the legacy binary predates admission guards. The active
-release check is repeated immediately before switching. Avoid manual runtime
-release requests during that initial cutover.
+- It refuses while a runtime release is running, and holds the
+  `control_plane_maintenance` lease for its length, so the control plane starts
+  none meanwhile.
+- The executable and frontend assets switch together, and the prior release's
+  assets stay available to browser sessions already open.
+- The new release must report its own release ID from `/health/ready` within
+  two minutes; otherwise the prior release is restored and checked.
+- The runtime router helper comes from the release (`ops/` beside the
+  executable), so every runtime release gets the one the control plane shipped
+  with.
 
 ## Verification
 
-`mise exec -- cargo test` runs unit checks, `mise run test-deploy` simulates
-activation and rollback, and `mise run test-integration` starts an isolated
+`mise exec -- cargo test` runs unit checks, `mise run test-ops` the ops
+scripts' tests, and `mise run test-integration` starts an isolated
 socket-only PostgreSQL cluster and runs the migrations and integration suite.
 Integration cases cover atomic rate budgets, interrupted transactions, retained
 data and seven-day scheduling, concurrent restore/purge, failed metric probes,

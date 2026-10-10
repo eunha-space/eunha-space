@@ -21,6 +21,6 @@ run = "docker compose --env-file ops/temporal/.env.dev -f ops/temporal/docker-co
 description = "Run failure and database tests in a disposable PostgreSQL cluster"
 run = "ops/tests/integration.sh"
 
-[tasks.test-deploy]
-description = "Verify deployment activation and rollback without touching services"
+[tasks.test-ops]
+description = "Run the ops scripts' tests"
 run = "python3 -m unittest discover -s ops/tests -p 'test_*.py'"

@@ -5081,12 +5081,9 @@ fn is_complete_release(artifact: &FsPath) -> bool {
 /// The router helper ships with the control plane rather than with Eunha, so
 /// every release, reused or new, gets the current one.
 async fn stage_router_helper(root: &FsPath, release: &FsPath) -> Result<(), String> {
-    tokio::fs::copy(
-        root.join("ops/eunha-runtime-router"),
-        release.join("eunha-runtime-router"),
-    )
-    .await
-    .map_err(|_| "Could not stage the runtime router helper.".to_string())?;
+    tokio::fs::copy(router_helper(root), release.join("eunha-runtime-router"))
+        .await
+        .map_err(|_| "Could not stage the runtime router helper.".to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -5098,6 +5095,16 @@ async fn stage_router_helper(root: &FsPath, release: &FsPath) -> Result<(), Stri
         .map_err(|_| "Could not secure the runtime router helper.".to_string())?;
     }
     Ok(())
+}
+
+/// The router helper in this control plane's own release, which CI packages
+/// beside the executable, or else the one in a checkout it runs from.
+fn router_helper(root: &FsPath) -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("ops/eunha-runtime-router")))
+        .filter(|helper| helper.is_file())
+        .unwrap_or_else(|| root.join("ops/eunha-runtime-router"))
 }
 
 async fn fetch_ci_release(

@@ -307,8 +307,8 @@ Its command output is never persisted. The control plane serializes the fleet:
 only one runtime can deploy at a time.
 
 A release runs inside the control-plane process that queued it and records a
-heartbeat every 15 seconds. If that process exits, for example because
-`deploy.sh` restarts it, the release stops. After two minutes without a
+heartbeat every 15 seconds. If that process exits, for example because a
+deploy restarts it, the release stops. After two minutes without a
 heartbeat, the release is marked failed, which frees the release lock. The
 failure says whether the release was still building, in which case the runtime
 was untouched and retrying is safe, or had begun rolling out, in which case the

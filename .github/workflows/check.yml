@@ -33,14 +33,14 @@ jobs:
           mise exec -- cargo test
       - name: PostgreSQL failure and concurrency tests
         run: mise run test-integration
-      - name: Deployment recovery tests
-        run: mise run test-deploy
+      - name: Ops script tests
+        run: mise run test-ops
       - name: Frontend
         run: mise run frontend
 
-  # The release deploy.sh activates, built for the Apple Silicon host rather
-  # than on it, and only for a commit whose checks passed. deploy.sh finds the
-  # artifact through this workflow's run for the commit it pulled.
+  # The release a deploy activates, built for the Apple Silicon host rather
+  # than on it, and only for a commit whose checks passed. A deploy finds the
+  # artifact through this workflow's run for the commit.
   release:
     needs: check
     if: github.event_name == 'push'
@@ -68,13 +68,16 @@ jobs:
             echo "::error::eunha-space links a library the host may not have"
             exit 1
           fi
-      # A tarball because the artifact's zip drops the executable bit.
+      # A tarball because the artifact's zip drops the executable bit. The
+      # runtime router helper goes with it: the control plane hands it to every
+      # runtime release it rolls out.
       - name: Package
         run: |
-          mkdir -p package/frontend
+          mkdir -p package/frontend package/ops
           cp target/release/eunha-space package/
           cp -R frontend/dist package/frontend/
-          tar -czf eunha-space-macos-arm64.tar.gz -C package eunha-space frontend
+          cp ops/eunha-runtime-router package/ops/
+          tar -czf eunha-space-macos-arm64.tar.gz -C package eunha-space frontend ops
       - uses: actions/upload-artifact@v4
         with:
           name: eunha-space-macos-arm64
