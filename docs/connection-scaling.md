@@ -46,8 +46,8 @@ the pool sizes say.
 `effective_cache_size` derived from the host's memory. This machine also runs
 the control plane, the tenant runtime, Redis, Temporal and unrelated sites, so
 `shared_buffers` takes 15% rather than the 25% a dedicated database host would.
-`ops/provision/provision.sh` sets these through `ALTER SYSTEM`, so
-`postgresql.auto.conf` owns them and `postgresql.conf` stays stock.
+They are the host's settings, in its `postgresql.conf`, not this repository's:
+the same PostgreSQL serves other databases on the host.
 
 **An idle tenant holds nothing.** `queue_idle_poll_seconds` is 300 and the
 pool's `idle_timeout_seconds` is 20, so a quiet loop's connection is reaped
@@ -100,7 +100,7 @@ re-parses when it is working.
 
 | Setting | Owner |
 | --- | --- |
-| `max_connections`, `shared_buffers`, `effective_cache_size` | `postgresql.auto.conf`, written by `ops/provision/provision.sh` |
+| `max_connections`, `shared_buffers`, `effective_cache_size` | The host's `postgresql.conf`, not the repository |
 | Pooler configuration | `ops/pgbouncer/pgbouncer.ini`, rendered by the same script |
 | Pool sizes, poll intervals, tenant URLs | `tenant_configuration` in PostgreSQL |
 | Pooler address, its client slots | The control-plane LaunchAgent, not the repository |
