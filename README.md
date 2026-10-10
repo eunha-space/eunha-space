@@ -285,14 +285,17 @@ builds an immutable bundle from its sibling `../eunha` checkout, including the
 release binary and built frontend, then transfers that bundle over SSH to the
 runtime host. Runtime hosts need neither a source checkout nor build tooling.
 
-With `CONTROL_GITHUB_TOKEN` set, the control plane does not compile at all: it
-resolves `main` on GitHub and downloads the `eunha-macos-arm64` artifact from
-Eunha's Release workflow run for that commit, waiting up to 75 minutes for the
-run to finish. A failed or expired run fails the release, untouched runtime
-and all. The token needs read access to the repository's Actions;
-`CONTROL_EUNHA_REPOSITORY` overrides `eunha-space/eunha`. Automatic
-deployment then polls GitHub rather than the sibling checkout, which this
-mode does not need.
+With `CONTROL_GITHUB_TOKEN` set, the control plane does not compile at all: a
+release deploys the newest commit on `main` whose Release workflow run
+succeeded, downloading that run's `eunha-macos-arm64` artifact. It never waits
+for a build in progress, so the release lock is held only for the download and
+rollout, and a commit pushed while a release is queued cannot change what it
+deploys. Automatic deployment polls for that same commit, so it queues a
+release only once CI has built something new; a commit whose build fails is
+skipped. An expired artifact fails the release with the runtime untouched. The
+token needs read access to the repository's Actions;
+`CONTROL_EUNHA_REPOSITORY` overrides `eunha-space/eunha`. This mode does not
+need the sibling checkout.
 The release operation runs the embedded migrations before an atomic `current`
 switch, health-checks the service, and restores the prior release on failure.
 Its command output is never persisted. The control plane serializes the fleet:

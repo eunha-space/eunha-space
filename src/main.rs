@@ -5044,11 +5044,6 @@ async fn stage_router_helper(root: &FsPath, release: &FsPath) -> Result<(), Stri
     Ok(())
 }
 
-/// How long a release waits for CI to finish building the commit it resolved.
-/// The Release job's own timeout is an hour; the rest covers its queue.
-const CI_BUILD_WAIT: Duration = Duration::from_secs(75 * 60);
-const CI_BUILD_POLL: Duration = Duration::from_secs(30);
-
 async fn fetch_ci_release(
     db: &PgPool,
     operation_id: Uuid,
@@ -5058,14 +5053,21 @@ async fn fetch_ci_release(
     release_event(
         db,
         operation_id,
-        &format!("Resolving main of {} on GitHub.", ci.repository()),
+        &format!("Finding the newest CI build of {} main.", ci.repository()),
     )
     .await;
-    let reference = ci.main_commit().await?;
+    let built = ci
+        .latest_build()
+        .await?
+        .ok_or_else(|| "CI has not built main successfully yet.".to_string())?;
+    let reference = built.reference.clone();
     release_event(
         db,
         operation_id,
-        &format!("Resolved main to release {}.", &reference[..12]),
+        &format!(
+            "Resolved CI's newest build to release {}.",
+            &reference[..12]
+        ),
     )
     .await;
     let artifact = root.join("releases").join(&reference);
@@ -5079,23 +5081,7 @@ async fn fetch_ci_release(
         .await;
         return Ok((reference, artifact));
     }
-    let started = tokio::time::Instant::now();
-    let mut reported = None;
-    let build = loop {
-        match ci.build(&reference).await? {
-            ci_release::Build::Ready(build) => break build,
-            ci_release::Build::Pending(state) => {
-                if started.elapsed() > CI_BUILD_WAIT {
-                    return Err(format!("CI's build of this commit still {state}."));
-                }
-                if reported != Some(state) {
-                    release_event(db, operation_id, &format!("CI's build {state}; waiting.")).await;
-                    reported = Some(state);
-                }
-                tokio::time::sleep(CI_BUILD_POLL).await;
-            }
-        }
-    };
+    let build = ci.artifact(&built).await?;
     release_event(db, operation_id, "Downloading CI's build.").await;
     let staging = root.join("releases").join(format!(".{reference}.staging"));
     let _ = tokio::fs::remove_dir_all(&staging).await;
@@ -5393,8 +5379,11 @@ async fn automatic_release_reconciler(state: Shared) {
 }
 
 async fn latest_remote_ref() -> Option<String> {
+    // With CI builds, the newest built commit rather than the head of main,
+    // so automatic deployment queues a release only once there is one to
+    // download.
     if let Some(ci) = ci_release::Source::from_env().ok()? {
-        return ci.main_commit().await.ok();
+        return Some(ci.latest_build().await.ok()??.reference);
     }
     let (_, source) = central_paths().ok()?;
     let source = source.to_string_lossy().to_string();

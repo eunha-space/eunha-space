@@ -19,11 +19,12 @@ pub struct Source {
     client: reqwest::Client,
 }
 
-/// Where CI's build of a commit stands.
+/// The newest commit on `main` that the Release workflow built successfully.
 #[derive(Debug, PartialEq)]
-pub enum Build {
-    Pending(&'static str),
-    Ready(Artifact),
+pub struct Built {
+    pub reference: String,
+    run_id: u64,
+    html_url: String,
 }
 
 #[derive(Debug, PartialEq, Deserialize)]
@@ -41,8 +42,7 @@ pub struct Artifact {
 #[derive(Debug, Deserialize)]
 struct Run {
     id: u64,
-    status: String,
-    conclusion: Option<String>,
+    head_sha: String,
     html_url: String,
 }
 
@@ -113,54 +113,34 @@ impl Source {
             .map_err(|_| "GitHub's answer could not be read.".to_string())
     }
 
-    /// The commit at the head of `main`.
-    pub async fn main_commit(&self) -> Result<String, String> {
-        let response = self
-            .api("commits/main")
-            .header("Accept", "application/vnd.github.sha")
-            .send()
-            .await
-            .map_err(|_| "GitHub could not be reached.".to_string())?;
-        if !response.status().is_success() {
-            return Err(format!("GitHub answered {}.", response.status().as_u16()));
-        }
-        let reference = response
-            .text()
-            .await
-            .map_err(|_| "GitHub's answer could not be read.".to_string())?
-            .trim()
-            .to_owned();
-        if !crate::is_git_sha(&reference) {
-            return Err("GitHub named an invalid main commit.".into());
-        }
-        Ok(reference)
-    }
-
-    pub async fn build(&self, reference: &str) -> Result<Build, String> {
+    /// Releases deploy this rather than the head of `main`, so they never wait
+    /// for a build in progress, and a commit pushed while one is queued cannot
+    /// change what it deploys.
+    pub async fn latest_build(&self) -> Result<Option<Built>, String> {
         let runs: Runs = self
             .json(&format!(
-                "actions/workflows/{WORKFLOW}/runs?head_sha={reference}&event=push&per_page=1"
+                "actions/workflows/{WORKFLOW}/runs?branch=main&event=push&status=success&per_page=1"
             ))
             .await?;
-        let run = match run_state(runs.workflow_runs.first())? {
-            Ok(run) => run,
-            Err(pending) => return Ok(Build::Pending(pending)),
-        };
+        newest(runs.workflow_runs)
+    }
+
+    pub async fn artifact(&self, built: &Built) -> Result<Artifact, String> {
         let artifacts: Artifacts = self
             .json(&format!(
                 "actions/runs/{}/artifacts?name={ARTIFACT}",
-                run.id
+                built.run_id
             ))
             .await?;
         match artifacts.artifacts.into_iter().next() {
             Some(artifact) if artifact.expired => Err(format!(
                 "CI's build has expired; re-run the Release workflow: {}",
-                run.html_url
+                built.html_url
             )),
-            Some(artifact) => Ok(Build::Ready(artifact)),
+            Some(artifact) => Ok(artifact),
             None => Err(format!(
                 "CI's build uploaded no {ARTIFACT} artifact: {}",
-                run.html_url
+                built.html_url
             )),
         }
     }
@@ -243,21 +223,18 @@ impl Source {
     }
 }
 
-/// The latest run for a commit, or why there is nothing to download yet.
-fn run_state(run: Option<&Run>) -> Result<Result<&Run, &'static str>, String> {
-    let Some(run) = run else {
-        return Ok(Err("has not started"));
+fn newest(runs: Vec<Run>) -> Result<Option<Built>, String> {
+    let Some(run) = runs.into_iter().next() else {
+        return Ok(None);
     };
-    match (run.status.as_str(), run.conclusion.as_deref()) {
-        ("completed", Some("success")) => Ok(Ok(run)),
-        ("completed", conclusion) => Err(format!(
-            "CI's build ended {}: {}",
-            conclusion.unwrap_or("without a conclusion"),
-            run.html_url
-        )),
-        ("in_progress", _) => Ok(Err("is in progress")),
-        _ => Ok(Err("is queued")),
+    if !crate::is_git_sha(&run.head_sha) {
+        return Err("GitHub named an invalid commit.".into());
     }
+    Ok(Some(Built {
+        reference: run.head_sha,
+        run_id: run.id,
+        html_url: run.html_url,
+    }))
 }
 
 fn digest_matches(expected: &str, actual: &[u8]) -> bool {
@@ -285,35 +262,24 @@ fn is_repository(value: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn run(status: &str, conclusion: Option<&str>) -> Run {
-        Run {
-            id: 1,
-            status: status.into(),
-            conclusion: conclusion.map(Into::into),
-            html_url: "https://github.com/o/r/actions/runs/1".into(),
-        }
-    }
-
     #[test]
-    fn only_a_successful_run_is_downloaded() {
-        assert_eq!(run_state(None).unwrap().unwrap_err(), "has not started");
-        let queued = run("queued", None);
-        assert_eq!(run_state(Some(&queued)).unwrap().unwrap_err(), "is queued");
-        let running = run("in_progress", None);
-        assert_eq!(
-            run_state(Some(&running)).unwrap().unwrap_err(),
-            "is in progress"
-        );
-        let done = run("completed", Some("success"));
-        assert_eq!(run_state(Some(&done)).unwrap().unwrap().id, 1);
-    }
-
-    #[test]
-    fn a_failed_run_stops_the_release_and_links_it() {
-        let failed = run("completed", Some("failure"));
-        let message = run_state(Some(&failed)).unwrap_err();
-        assert!(message.contains("failure"), "{message}");
-        assert!(message.contains("/actions/runs/1"), "{message}");
+    fn the_newest_successful_run_names_the_release() {
+        assert_eq!(newest(vec![]).unwrap(), None);
+        let sha = "a609604ee461a0c8d3b1e2f4a5b6c7d8e9f0a1b2";
+        let built = newest(vec![Run {
+            id: 7,
+            head_sha: sha.into(),
+            html_url: "u".into(),
+        }])
+        .unwrap()
+        .unwrap();
+        assert_eq!((built.reference.as_str(), built.run_id), (sha, 7));
+        let invalid = vec![Run {
+            id: 7,
+            head_sha: "main".into(),
+            html_url: "u".into(),
+        }];
+        assert!(newest(invalid).is_err());
     }
 
     #[test]
