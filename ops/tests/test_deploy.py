@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import plistlib
 import tarfile
@@ -187,6 +188,23 @@ class DeploymentTests(unittest.TestCase):
         with answers(failed), patch.object(deploy.time, "sleep"):
             with self.assertRaisesRegex(RuntimeError, "failure"):
                 deploy.ci_artifact("token", "abc")
+
+    def test_pruning_keeps_current_previous_and_the_newest_releases(self):
+        names = [f"r{n}" for n in range(9)]
+        for n, name in enumerate(names):
+            release = self.releases / name
+            release.mkdir()
+            (release / "release-id").write_text(name)
+            (release / "eunha-space").write_text("binary")
+            (release / "eunha-space").chmod(0o555)
+            os.utime(release, (n, n))
+        (self.releases / "current").symlink_to(self.releases / "r8")
+        # previous points at an old release, which must survive.
+        (self.releases / "previous").symlink_to(self.releases / "r1")
+        (self.releases / "deploy.lock").write_text("")
+        deploy.prune_releases()
+        left = sorted(path.name for path in self.releases.iterdir())
+        self.assertEqual(left, ["current", "deploy.lock", "previous", "r1", "r4", "r5", "r6", "r7", "r8"])
 
     def test_without_a_token_the_host_builds(self):
         self.assertIsNone(deploy.github_token(self.original))

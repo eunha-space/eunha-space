@@ -32,6 +32,8 @@ TARBALL = ARTIFACT + ".tar.gz"
 # CI's checks and release build together, plus a queue.
 CI_WAIT_SECONDS = 75 * 60
 CI_POLL_SECONDS = 30
+# Releases kept besides current and previous, for a manual rollback.
+RELEASES_KEPT = 5
 
 
 def run(args, **kwargs):
@@ -189,6 +191,19 @@ def unpack_ci_build(token, artifact, release):
         raise RuntimeError("CI's release artifact is incomplete")
 
 
+def prune_releases():
+    """Remove all but current, previous and the newest RELEASES_KEPT releases."""
+    in_use = {link.resolve() for link in (CURRENT, RELEASES / "previous") if link.is_symlink()}
+    releases = sorted(
+        (path for path in RELEASES.iterdir()
+         if path.is_dir() and not path.is_symlink() and (path / "release-id").is_file()),
+        key=lambda path: path.stat().st_mtime, reverse=True,
+    )
+    for release in releases[RELEASES_KEPT:]:
+        if release.resolve() not in in_use:
+            shutil.rmtree(release, ignore_errors=True)
+
+
 def main():
     with PLIST.open("rb") as source:
         original = plistlib.load(source)
@@ -261,7 +276,7 @@ COMMIT;""")
                 if asset.is_file() and not destination.exists():
                     shutil.copy2(asset, destination)
         (release / "release-id").write_text(release_id)
-        # Immutable files; retained releases are not implicitly deleted.
+        # Immutable files. Old releases are pruned only after a successful switch.
         for file in release.rglob("*"):
             if file.is_file():
                 file.chmod(0o555 if file.name == "eunha-space" else 0o444)
@@ -289,6 +304,11 @@ COMMIT;""")
             raise RuntimeError("New release did not become ready")
         atomic_link(previous, RELEASES / "previous")
         print(f"Deployed {release_id}; readiness passed.")
+        try:
+            prune_releases()
+        except OSError:
+            # The new release is live; leftovers only cost disk.
+            pass
     except BaseException:
         if switched:
             atomic_link(previous)

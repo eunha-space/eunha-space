@@ -46,7 +46,8 @@ browser sessions. The original launchd environment is preserved, adding release,
 frontend, and project-root paths. Initial adoption snapshots the legacy binary
 and assets before rebuilding. Readiness must return the new release ID within
 two minutes; otherwise the prior executable, assets, and launchd configuration
-are restored and checked. Releases are retained rather than implicitly deleted.
+are restored and checked. After a successful switch, releases other than
+`current`, `previous`, and the five newest are deleted.
 
 A PostgreSQL maintenance lease blocks new runtime releases during the build and
 switch; admission is serialized with the lease transition using an advisory

@@ -4734,7 +4734,7 @@ async fn run_runtime_release(
             )
             .await;
             let _ = sqlx::query("UPDATE runtimes SET deployed_ref=COALESCE($1,deployed_ref),release_checked_at=now() WHERE id=$2")
-                .bind(reference).bind(runtime_id).execute(&state.db).await;
+                .bind(&reference).bind(runtime_id).execute(&state.db).await;
             let _ = sqlx::query(
                 "UPDATE operations SET status='succeeded',finished_at=now() WHERE id=$1",
             )
@@ -4747,6 +4747,9 @@ async fn run_runtime_release(
             .bind(deployment_id)
             .execute(&state.db)
             .await;
+            if let Ok(root) = control_root() {
+                prune_central_releases(&root, &reference).await;
+            }
             release_event(&state.db, operation_id, "Release completed successfully.").await;
         }
         Err(message) => {
@@ -5014,6 +5017,59 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
         .await
         .map_err(|_| "Could not publish the central Eunha release.".to_string())?;
     Ok((reference, artifact))
+}
+
+/// Old releases kept besides the ones in use, so a few rollback targets stay
+/// at hand without every deploy adding another ~90 MB that is never removed.
+const RELEASES_KEPT: usize = 5;
+
+/// Central builds to delete: everything but `in_use` and the newest
+/// `RELEASES_KEPT`, oldest first. Only commit-named directories are builds.
+fn central_releases_to_prune(
+    mut builds: Vec<(String, std::time::SystemTime)>,
+    in_use: &str,
+) -> Vec<String> {
+    builds.retain(|(name, _)| is_git_sha(name) && name != in_use);
+    builds.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    builds
+        .into_iter()
+        .skip(RELEASES_KEPT)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// A CI build can be downloaded again and a local one rebuilt, so the central
+/// copies are only a cache; failures here never fail the release.
+async fn prune_central_releases(root: &FsPath, in_use: &str) {
+    let releases = root.join("releases");
+    let Ok(mut entries) = tokio::fs::read_dir(&releases).await else {
+        return;
+    };
+    let mut builds = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        if metadata.is_dir()
+            && let Ok(modified) = metadata.modified()
+        {
+            builds.push((entry.file_name().to_string_lossy().into_owned(), modified));
+        }
+    }
+    for name in central_releases_to_prune(builds, in_use) {
+        let _ = tokio::fs::remove_dir_all(releases.join(name)).await;
+    }
+}
+
+/// Runs on the runtime host, after a successful switch. Keeps what `current`
+/// and both router slots point at, and the newest `RELEASES_KEPT` releases;
+/// removes the rest, including the hidden superseded and stale copies earlier
+/// releases set aside. Releases are serialized, so no staging is in flight.
+fn runtime_prune_script(runtime_root: &FsPath) -> String {
+    format!(
+        "set -u; cd {}/releases || exit 0; keep=$(for link in ../current ../slots/blue ../slots/green; do if [ -L \"$link\" ]; then basename \"$(readlink \"$link\")\"; fi; done; ls -t | grep -v '^\\.' | head -n {RELEASES_KEPT}); [ -n \"$keep\" ] || exit 0; ls -A | grep -vxF \"$keep\" | while IFS= read -r old; do rm -rf -- \"./$old\"; done",
+        shell_quote(&runtime_root.to_string_lossy()),
+    )
 }
 
 fn is_complete_release(artifact: &FsPath) -> bool {
@@ -5315,6 +5371,18 @@ async fn async_deploy_release(
         "Runtime switch and post-switch health check completed.",
     )
     .await;
+    let prune = runtime_prune_script(runtime_root);
+    if run_runtime_command(host, local_runtime, "Old release cleanup", &prune)
+        .await
+        .is_err()
+    {
+        release_event(
+            db,
+            operation_id,
+            "Old runtime releases could not be removed; the release itself is unaffected.",
+        )
+        .await;
+    }
     Ok(reference)
 }
 
@@ -6021,6 +6089,57 @@ mod tests {
                     .into()
             )
         );
+    }
+
+    #[test]
+    fn central_pruning_keeps_the_release_in_use_and_the_newest_builds() {
+        let at = |seconds| std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds);
+        let sha = |n: u64| format!("{n:040x}");
+        // Eight builds, the oldest of which is the one being deployed.
+        let mut builds: Vec<_> = (1..=8).map(|n| (sha(n), at(n))).collect();
+        builds.push((".staging-or-anything-else".into(), at(0)));
+        let pruned = super::central_releases_to_prune(builds, &sha(1));
+        // 1 is in use and 8..=4 are the newest five; 3 and 2 go.
+        assert_eq!(pruned, vec![sha(3), sha(2)]);
+    }
+
+    #[test]
+    fn runtime_pruning_keeps_linked_and_recent_releases() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("eunha-prune-{}", Uuid::new_v4()));
+        let releases = root.join("releases");
+        std::fs::create_dir_all(root.join("slots")).unwrap();
+        // r0 is oldest. Pin modification times so `ls -t` has an order.
+        for n in 0..9 {
+            let release = releases.join(format!("r{n}"));
+            std::fs::create_dir_all(&release).unwrap();
+            let time = std::process::Command::new("/usr/bin/touch")
+                .args([
+                    "-t",
+                    &format!("2026010100{n:02}"),
+                    &release.to_string_lossy(),
+                ])
+                .status()
+                .unwrap();
+            assert!(time.success());
+        }
+        std::fs::create_dir_all(releases.join(".r5.superseded-x")).unwrap();
+        symlink(releases.join("r8"), root.join("current")).unwrap();
+        symlink(releases.join("r8"), root.join("slots/blue")).unwrap();
+        // The idle slot still points at an old release, which must survive.
+        symlink(releases.join("r0"), root.join("slots/green")).unwrap();
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", &super::runtime_prune_script(&root)])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let mut left: Vec<_> = std::fs::read_dir(&releases)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(left, ["r0", "r4", "r5", "r6", "r7", "r8"]);
     }
 
     #[test]

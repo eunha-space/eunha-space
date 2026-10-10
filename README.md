@@ -298,6 +298,11 @@ token needs read access to the repository's Actions;
 need the sibling checkout.
 The release operation runs the embedded migrations before an atomic `current`
 switch, health-checks the service, and restores the prior release on failure.
+After a successful release, the runtime keeps the releases its `current` link
+and both router slots point at plus the five newest, and deletes the rest,
+including copies set aside by earlier releases. The control plane likewise
+keeps the build it just deployed and the five newest others in its central
+`releases/` cache. A failed cleanup is logged and never fails the release.
 Its command output is never persisted. The control plane serializes the fleet:
 only one runtime can deploy at a time.
 
