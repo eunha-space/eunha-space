@@ -127,12 +127,14 @@ if [[ "$MODE" == bootstrap ]]; then
   /usr/bin/plutil -insert KeepAlive -bool true "$ROUTER_PLIST"
   /usr/bin/plutil -insert ProcessType -string Background "$ROUTER_PLIST"
   launchctl bootout "gui/$UID_N/$BASE_LABEL" 2>/dev/null || true
-  # Otherwise launchd loads it again at the next login, beside the slots.
-  rm -f "$HOME/Library/LaunchAgents/$BASE_LABEL.plist"
   launchctl bootstrap "gui/$UID_N" "$ROUTER_PLIST"
   printf '%s\n' blue >"$STATE"
   PHASE=post_switch_health
   wait_ready "$STABLE"
+  # Only now that the router serves: launchd would load the runtime's original
+  # job again at the next login, beside the slots, but until here its plist is
+  # the way back to it.
+  rm -f "$HOME/Library/LaunchAgents/$BASE_LABEL.plist"
   exit 0
 fi
 
