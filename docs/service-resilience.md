@@ -33,6 +33,13 @@ Run `./deploy.sh` on the production host (`ssh 100.113.148.66`, checkout
 Local changes, local commits, and diverged branches prevent deployment without
 discarding work. It uses mise, runs unit tests, and builds into
 `.control-releases/<release-id>`.
+With `CONTROL_GITHUB_TOKEN` in the launchd environment it compiles nothing:
+it waits up to 75 minutes for the `Checks` run for that commit, whose
+`release` job builds on macOS arm64 only after the tests pass, then unpacks
+that run's `eunha-space-macos-arm64` artifact after checking its digest. It
+waits before taking the maintenance lease, so runtime releases are not held
+off for the CI run. A failed run, or an expired or incomplete artifact,
+stops the deployment before anything switches.
 The deployed executable and frontend assets are activated together through an
 atomic `current` link. Assets from the prior release remain available to open
 browser sessions. The original launchd environment is preserved, adding release,

@@ -4,6 +4,8 @@ Never print the service environment or captured database/tool error output.
 """
 import datetime
 import glob
+import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -12,15 +14,24 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 LABEL = "space.eunha.control-plane"
 PLIST = Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
 RELEASES = ROOT / ".control-releases"
 CURRENT = RELEASES / "current"
+REPOSITORY = "eunha-space/space"
+WORKFLOW = "check.yml"
+ARTIFACT = "eunha-space-macos-arm64"
+TARBALL = ARTIFACT + ".tar.gz"
+# CI's checks and release build together, plus a queue.
+CI_WAIT_SECONDS = 75 * 60
+CI_POLL_SECONDS = 30
 
 
 def run(args, **kwargs):
@@ -121,6 +132,63 @@ def wait_ready(url, expected, seconds=120, legacy=False):
     return False
 
 
+def github_token(config):
+    """With CONTROL_GITHUB_TOKEN set, releases come from CI instead of this host."""
+    token = config.get("EnvironmentVariables", {}).get("CONTROL_GITHUB_TOKEN") or os.environ.get("CONTROL_GITHUB_TOKEN")
+    return (token or "").strip() or None
+
+
+def github(token, url, accept="application/vnd.github+json", timeout=30):
+    request = urllib.request.Request(url, headers={
+        "Accept": accept, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "eunha-space-deploy",
+    })
+    # Unredirected, so the token stays on api.github.com when an artifact
+    # download redirects to blob storage.
+    request.add_unredirected_header("Authorization", "Bearer " + token)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read()
+
+
+def ci_artifact(token, commit):
+    """Wait for CI's run for the commit; return its release artifact."""
+    api = f"https://api.github.com/repos/{REPOSITORY}/actions"
+    deadline = time.monotonic() + CI_WAIT_SECONDS
+    reported = None
+    while True:
+        runs = json.loads(github(token, f"{api}/workflows/{WORKFLOW}/runs?head_sha={commit}&event=push&per_page=1"))["workflow_runs"]
+        run_ = runs[0] if runs else None
+        if run_ and run_["status"] == "completed":
+            if run_["conclusion"] != "success":
+                raise RuntimeError(f"CI ended {run_['conclusion']}: {run_['html_url']}")
+            break
+        state = run_["status"] if run_ else "not started"
+        if time.monotonic() > deadline:
+            raise RuntimeError(f"CI is still {state}")
+        if state != reported:
+            print(f"Waiting for CI ({state}).", flush=True)
+            reported = state
+        time.sleep(CI_POLL_SECONDS)
+    artifacts = json.loads(github(token, f"{api}/runs/{run_['id']}/artifacts?name={ARTIFACT}"))["artifacts"]
+    if not artifacts or artifacts[0]["expired"]:
+        raise RuntimeError(f"CI's release artifact is missing or expired: {run_['html_url']}")
+    return artifacts[0]
+
+
+def unpack_ci_build(token, artifact, release):
+    """Unpack the control plane and its frontend into the release directory."""
+    archive = github(token, artifact["archive_download_url"], accept="application/octet-stream", timeout=600)
+    digest = artifact.get("digest")
+    if digest and digest.lower() != "sha256:" + hashlib.sha256(archive).hexdigest():
+        raise RuntimeError("CI's release artifact does not match its digest")
+    with zipfile.ZipFile(io.BytesIO(archive)) as outer:
+        tarball = outer.read(TARBALL)
+    with tarfile.open(fileobj=io.BytesIO(tarball), mode="r:gz") as inner:
+        members = [m for m in inner.getmembers() if m.name == "eunha-space" or m.name.startswith("frontend/dist/")]
+        inner.extractall(release, members=members, filter="data")
+    if not (release / "eunha-space").is_file() or not (release / "frontend/dist/index.html").is_file():
+        raise RuntimeError("CI's release artifact is incomplete")
+
+
 def main():
     with PLIST.open("rb") as source:
         original = plistlib.load(source)
@@ -130,10 +198,17 @@ def main():
     with (RELEASES / "deploy.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         pull_main()
-        deploy(original)
+        # Wait for CI before taking the maintenance lease, which would
+        # otherwise hold runtime releases off for the whole CI run.
+        token = github_token(original)
+        artifact = None
+        if token:
+            commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+            artifact = ci_artifact(token, commit)
+        deploy(original, artifact)
 
 
-def deploy(original):
+def deploy(original, artifact=None):
     # Bootstrap this additive table before the first hardened binary is active.
     sql(original, (ROOT / "migrations/043_control_plane_maintenance.sql").read_text())
     sql(original, """BEGIN;
@@ -167,14 +242,18 @@ COMMIT;""")
             shutil.copytree(ROOT / "frontend/dist", legacy / "frontend/dist")
             (legacy / "release-id").write_text("legacy")
             previous = legacy
-        env = os.environ.copy()
-        env["CI"] = "true"
-        run(["mise", "exec", "--", "pnpm", "--dir", "frontend", "install", "--frozen-lockfile"], cwd=ROOT, env=env)
-        run(["mise", "exec", "--", "pnpm", "exec", "tsc", "-b"], cwd=ROOT / "frontend", env=env)
-        run(["mise", "exec", "--", "pnpm", "exec", "vite", "build", "--outDir", str(release / "frontend/dist")], cwd=ROOT / "frontend", env=env)
-        run(["mise", "exec", "--", "cargo", "test"], cwd=ROOT)
-        run(["mise", "exec", "--", "cargo", "build", "--release"], cwd=ROOT)
-        shutil.copy2(ROOT / "target/release/eunha-space", release / "eunha-space")
+        if artifact:
+            # CI ran the tests and built this commit; nothing compiles here.
+            unpack_ci_build(github_token(original), artifact, release)
+        else:
+            env = os.environ.copy()
+            env["CI"] = "true"
+            run(["mise", "exec", "--", "pnpm", "--dir", "frontend", "install", "--frozen-lockfile"], cwd=ROOT, env=env)
+            run(["mise", "exec", "--", "pnpm", "exec", "tsc", "-b"], cwd=ROOT / "frontend", env=env)
+            run(["mise", "exec", "--", "pnpm", "exec", "vite", "build", "--outDir", str(release / "frontend/dist")], cwd=ROOT / "frontend", env=env)
+            run(["mise", "exec", "--", "cargo", "test"], cwd=ROOT)
+            run(["mise", "exec", "--", "cargo", "build", "--release"], cwd=ROOT)
+            shutil.copy2(ROOT / "target/release/eunha-space", release / "eunha-space")
         old_assets = previous / "frontend/dist/assets"
         if old_assets.is_dir():
             for asset in old_assets.iterdir():

@@ -1,10 +1,15 @@
+import hashlib
 import importlib.util
+import io
+import json
 from pathlib import Path
 import plistlib
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
+import zipfile
 
 spec = importlib.util.spec_from_file_location("deploy", Path(__file__).parents[1] / "deploy-control-plane.py")
 deploy = importlib.util.module_from_spec(spec)
@@ -124,6 +129,67 @@ class DeploymentTests(unittest.TestCase):
         self.assertFalse((self.releases / "current").exists())
         self.assertEqual((self.assets / "index.html").read_text(), "old page")
         self.assertIn("deploy_until=NULL", self.sql[-1])
+
+    def ci_archive(self, extra=()):
+        package = io.BytesIO()
+        with tarfile.open(fileobj=package, mode="w:gz") as tar:
+            for name, content in [("eunha-space", b"ci binary"), ("frontend/dist/index.html", b"ci page"), ("frontend/dist/assets/ci.js", b"ci asset"), *extra]:
+                info = tarfile.TarInfo(name)
+                info.size = len(content)
+                tar.addfile(info, io.BytesIO(content))
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as outer:
+            outer.writestr(deploy.TARBALL, package.getvalue())
+        return archive.getvalue()
+
+    def test_ci_build_replaces_the_local_build(self):
+        archive = self.ci_archive()
+        artifact = {"archive_download_url": "https://api.github.com/a/zip", "digest": "sha256:" + hashlib.sha256(archive).hexdigest()}
+        self.original["EnvironmentVariables"]["CONTROL_GITHUB_TOKEN"] = "token"
+        with patch.object(deploy, "sql", side_effect=lambda config, statement: self.sql.append(statement) or ""), patch.object(deploy, "run") as command, patch.object(deploy, "github", return_value=archive), patch.object(deploy.subprocess, "check_output", return_value="abc123\n"), patch.object(deploy, "restart"), patch.object(deploy, "wait_ready", return_value=True):
+            deploy.deploy(self.original, artifact)
+        command.assert_not_called()
+        current = self.releases / "current"
+        self.assertEqual((current / "eunha-space").read_text(), "ci binary")
+        self.assertEqual((current / "frontend/dist/index.html").read_text(), "ci page")
+        # Assets the previous release served stay available to open sessions.
+        self.assertTrue((current / "frontend/dist/assets/old.js").exists())
+
+    def test_ci_build_with_the_wrong_digest_never_switches(self):
+        archive = self.ci_archive()
+        artifact = {"archive_download_url": "https://api.github.com/a/zip", "digest": "sha256:" + "0" * 64}
+        self.original["EnvironmentVariables"]["CONTROL_GITHUB_TOKEN"] = "token"
+        with patch.object(deploy, "sql", side_effect=lambda config, statement: self.sql.append(statement) or ""), patch.object(deploy, "github", return_value=archive), patch.object(deploy.subprocess, "check_output", return_value="abc123\n"), patch.object(deploy, "restart") as restart:
+            with self.assertRaisesRegex(RuntimeError, "digest"):
+                deploy.deploy(self.original, artifact)
+            restart.assert_not_called()
+        self.assertFalse((self.releases / "current").exists())
+
+    def test_ci_build_unpacks_only_the_release_files(self):
+        archive = self.ci_archive(extra=[("../escape", b"x"), ("notes.txt", b"x")])
+        release = self.root / "release"
+        release.mkdir()
+        with patch.object(deploy, "github", return_value=archive):
+            deploy.unpack_ci_build("token", {"archive_download_url": "u"}, release)
+        self.assertEqual(sorted(p.name for p in release.iterdir()), ["eunha-space", "frontend"])
+        self.assertFalse((self.root / "escape").exists())
+
+    def test_ci_waits_for_its_run_and_refuses_a_failed_one(self):
+        def answers(*responses):
+            return patch.object(deploy, "github", side_effect=[json.dumps(r).encode() for r in responses])
+        running = {"workflow_runs": [{"id": 7, "status": "in_progress", "conclusion": None, "html_url": "u"}]}
+        passed = {"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "success", "html_url": "u"}]}
+        failed = {"workflow_runs": [{"id": 7, "status": "completed", "conclusion": "failure", "html_url": "u"}]}
+        artifact = {"artifacts": [{"expired": False, "archive_download_url": "zip"}]}
+        with answers({"workflow_runs": []}, running, passed, artifact), patch.object(deploy.time, "sleep") as sleep:
+            self.assertEqual(deploy.ci_artifact("token", "abc")["archive_download_url"], "zip")
+        self.assertEqual(sleep.call_count, 2)
+        with answers(failed), patch.object(deploy.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "failure"):
+                deploy.ci_artifact("token", "abc")
+
+    def test_without_a_token_the_host_builds(self):
+        self.assertIsNone(deploy.github_token(self.original))
 
 
 if __name__ == "__main__":
