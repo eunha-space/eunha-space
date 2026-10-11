@@ -13,11 +13,13 @@ type AggregateHistory = {
   samples: { sampled_at: number; reporting_tenants: number; rate_reporting_tenants: number; database_bytes: number | null;
     connections: number | null; active_connections: number | null; rate: number | null }[];
 };
+const oneDecimal = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
 export function formatBytes(value: number) {
   const unit = value >= 1024 ** 3 ? 3 : value >= 1024 ** 2 ? 2 : value >= 1024 ? 1 : 0;
-  return `${(value / 1024 ** unit).toLocaleString(undefined, { maximumFractionDigits: 1 })} ${["B", "KiB", "MiB", "GiB"][unit]}`;
+  return `${oneDecimal.format(value / 1024 ** unit)} ${["B", "KiB", "MiB", "GiB"][unit]}`;
 }
-const number = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 1 });
+export const formatNumber = (value: number) => oneDecimal.format(value);
+const number = formatNumber;
 
 export function AggregateUsage({ instanceId, readings, expected, now, loaded, minutes }: {
   minutes: number; instanceId?: string; readings: UsageReading[]; expected: number; now: number; loaded: boolean;
@@ -72,6 +74,6 @@ export function AggregateUsage({ instanceId, readings, expected, now, loaded, mi
         points={(history?.samples ?? []).map(row => ({ at: row.sampled_at, value: row[metric.field], note: `${metric.field === "rate" ? row.rate_reporting_tenants : row.reporting_tenants} / ${eligible} tenants reporting` }))}
         format={metric.format} color={metric.color} />)}
     </div>
-    <p className="text-muted-foreground text-xs">Selected range, with resolution adjusted for longer periods. Cards sum fresh reporting tenants and mark partial coverage. Graphs sum reporting tenants; hover or focus a point for coverage. Missing all readings or sampling pauses produce gaps. Ready, failed, and retained tenants are included.</p>
+    <p className="text-muted-foreground text-xs">Selected range, with resolution adjusted for longer periods. Cards sum fresh reporting tenants and mark partial coverage. Graphs sum reporting tenants; hover a graph or use its arrow keys for coverage. Missing all readings or sampling pauses produce gaps. Ready, failed, and retained tenants are included.</p>
   </div>;
 }

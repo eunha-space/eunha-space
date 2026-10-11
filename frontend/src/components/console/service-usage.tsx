@@ -10,7 +10,8 @@ type ServicePoint = {
   in_flight: number | null; pool: number | null; pool_idle: number | null;
 };
 type History = { eligible_tenants: number; samples: ServicePoint[] };
-const number = (value: number) => value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+const twoDecimals = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
+const number = (value: number) => twoDecimals.format(value);
 const metrics = [
   { field: "request_rate", title: "Service requests / second", format: number },
   { field: "error_percent", title: "Service server errors (5xx)", format: (value: number) => `${number(value)}%` },

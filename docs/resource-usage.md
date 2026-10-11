@@ -12,8 +12,11 @@ The latest persisted readings are restored into the cache after service restart.
 Missing readings and collection pauses longer than thirty seconds break graph
 lines. Cached samples are not added twice.
 
-The page includes fleet-wide and hosting-server-wide metric cards and range-selectable
-charts, alongside individual tenant trends. A hosting server groups all runtimes
+The page has three subpages, each fetching and drawing only its own scope:
+`/admin/usage` for the fleet, `/admin/usage/servers/<instance UUID>` for one
+hosting server, and `/admin/usage/tenants/<tenant UUID>` for one tenant's trends
+with the filterable live table of every tenant. Without an ID, the server page
+shows the first server by name and the tenant page the largest database. A hosting server groups all runtimes
 with the same instance ID; it is the physical instance shown on the Instances
 page. These totals describe its tenants' PostgreSQL usage, not total host CPU or
 RAM. The authenticated `/api/usage/history` endpoint returns fleet history;
@@ -23,7 +26,7 @@ tenant placement and eligibility, so moving a tenant changes its history's scope
 Aggregate history takes the latest sample per tenant in each ten-second bucket.
 Transaction rates are calculated per tenant before summing, and counter resets
 or gaps longer than thirty seconds invalidate the rate. Database graphs show totals from reporting tenants, with coverage available
-on hover or keyboard focus. Cards sum only readings no older than thirty seconds, show
+from each graph's hover readout, or its arrow keys when focused. Cards sum only readings no older than thirty seconds, show
 partial coverage explicitly, and display unavailable metrics as missing rather
 than zero. A missing retained database does not hide healthy tenants’ database
 charts. The reporting count covers eligible, configured tenants.
@@ -101,7 +104,8 @@ behind its expected cadence; the threshold accommodates longer-range refreshes.
 ## Shared time range
 
 A single selector at the top of `/admin/usage` controls every database and service
-chart across fleet, hosting-server, and tenant scopes. Presets cover ten minutes,
+chart, and keeps its value when moving between the fleet, hosting-server, and
+tenant subpages. Presets cover ten minutes,
 one or six hours, one or three days, and one, two, or four weeks. Current database cards
 continue to show live readings regardless of the selected historical range.
 
@@ -118,3 +122,11 @@ retain a gap for that metric. Database totals continue to carry partial tenant
 coverage. Charts use the selected window and date labels for multi-day ranges.
 Ranges longer than an hour refresh historical graphs once per minute; shorter
 ranges refresh every ten seconds. Live database cards retain ten-second refresh.
+
+## Chart rendering
+
+A graph draws one line per unbroken run of samples rather than one element per
+sample; only isolated samples get a dot. Hovering or pressing the arrow keys
+moves a single readout across the samples. With 360 points per chart and up to
+a dozen charts per subpage, per-sample elements and per-label date formatting
+made every refresh take seconds.

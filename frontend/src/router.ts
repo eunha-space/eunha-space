@@ -13,8 +13,16 @@ export function pathFor(view: View): string {
 }
 
 export function viewFromPath(pathname: string): View | null {
-  const last = pathname.replace(/\/+$/, "").split("/").pop() ?? "";
-  return (SECTIONS as readonly string[]).includes(last) ? (last as View) : null;
+  const [root, section = ""] = pathname.split("/").filter(Boolean);
+  return `/${root}` === BASE_PATH && (SECTIONS as readonly string[]).includes(section) ? (section as View) : null;
+}
+
+/** Segments below a section, e.g. ["tenants", id] for /admin/usage/tenants/<id>. */
+export function subpathFromPath(view: View, pathname: string): string[] {
+  if (viewFromPath(pathname) !== view) return [];
+  return pathname.split("/").filter(Boolean).slice(2).map(segment => {
+    try { return decodeURIComponent(segment); } catch { return segment; }
+  });
 }
 
 /**
@@ -37,8 +45,27 @@ export function useRoute(): [View, (view: View) => void] {
 
   const navigate = useCallback((next: View) => {
     history.pushState(null, "", pathFor(next));
-    setView(next);
+    // Subroutes listen for popstate too; returning to a section's root resets them.
+    window.dispatchEvent(new PopStateEvent("popstate"));
   }, []);
 
   return [view, navigate];
+}
+
+/** A section's own pages, kept in the path below the section. */
+export function useSubroute(view: View): [string[], (segments: string[]) => void] {
+  const [segments, setSegments] = useState(() => subpathFromPath(view, location.pathname));
+
+  useEffect(() => {
+    const onPopState = () => setSegments(subpathFromPath(view, location.pathname));
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [view]);
+
+  const navigate = useCallback((next: string[]) => {
+    history.pushState(null, "", [pathFor(view), ...next.map(encodeURIComponent)].join("/"));
+    setSegments(next);
+  }, [view]);
+
+  return [segments, navigate];
 }
