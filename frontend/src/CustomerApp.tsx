@@ -329,7 +329,7 @@ function CustomerHeader(
       <div className="flex items-center gap-3">
         <Mark />
         <div>
-          <strong>eunha space</strong>
+          <strong>{i18n._("eunha space")}</strong>
           <p className="text-muted-foreground text-sm">{customer.email}</p>
         </div>
       </div>

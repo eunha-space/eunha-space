@@ -15,7 +15,8 @@ const ko: Record<string, string> = {
   "Saving…": "저장 중…",
   "Saved. Your instance will apply these settings shortly.": "저장되었습니다. 곧 인스턴스에 설정이 적용됩니다.",
   "Use your SMTP provider for instance emails. Port 465 uses TLS; port 587 requires STARTTLS. Enter both credentials whenever you save; saved credentials are never displayed.": "인스턴스 이메일을 내 SMTP 서비스로 발송합니다. 포트 465는 TLS를, 포트 587은 STARTTLS를 사용합니다. 저장할 때마다 사용자 이름과 비밀번호를 입력하세요. 저장된 인증 정보는 표시되지 않습니다.",
-  "Your eunha space instances": "나의 eunha space 인스턴스",
+  "eunha space": "은하공간",
+  "Your eunha space instances": "나의 은하공간 인스턴스",
   "Create your account": "계정 만들기",
   "Sign in to create and manage your instances.":
     "로그인하여 인스턴스를 만들고 관리하세요.",
@@ -128,7 +129,7 @@ const ko: Record<string, string> = {
   "Configure site settings inside Eunha after setup.": "설정이 완료되면 Eunha에서 인스턴스 설정을 변경하세요.",
   "No instance limit.": "인스턴스 수 제한이 없습니다.",
   Address: "주소",
-  "eunha space address": "은하 도메인",
+  "eunha space address": "은하공간 주소",
   "My own domain": "내 도메인",
   "Custom domain": "커스텀 도메인",
   "Before creating, add a CNAME record pointing it to customers.eunha.space. You can move the instance to another domain later.":
