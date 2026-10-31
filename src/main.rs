@@ -5072,6 +5072,17 @@ fn runtime_prune_script(runtime_root: &FsPath) -> String {
     )
 }
 
+/// Runs on the runtime host before a release transfers its bundle. Removes the
+/// hidden copies earlier releases left: a failed release's staging and the
+/// releases a publish set aside. Releases are serialized, so none is in use,
+/// and a release that keeps failing holds one staged copy, not one per try.
+fn runtime_clear_script(runtime_root: &FsPath) -> String {
+    format!(
+        "set -u; mkdir -p {0}/releases && cd {0}/releases && ls -A | grep '^\\.' | while IFS= read -r old; do rm -rf -- \"./$old\"; done",
+        shell_quote(&runtime_root.to_string_lossy()),
+    )
+}
+
 fn is_complete_release(artifact: &FsPath) -> bool {
     artifact.join("eunha").is_file()
         && artifact.join("eunha-runtime-router").is_file()
@@ -5230,41 +5241,20 @@ async fn async_deploy_release(
         .ok_or_else(|| "Runtime release target is invalid.".to_string())?;
     let releases = runtime_root.join("releases");
     let staging = releases.join(format!(".{reference}.staging"));
-    let stale_staging = releases.join(format!(".{reference}.stale-{}", Uuid::new_v4()));
     let superseded_release = releases.join(format!(".{reference}.superseded-{}", Uuid::new_v4()));
     let release_path = releases.join(&reference);
     let artifact_text = artifact.to_string_lossy().to_string();
     let remote_staging = shell_quote(&staging.to_string_lossy());
     let local_runtime = matches!(host, "localhost" | "127.0.0.1" | "::1");
     release_event(db, operation_id, "Preparing the runtime release directory.").await;
-    if local_runtime {
-        tokio::fs::create_dir_all(&releases)
-            .await
-            .map_err(|_| "Could not prepare the runtime release directory.".to_string())?;
-        if tokio::fs::try_exists(&staging).await.unwrap_or(false) {
-            tokio::fs::rename(&staging, &stale_staging)
-                .await
-                .map_err(|_| "Could not isolate stale release staging.".to_string())?;
-        }
-    } else {
-        command_status(
-            "Runtime directory preparation",
-            "ssh",
-            &[
-                host,
-                &format!(
-                    "mkdir -p {}; if [ -e {} ]; then mv {} {}; fi",
-                    shell_quote(&releases.to_string_lossy()),
-                    shell_quote(&staging.to_string_lossy()),
-                    shell_quote(&staging.to_string_lossy()),
-                    shell_quote(&stale_staging.to_string_lossy()),
-                ),
-            ],
-            None,
-        )
-        .await
-        .map_err(|_| "Could not prepare the runtime release directory.".to_string())?;
-    }
+    run_runtime_command(
+        host,
+        local_runtime,
+        "Runtime directory preparation",
+        &runtime_clear_script(runtime_root),
+    )
+    .await
+    .map_err(|_| "Could not prepare the runtime release directory.".to_string())?;
     release_event(
         db,
         operation_id,
@@ -5437,12 +5427,17 @@ async fn release_recovery_reconciler(state: Shared) {
     }
 }
 
+/// How many times automatic deployment tries one commit on a runtime. A commit
+/// that keeps failing waits for a newer one or for an operator's manual
+/// release, rather than being tried every few minutes forever.
+const AUTOMATIC_RELEASE_ATTEMPTS: i64 = 3;
+
 async fn automatic_release_reconciler(state: Shared) {
     let interval = 300;
     loop {
         if let Some(reference) = latest_remote_ref().await {
-            let rows = sqlx::query_scalar::<_, Uuid>("SELECT id FROM runtimes WHERE auto_deploy_enabled AND deployed_ref IS DISTINCT FROM $1 ORDER BY name LIMIT 1")
-                .bind(&reference).fetch_all(&state.db).await;
+            let rows = sqlx::query_scalar::<_, Uuid>("SELECT r.id FROM runtimes r WHERE r.auto_deploy_enabled AND r.deployed_ref IS DISTINCT FROM $1 AND (SELECT count(*) FROM runtime_deployments d JOIN eunha_releases e ON e.id=d.release_id WHERE d.runtime_id=r.id AND d.trigger='automatic' AND d.status IN ('failed','rolled_back') AND e.git_sha=$1) < $2 ORDER BY r.name LIMIT 1")
+                .bind(&reference).bind(AUTOMATIC_RELEASE_ATTEMPTS).fetch_all(&state.db).await;
             if let Ok(rows) = rows
                 && let Some(runtime_id) = rows.into_iter().next()
             {
@@ -6147,6 +6142,26 @@ mod tests {
         left.sort();
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(left, ["r0", "r4", "r5", "r6", "r7", "r8"]);
+    }
+
+    #[test]
+    fn runtime_clearing_removes_only_hidden_leftovers() {
+        let root = std::env::temp_dir().join(format!("eunha-clear-{}", Uuid::new_v4()));
+        let releases = root.join("releases");
+        for name in ["r1", ".r2.staging", ".r2.stale-x", ".r1.superseded-y"] {
+            std::fs::create_dir_all(releases.join(name).join("frontend")).unwrap();
+        }
+        let status = std::process::Command::new("/bin/sh")
+            .args(["-c", &super::runtime_clear_script(&root)])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let left: Vec<_> = std::fs::read_dir(&releases)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(left, ["r1"]);
     }
 
     #[test]
