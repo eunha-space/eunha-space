@@ -1340,7 +1340,7 @@ async fn a_waiting_job_waits_until_woken_and_failures_back_off(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
-async fn provisioning_waits_for_a_hostname_and_stops_for_a_changed_tenant(pool: PgPool) {
+async fn provisioning_waits_for_a_custom_domain_and_stops_for_a_changed_tenant(pool: PgPool) {
     let (runtime, _) = fixture(&pool).await;
     let id = tenant(&pool, runtime).await;
     let state = state(pool.clone());
@@ -1354,10 +1354,16 @@ async fn provisioning_waits_for_a_hostname_and_stops_for_a_changed_tenant(pool: 
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary) VALUES($1,$2,'waiting.example','custom','pending',true)")
+        .bind(Uuid::new_v4())
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
     queue_job(&pool, id, "provision").await;
     let job = jobs::claim(&pool).await.unwrap().unwrap();
     jobs::run(&state, &job).await;
-    // No hostname is routed, so nothing about the tenant exists yet.
+    // The domain has not validated, so nothing about the tenant exists yet.
     assert!(!job_finished(&pool, job.id).await);
     assert_eq!(
         sqlx::query_scalar::<_, String>(
@@ -1379,6 +1385,48 @@ async fn provisioning_waits_for_a_hostname_and_stops_for_a_changed_tenant(pool: 
     jobs::wake_provisioning(&state, id).await;
     let job = jobs::claim(&pool).await.unwrap().unwrap();
     jobs::run(&state, &job).await;
+    assert!(job_finished(&pool, job.id).await);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn provisioning_does_not_wait_for_a_provided_hostname_to_go_active(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    let state = state(pool.clone());
+    sqlx::query("UPDATE tenants SET lifecycle_state='provisioning' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) VALUES($1,'database')")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // It only goes active once the tenant is served, so waiting for it here
+    // would wait forever.
+    sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary) VALUES($1,$2,'new.eunha.example','provided','pending',true)")
+        .bind(Uuid::new_v4())
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    queue_job(&pool, id, "provision").await;
+    let job = jobs::claim(&pool).await.unwrap().unwrap();
+    jobs::run(&state, &job).await;
+    // This test has no server to create a database on, so reaching that failure
+    // is what shows the job did not sit waiting.
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM provisioning_steps WHERE tenant_id=$1 AND step='database'"
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "failed"
+    );
     assert!(job_finished(&pool, job.id).await);
 }
 

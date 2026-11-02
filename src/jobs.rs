@@ -183,23 +183,10 @@ pub(crate) async fn settle(db: &PgPool, job: &Job, next: &Next) -> Result<(), sq
 
 /// Provision a tenant, one step at a time.
 async fn provision(state: &Shared, tenant_id: Uuid) -> Next {
-    // A created tenant waits for a hostname to be routed before any of it
-    // exists. An imported one has to be set up before its hostname moves,
-    // because the move is the cutover onto it.
-    let startable = sqlx::query_as::<_, (bool, bool)>(
-        "SELECT t.lifecycle_state='provisioning',EXISTS(SELECT 1 FROM tenant_domains h WHERE h.tenant_id=t.id AND h.status='active') OR EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=t.id) FROM tenants t WHERE t.id=$1",
-    )
-    .bind(tenant_id)
-    .fetch_optional(&state.db)
-    .await;
-    match startable {
-        Ok(Some((true, true))) => {}
-        Ok(Some((true, false))) => return Next::After(WAIT),
-        Ok(Some((false, _))) | Ok(None) => return Next::Done,
-        Err(_) => {
-            return Next::Retry("Lifecycle state unavailable; retrying.".into(), WAIT);
-        }
-    }
+    // What a tenant has to wait for is each step's to say: `database` holds back
+    // an instance whose custom domain has not validated, and `routing` holds the
+    // end of the job until its hostnames are active. A provided hostname only
+    // goes active once the tenant is served, so nothing here can wait for one.
     for step in PROVISION_STEPS {
         let outcome = tokio::time::timeout(
             step_timeout(step),

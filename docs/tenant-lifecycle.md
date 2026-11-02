@@ -62,8 +62,6 @@ checking again after a wait are the same thing.
   again when their leases run out. Sixteen jobs run at once.
 - A provision step that is not ready ends the run and sets `run_after` thirty
   seconds ahead. A waiting job holds no slot, however long it waits.
-- A created tenant's job waits like this until one of its hostnames is active,
-  before any of its steps run. An imported tenant's does not wait.
 - A step's deadline is for a step that has hung: an hour, or twelve for `import`
   and `media`, which are bounded by how much of somebody's server there is.
   Reaching it kills the step's process and runs the job again.
