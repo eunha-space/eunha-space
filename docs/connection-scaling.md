@@ -44,7 +44,7 @@ the pool sizes say.
 
 **The server** keeps `max_connections` at 300, with `shared_buffers` and
 `effective_cache_size` derived from the host's memory. This machine also runs
-the control plane, the tenant runtime, Redis, Temporal and unrelated sites, so
+the control plane, the tenant runtime, Redis and unrelated sites, so
 `shared_buffers` takes 15% rather than the 25% a dedicated database host would.
 They are the host's settings, in its `postgresql.conf`, not this repository's:
 the same PostgreSQL serves other databases on the host.
