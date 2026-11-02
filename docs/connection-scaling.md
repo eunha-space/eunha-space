@@ -107,7 +107,7 @@ re-parses when it is working.
 
 A `tenant_configuration` change reaches a running tenant within a minute. Every
 write to that table bumps the tenant's `config_revision`, and a render records
-the revision it came from in `rendered_revision`; a reconcile workflow per
+the revision it came from in `rendered_revision`; a reconcile pass per
 runtime renders whatever differs and reloads the runtime once for all of them.
 An operator's render in `/admin` is now a way to skip the wait, not the only
 way it happens. A tenant whose render keeps failing is retired from the loop

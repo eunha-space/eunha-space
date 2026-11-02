@@ -3,9 +3,9 @@
 ## Health and operations
 
 `GET /health/live` checks that HTTP is serving. `GET /health/ready` returns 200
-only when PostgreSQL answers within two seconds, Temporal is reachable, its
-worker is running, and the domain, release recovery, and Temporal dispatch
-controllers have progressed in the last two minutes. Shutdown marks the process
+only when PostgreSQL answers within two seconds and the domain, release recovery,
+lifecycle job, purge sweep, and reconcile controllers have progressed in the last
+two minutes. Shutdown marks the process
 as draining and stops accepting new HTTP requests. Health responses expose only
 booleans and a release identifier; no addresses, credentials, or driver errors.
 
@@ -17,7 +17,7 @@ when a dependency fails. An external uptime monitor can probe `/health/ready`.
 
 API driver errors become fixed public messages with correlation IDs. Logs retain
 only error type and ID, and HTTP traces omit query strings (including email-link
-tokens). Temporal dispatch errors are generic. Authentication budgets are
+tokens). Lifecycle job errors are fixed text. Authentication budgets are
 persisted in PostgreSQL: ten attempts per identity and 200 per client IP in a
 fifteen-minute window. Cloudflare client addresses are accepted only from a
 loopback peer; this assumes the loopback listener is behind the trusted tunnel.

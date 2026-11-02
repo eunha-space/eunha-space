@@ -8,6 +8,5 @@
 /releases
 /.env
 /.sites-runtime
-ops/temporal/.env.dev
 
 __pycache__/

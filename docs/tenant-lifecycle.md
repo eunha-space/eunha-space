@@ -1,8 +1,9 @@
 # Tenant lifecycle
 
-PostgreSQL is the source of truth for tenant state. Temporal records durable
-workflow progress and timers; it never replaces the tenant row as the authority.
-The provision, deprovision, and purge operations are audited separately.
+PostgreSQL is the source of truth for tenant state, and the record of the work
+still to do: each tenant's lifecycle work is a row in `lifecycle_jobs`, requested
+in the same transaction as the state change that needs it. The provision,
+deprovision, and purge operations are audited separately.
 
 Domains can be reused after purge completes. Disabled, retained, and purging
 tenants continue reserving their primary names. Purged records retain their
@@ -12,7 +13,7 @@ original names, but no longer prevent another tenant from using them.
 stateDiagram-v2
     [*] --> provisioning: tenant created or restored
 
-    provisioning --> provisioning: wait for domain, routing, or capacity\nTemporal timer (30 s) or wake signal
+    provisioning --> provisioning: wait for domain, routing, or capacity\nrecheck every 30 s, or when woken
     provisioning --> ready: database → migrate → render → reload → health → routing → owner
     provisioning --> ready: imported: database → migrate → import → render → media → reload → health → routing
     provisioning --> failed: terminal provisioning step failure
@@ -25,7 +26,7 @@ stateDiagram-v2
     deprovisioning --> retained: unrender → reload → offline check
     retained --> provisioning: restore cancels scheduled purge
 
-    retained --> purging: seven-day Temporal timer fires\nor explicitly confirmed permanent deletion
+    retained --> purging: retention sweep finds it due\nor explicitly confirmed permanent deletion
     provisioning --> purging: explicitly confirmed permanent deletion
     ready --> purging: explicitly confirmed permanent deletion
     failed --> purging: explicitly confirmed permanent deletion
@@ -36,18 +37,11 @@ stateDiagram-v2
 
 ## One list of steps, two kinds of tenant
 
-The workflow iterates every step a tenant can have, in the only order they make
+The job iterates every step a tenant can have, in the only order they make
 sense in. A tenant without one completes it without running anything: a created
 tenant has no `import` or `media`, and an imported one has no `owner`, because
 its owner account arrived with its database. Which steps a tenant has is decided
 once, in PostgreSQL, when it is created or imported.
-
-Adding a step to that list changes what a replay of an already-running
-provision workflow expects. A workflow parked in a wait — the common long-lived
-case, an instance whose custom domain has not validated — is unaffected, because
-nothing after the step it is waiting on has run yet. One that is midway through
-its steps at the moment the control plane restarts is not: deploy while no
-tenant is actively provisioning, or expect that workflow to need a retry.
 
 The two kinds also wait for opposite things. A created instance with a custom
 domain provisions nothing until that domain validates, so an instance whose
@@ -59,45 +53,57 @@ instance works before any public DNS points at it.
 
 ## Durable waiting and retrying
 
-- A provision step that is not ready returns a durable wait outcome. Temporal
-  persists a 30-second timer and rechecks that same step; earlier completed
-  steps are skipped idempotently.
-- `import` and `media` are bounded by how much of somebody's server there is
-  rather than by work, so they are given twelve hours instead of five minutes
-  and heartbeat every twenty seconds. The heartbeat is what keeps a long
-  deadline from also being how long a crashed worker goes unnoticed: a step
-  that goes quiet for two minutes gives up that attempt.
-- A domain activation or lifecycle change sends a best-effort Temporal signal
-  to wake the provision workflow immediately. Missing a signal is safe because
-  the persisted timer remains.
-- Unexpected activity failures use Temporal activity retry. Expected terminal
-  provisioning errors are recorded on the tenant, step, and operation instead.
-- Long-running provision workflows use continue-as-new after 240 timed waits,
-  preventing unbounded workflow histories.
+A job holds no position of its own. Every run walks its steps from the first, and
+the step tables say which are already done, so resuming after a crash and
+checking again after a wait are the same thing.
+
+- A job is claimed under a two-minute lease, which the run renews every twenty
+  seconds. A control plane that dies stops renewing, and its jobs are taken up
+  again when their leases run out. Sixteen jobs run at once.
+- A provision step that is not ready ends the run and sets `run_after` thirty
+  seconds ahead. A waiting job holds no slot, however long it waits.
+- A created tenant's job waits like this until one of its hostnames is active,
+  before any of its steps run. An imported tenant's does not wait.
+- A step's deadline is for a step that has hung: an hour, or twelve for `import`
+  and `media`, which are bounded by how much of somebody's server there is.
+  Reaching it kills the step's process and runs the job again.
+- A domain activation or lifecycle change wakes the provision job by moving its
+  `run_after` to now. Missing a wake is safe because the wait ends anyway.
+- A deprovision or purge step that fails is retried a minute apart, ten times,
+  and then the operation is left failed for an operator. A provisioning step that
+  fails is recorded on the tenant, step, and operation, and waits for a retry.
+- A panic is a failure like any other, retried with a backoff of up to 100
+  seconds.
+- A tenant has one live job of each kind. A request for one that exists runs it
+  again from the top, even if it is running now: `generation` counts requests,
+  and a run that saw an older one cannot finish the job, because it may have read
+  the state from before the request.
+
+A deploy needs no window: a job killed by a restart runs again when its
+lease ends, and adding a step needs nothing of the jobs already running.
 
 ## Keeping a ready tenant on its configuration
 
-The lifecycle workflows above each run once and end. One workflow does not:
-`RuntimeReconcileWorkflow` exists for as long as its runtime does, and is what
-makes a configuration change reach a tenant that is already serving.
+Lifecycle jobs each run once and end. The reconciler does not: it is a loop in
+the control plane, and is what makes a configuration change reach a tenant that is already serving.
 
 Every write to `tenant_configuration` bumps the tenant's `config_revision`
 through a database trigger, and a render records the revision it came from in
 `rendered_revision`. The two differing is the only definition of drift. Once a
-minute the workflow renders every ready tenant on its runtime whose revisions
+minute it renders every ready tenant on its runtime whose revisions
 differ, then reloads the runtime once for all of them — a reload makes the
 runtime re-read its whole tenants directory, so a fleet that drifted together
 costs one signal — and health-checks each tenant it touched.
 
-The workflow ID is fixed per runtime, `runtime-reconcile-v1-<runtime id>`, so
-the server refuses a duplicate and only one pass is ever in flight. The starter
-asserts the workflow exists rather than queueing work for it, which is why
-reconciliation has no outbox row: it is a controller, not an operation.
+`runtimes.reconcile_next_at` says when a runtime is next due. A pass moves it past
+its own ten-minute timeout on the way in, so only one is ever in flight, and a
+minute ahead on the way out. Reconciliation has no job: it is a controller, not
+an operation.
 
 What it will not touch:
 
 - A tenant that is not `ready` and `running`. One still provisioning has its own
-  workflow rendering and reloading it; a retained or purging one was taken off
+  job rendering and reloading it; a retained or purging one was taken off
   disk deliberately.
 - A runtime on another host. Only the control plane named by
   `CONTROL_RUNTIME_HOST` reconciles a runtime, and the render refuses anyway.
@@ -117,7 +123,7 @@ A tenant's accounts are ActivityPub actors under its domain, so moving it to
 another domain is a migration rather than a setting. Until eunha could send
 Moves, a custom domain verified after the tenant had accounts only ever became
 an alias. Now a customer or an operator can move a ready tenant to a provided
-subdomain or a custom domain, and `TenantDomainChangeWorkflow` walks it through
+subdomain or a custom domain, and a `domain_change` job walks it through
 six steps, recorded in `domain_changes`:
 
 1. **attach**: the new hostname, with its provided siblings, is added as a
@@ -159,21 +165,19 @@ no-op the second time, and the Moves are not resent once their batch is
 recorded), so **Retry** in the console's domains dialog continues from the step
 that failed.
 
-## Watching an execution
+## Watching a job
 
-The tenant inventory in `/admin` shows the durable workflow kind and the step
-it is waiting on, taken from PostgreSQL. When `TEMPORAL_UI_URL` is configured,
-that summary also links to the execution in the Temporal UI for history and
-timers. The link is the only thing the console borrows from Temporal: workflow
-input, activity results, and history stay in the Temporal UI, behind its own
-private network, and never pass through this API. PostgreSQL remains the record
-an operator acts on.
+The tenant inventory in `/admin` shows the kind of the tenant's latest job and the
+step it is on, how many times in a row it has failed, and the last failure in a
+tooltip. That text is fixed, so no driver error or secret reaches the console.
+`operation_events` is the fuller record, and the one an operator acts on.
 
 ## Retention and destructive purge
 
 Deprovisioning is deliberately non-destructive. A tenant reaches `retained`
 only after it is offline; its database, media, configuration, backups, and
 Cloudflare resources remain available for restoration. The retention timer is
-seven days. Restore clears the scheduled purge in PostgreSQL, so the guarded
-Temporal purge activity becomes a no-op even if its timer has already fired.
+seven days. Once a minute a sweep starts the purge of every retained tenant past
+`purge_scheduled_for`, deciding each again under its row lock, so a restore wins
+over a purge that was about to start.
 An immediate purge requires separate explicit confirmation and is audited.

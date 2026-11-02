@@ -1,5 +1,5 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { Download, ExternalLink, FileCog, Globe, HardDrive, HeartPulse, Inbox, Plus, PowerOff, RefreshCw, RotateCcw, RotateCw, Trash2 } from "lucide-react";
+import { Download, FileCog, Globe, HardDrive, HeartPulse, Inbox, Plus, PowerOff, RefreshCw, RotateCcw, RotateCw, Trash2 } from "lucide-react";
 import { api, type DomainChange, instanceAddress, isOffline, pendingRender, type Runtime, type Tenant, type TenantDomain } from "@/api";
 import { absoluteTime, relativeTime } from "@/format";
 import { Badge } from "@/components/ui/badge";
@@ -303,15 +303,15 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                         {" "}· {relativeTime(tenant.updated_at)}
                       </span>
                     </Cell>
-                    <Cell label="Lifecycle" title={tenant.temporal_workflow_id ?? undefined}>
-                      {tenant.temporal_workflow_id
+                    <Cell label="Lifecycle" title={tenant.job_error ?? undefined}>
+                      {tenant.job_kind
                         ? (
                           <>
-                            <LifecycleExecution tenant={tenant} />
+                            <LifecycleJob tenant={tenant} />
                             {/* A plain `&&` on the count would print a literal 0. */}
-                            {(tenant.temporal_dispatch_attempts ?? 0) > 1 && (
+                            {(tenant.job_failures ?? 0) > 0 && (
                               <span className="text-muted-foreground">
-                                {" "}· dispatch {tenant.temporal_dispatch_attempts}
+                                {" "}· retry {tenant.job_failures}
                               </span>
                             )}
                           </>
@@ -406,27 +406,14 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
   );
 }
 
-/** The tenant's Temporal execution: what it is doing, and where to watch it.
- *  The link only opens the execution in the operator's Temporal UI; workflow
- *  inputs, results and history stay out of this console. */
-function LifecycleExecution({ tenant }: { tenant: Tenant }) {
-  const label = tenant.lifecycle_step
-    ? `${tenant.temporal_workflow_kind} · ${tenant.lifecycle_step}`
-    : tenant.temporal_workflow_kind;
-  // No configured Temporal UI, no link: the service is never public, so there
-  // is no address to guess.
-  if (!tenant.temporal_workflow_url) return <>{label}</>;
+/** What the tenant's latest lifecycle job is doing. */
+function LifecycleJob({ tenant }: { tenant: Tenant }) {
   return (
-    <a
-      className="inline-flex max-w-full items-center gap-1 underline-offset-4 hover:underline"
-      href={tenant.temporal_workflow_url}
-      target="_blank"
-      rel="noreferrer"
-      aria-label={`Open ${label} in the Temporal UI`}
-    >
-      <span className="truncate">{label}</span>
-      <ExternalLink className="size-3 shrink-0" aria-hidden />
-    </a>
+    <>
+      {tenant.lifecycle_step
+        ? `${tenant.job_kind} · ${tenant.lifecycle_step}`
+        : tenant.job_kind}
+    </>
   );
 }
 

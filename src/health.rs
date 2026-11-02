@@ -12,7 +12,6 @@ use std::{
 #[derive(Default)]
 pub(crate) struct Health {
     progress: Mutex<HashMap<&'static str, Instant>>,
-    pub worker: AtomicBool,
     draining: AtomicBool,
 }
 impl Health {
@@ -44,24 +43,18 @@ pub(crate) async fn ready(State(s): State<Shared>) -> Response {
         .await,
         Ok(Ok(1))
     );
-    let temporal = if std::env::var_os("TEMPORAL_ADDRESS").is_some() {
-        s.health.worker.load(Ordering::Relaxed) && crate::temporal::available().await
-    } else {
-        false
-    };
     let background = [
         "domains",
         "release-recovery",
-        "provision-dispatch",
-        "lifecycle-dispatch",
-        "domain-dispatch",
-        "reconcile-starter",
+        "lifecycle-jobs",
+        "purge-sweep",
+        "reconcile",
     ]
     .iter()
     .all(|job| s.health.fresh(job, Duration::from_secs(120)));
     let accepting = !s.health.draining.load(Ordering::Relaxed);
-    let ok = database && temporal && background && accepting;
-    (if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE }, Json(serde_json::json!({"ready":ok,"database":database,"temporal":temporal,"background":background,"accepting":accepting,"release":std::env::var("CONTROL_RELEASE_ID").unwrap_or_else(|_| "development".into())}))).into_response()
+    let ok = database && background && accepting;
+    (if ok { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE }, Json(serde_json::json!({"ready":ok,"database":database,"background":background,"accepting":accepting,"release":std::env::var("CONTROL_RELEASE_ID").unwrap_or_else(|_| "development".into())}))).into_response()
 }
 
 pub(crate) async fn shutdown(s: Shared) {
@@ -112,31 +105,4 @@ where
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
     });
-}
-
-/// A panicked worker must not leave a healthy polling flag behind.
-pub(crate) async fn worker_attempt(
-    health: Arc<Health>,
-    future: impl std::future::Future<Output = anyhow::Result<()>>,
-) -> bool {
-    let result = std::panic::AssertUnwindSafe(future).catch_unwind().await;
-    health.worker.store(false, Ordering::Relaxed);
-    matches!(result, Ok(Ok(())))
-}
-
-#[cfg(test)]
-mod worker_tests {
-    use super::*;
-    #[tokio::test]
-    async fn a_worker_panic_clears_readiness() {
-        let health = Arc::new(Health::default());
-        health.worker.store(true, Ordering::Relaxed);
-        let work = async {
-            panic!("simulated worker failure");
-            #[allow(unreachable_code)]
-            Ok(())
-        };
-        assert!(!worker_attempt(health.clone(), work).await);
-        assert!(!health.worker.load(Ordering::Relaxed));
-    }
 }

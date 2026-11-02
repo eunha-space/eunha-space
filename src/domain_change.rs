@@ -9,8 +9,8 @@
 //! servers already hold, so it does not have to. *docs/tenant-lifecycle.md*
 //! has the steps and why they are in that order.
 //!
-//! The steps are durable in the same way provisioning's are: a Temporal
-//! workflow runs them in order, a step that is not ready yet asks to wait,
+//! The steps are durable in the same way provisioning's are: a lifecycle
+//! job runs them in order, a step that is not ready yet asks to wait,
 //! and PostgreSQL's `domain_changes` row is the record everyone reads.
 
 use std::{process::Stdio, time::Duration};
@@ -26,9 +26,8 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
-    ApiError, ProvisionStepOutcome, Shared, admin_user, customer, enqueue_temporal_dispatch,
-    healthcheck_provisioned_tenant, is_safe_domain, is_valid_domain, reload_provisioned_runtime,
-    render_provisioned_tenant,
+    ApiError, ProvisionStepOutcome, Shared, admin_user, customer, healthcheck_provisioned_tenant,
+    is_safe_domain, is_valid_domain, reload_provisioned_runtime, render_provisioned_tenant,
 };
 
 /// The steps of a domain change, in order.
@@ -207,7 +206,7 @@ async fn start(
             ApiError::from(error)
         })?;
     for hostname in &hostnames {
-        // The first check waits until the workflow has rendered the new
+        // The first check waits until the job has rendered the new
         // hostname, so that it is not counted a failure for not serving yet.
         sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary,cname_target,next_check_at) VALUES($1,$2,$3,$4,'pending',false,$5,now()+interval '1 minute')")
             .bind(Uuid::new_v4()).bind(tenant_id).bind(hostname).bind(&kind).bind(&cname_target)
@@ -227,7 +226,7 @@ async fn start(
         ))
         .execute(&mut *tx)
         .await?;
-    enqueue_temporal_dispatch(&mut tx, tenant_id, "domain_change").await?;
+    crate::jobs::enqueue(&mut tx, tenant_id, "domain_change").await?;
     tx.commit().await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -286,7 +285,7 @@ pub(crate) async fn operator_retry(
     .bind(operation_id)
     .execute(&mut *tx)
     .await?;
-    enqueue_temporal_dispatch(&mut tx, id, "domain_change").await?;
+    crate::jobs::enqueue(&mut tx, id, "domain_change").await?;
     tx.commit().await?;
     Ok(StatusCode::ACCEPTED)
 }

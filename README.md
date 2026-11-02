@@ -50,7 +50,8 @@ connect.
 Provisioning is a persisted sequence of database creation, migration, render,
 reload, and health-check steps. Interrupted work resumes after restart. Failed
 work remains retained and can be retried from the tenant inventory; it is never
-implicitly deprovisioned or purged.
+implicitly deprovisioned or purged. `CONTROL_JOBS_DISABLED` keeps a process out
+of that work, for a local one pointed at a shared database.
 
 Connection scaling — what makes a tenant hold a PostgreSQL connection, and the
 three layers that keep a fleet's cost tied to work rather than tenant count — is

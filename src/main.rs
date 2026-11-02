@@ -42,9 +42,9 @@ mod domain_change;
 mod health;
 #[cfg(test)]
 mod integration_tests;
+mod jobs;
 mod service_usage;
 mod smtp;
-mod temporal;
 mod usage;
 mod usage_range;
 
@@ -80,7 +80,6 @@ struct AppState {
     cloudflare: Option<CloudflareConfig>,
     provided_domain_suffixes: Vec<String>,
     customer_email: Option<CustomerEmailConfig>,
-    temporal_ui: Option<TemporalUiConfig>,
     /// One reload at a time per runtime: a second launchd signal that arrives
     /// while the first is still settling fails, and both would be re-reading
     /// the same directory anyway.
@@ -93,31 +92,6 @@ struct CustomerEmailConfig {
     public_url: String,
     tenant_smtp: smtp::Settings,
 }
-/// The operator-reachable Temporal Web UI, from `TEMPORAL_UI_URL`. The UI is
-/// never published to the Internet, so an unset variable just leaves the admin
-/// console without lifecycle links rather than guessing an address.
-#[derive(Clone)]
-struct TemporalUiConfig {
-    base: url::Url,
-    namespace: String,
-}
-
-impl TemporalUiConfig {
-    /// A workflow ID alone is enough: the UI redirects to that execution's
-    /// latest run, so the link survives the provision workflow's
-    /// continue-as-new. It carries no workflow input, result, or history.
-    fn workflow_url(&self, workflow_id: &str) -> Option<String> {
-        let mut url = self.base.clone();
-        url.path_segments_mut().ok()?.pop_if_empty().extend([
-            "namespaces",
-            &self.namespace,
-            "workflows",
-            workflow_id,
-        ]);
-        Some(url.into())
-    }
-}
-
 #[derive(Clone)]
 struct CloudflareConfig {
     zone_id: String,
@@ -174,7 +148,7 @@ impl<E: std::fmt::Display> From<E> for ApiError {
 ///
 /// Two endpoints build this: the operator's inventory, which selects all of it,
 /// and a customer's instance list, which selects only what is theirs to see —
-/// no durable-workflow metadata, no step the fleet is on. The fields the
+/// no job metadata, no step the fleet is on. The fields the
 /// narrower one leaves out are marked `default`, because sqlx reads a column
 /// that is not in the query as an error rather than as `None`, and an `Option`
 /// field does not change that. Leaving one unmarked breaks customer sign-in.
@@ -222,16 +196,14 @@ struct TenantSummary {
     /// purge refuse to destroy parts of it.
     #[sqlx(default)]
     imported: bool,
+    /// The tenant's latest lifecycle job: its kind, how many times in a row it
+    /// has failed, and the fixed text of the last failure.
     #[sqlx(default)]
-    temporal_workflow_id: Option<String>,
-    /// Where an operator can watch that execution, when a Temporal UI is
-    /// configured. Derived, never selected from the database.
+    job_kind: Option<String>,
     #[sqlx(default)]
-    temporal_workflow_url: Option<String>,
+    job_failures: Option<i32>,
     #[sqlx(default)]
-    temporal_workflow_kind: Option<String>,
-    #[sqlx(default)]
-    temporal_dispatch_attempts: Option<i32>,
+    job_error: Option<String>,
     #[sqlx(default)]
     lifecycle_step: Option<String>,
 }
@@ -768,26 +740,6 @@ fn typed_toml(
     })
 }
 
-/// `TEMPORAL_UI_URL` is an operator convenience, not a dependency: anything
-/// that is not an absolute `http`/`https` address is refused with a warning so
-/// the console never renders a link that cannot be trusted or resolved.
-fn temporal_ui_config() -> Option<TemporalUiConfig> {
-    let configured = std::env::var("TEMPORAL_UI_URL").ok()?;
-    let base = match url::Url::parse(configured.trim()) {
-        Ok(base) if matches!(base.scheme(), "http" | "https") && base.has_host() => base,
-        _ => {
-            tracing::warn!(
-                "TEMPORAL_UI_URL is not an absolute http(s) address; tenant lifecycle links are disabled"
-            );
-            return None;
-        }
-    };
-    Some(TemporalUiConfig {
-        base,
-        namespace: std::env::var("TEMPORAL_NAMESPACE").unwrap_or_else(|_| "default".into()),
-    })
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -844,7 +796,6 @@ async fn main() -> Result<()> {
             .filter(|suffix| is_valid_domain(suffix))
             .collect(),
         customer_email: smtp::customer_email_config()?,
-        temporal_ui: temporal_ui_config(),
         client: reqwest::Client::builder()
             .timeout(Duration::from_secs(4))
             .build()?,
@@ -870,61 +821,39 @@ async fn main() -> Result<()> {
         "automatic_release_reconciler",
         automatic_release_reconciler,
     );
-    if std::env::var_os("TEMPORAL_ADDRESS").is_some() {
-        let worker_state = state.clone();
+    // A local process pointed at a shared database must be able to stay out of
+    // its lifecycle work.
+    if std::env::var_os("CONTROL_JOBS_DISABLED").is_none() {
+        let jobs_state = state.clone();
+        // A runtime of their own: a job can hold a thread's worth of work for
+        // hours, which the HTTP server should not have to share.
         if let Err(error) = std::thread::Builder::new()
-            .name("temporal-worker".into())
+            .name("lifecycle-jobs".into())
             .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_multi_thread()
+                match tokio::runtime::Builder::new_multi_thread()
                     .enable_all()
-                    .build();
-                match runtime {
-                    // Nothing runs a workflow while the worker is down, and it goes
-                    // down whenever Temporal does; it is started again rather
-                    // than left stopped until the control plane restarts.
+                    .build()
+                {
                     Ok(runtime) => runtime.block_on(async move {
-                        loop {
-                            if !health::worker_attempt(
-                                worker_state.health.clone(),
-                                temporal::run_worker(worker_state.clone()),
-                            )
-                            .await
-                            {
-                                tracing::error!("Temporal worker stopped; restarting");
-                            }
-                            tokio::time::sleep(Duration::from_secs(10)).await;
-                        }
+                        health::supervise(jobs_state.clone(), "jobs::runner", jobs::runner);
+                        health::supervise(
+                            jobs_state.clone(),
+                            "jobs::purge_sweeper",
+                            jobs::purge_sweeper,
+                        );
+                        health::supervise(jobs_state, "jobs::reconciler", jobs::reconciler);
+                        std::future::pending::<()>().await
                     }),
                     Err(error) => {
-                        tracing::error!(error = %error, "could not start Temporal runtime")
+                        tracing::error!(error = %error, "could not start the lifecycle job runtime")
                     }
                 }
             })
         {
-            tracing::error!(error = %error, "could not spawn Temporal worker thread");
+            tracing::error!(error = %error, "could not spawn the lifecycle job thread");
         }
-        health::supervise(
-            state.clone(),
-            "temporal::provisioning_dispatcher",
-            temporal::provisioning_dispatcher,
-        );
-        health::supervise(
-            state.clone(),
-            "temporal::lifecycle_dispatcher",
-            temporal::lifecycle_dispatcher,
-        );
-        health::supervise(
-            state.clone(),
-            "temporal::domain_change_dispatcher",
-            temporal::domain_change_dispatcher,
-        );
-        health::supervise(
-            state.clone(),
-            "temporal::reconcile_starter",
-            temporal::reconcile_starter,
-        );
     } else {
-        tracing::warn!("Temporal is not configured; tenant lifecycle work will remain queued");
+        tracing::warn!("CONTROL_JOBS_DISABLED is set; tenant lifecycle work will remain queued");
     }
     health::supervise(state.clone(), "domain_reconciler", domain_reconciler);
     let customer_api = Router::new()
@@ -1412,17 +1341,9 @@ async fn tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     admin_user(&headers, &s.db).await?;
-    let mut tenants: Vec<TenantSummary> = sqlx::query_as("SELECT t.id,t.domain,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain,EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=t.id) imported,d.workflow_id temporal_workflow_id,d.workflow_kind temporal_workflow_kind,d.attempts temporal_dispatch_attempts,CASE WHEN t.lifecycle_state='provisioning' THEN (SELECT step FROM provisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,array_position(ARRAY['database','migrate','import','render','media','reload','health','routing','owner'],step) LIMIT 1) WHEN t.lifecycle_state IN ('deprovisioning','retained','purging') THEN (SELECT step FROM deprovisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,step LIMIT 1) END lifecycle_step FROM tenants t JOIN runtimes r ON r.id=t.runtime_id LEFT JOIN LATERAL (SELECT workflow_id,workflow_kind,attempts FROM temporal_dispatches WHERE tenant_id=t.id ORDER BY created_at DESC LIMIT 1) d ON true ORDER BY t.domain")
+    let tenants: Vec<TenantSummary> = sqlx::query_as("SELECT t.id,t.domain,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain,EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=t.id) imported,d.kind job_kind,d.failures job_failures,d.last_error job_error,CASE WHEN t.lifecycle_state='provisioning' THEN (SELECT step FROM provisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,array_position(ARRAY['database','migrate','import','render','media','reload','health','routing','owner'],step) LIMIT 1) WHEN t.lifecycle_state IN ('deprovisioning','retained','purging') THEN (SELECT step FROM deprovisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,step LIMIT 1) END lifecycle_step FROM tenants t JOIN runtimes r ON r.id=t.runtime_id LEFT JOIN LATERAL (SELECT kind,failures,last_error FROM lifecycle_jobs WHERE tenant_id=t.id ORDER BY created_at DESC LIMIT 1) d ON true ORDER BY t.domain")
         .fetch_all(&s.db)
         .await?;
-    if let Some(ui) = &s.temporal_ui {
-        for tenant in &mut tenants {
-            tenant.temporal_workflow_url = tenant
-                .temporal_workflow_id
-                .as_deref()
-                .and_then(|workflow_id| ui.workflow_url(workflow_id));
-        }
-    }
     Ok(Json(tenants))
 }
 
@@ -1697,7 +1618,7 @@ async fn create_tenant_inner(
         .bind(tenant_id).bind(owner_username.is_some()).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Tenant reserved; provisioning queued.')")
         .bind(operation_id).execute(&mut *tx).await?;
-    enqueue_temporal_dispatch(&mut tx, tenant_id, "provision").await?;
+    jobs::enqueue(&mut tx, tenant_id, "provision").await?;
     tx.commit().await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -1948,7 +1869,7 @@ async fn import_tenant(
         ))
         .execute(&mut *tx)
         .await?;
-    enqueue_temporal_dispatch(&mut tx, tenant_id, "provision").await?;
+    jobs::enqueue(&mut tx, tenant_id, "provision").await?;
     tx.commit().await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -1981,7 +1902,7 @@ async fn retry_provisioning(
         .bind(operation_id).bind(admin_user_id).bind(id).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Provisioning retry queued.')")
         .bind(operation_id).execute(&mut *tx).await?;
-    enqueue_temporal_dispatch(&mut tx, id, "provision").await?;
+    jobs::enqueue(&mut tx, id, "provision").await?;
     tx.commit().await?;
     Ok(StatusCode::ACCEPTED)
 }
@@ -2575,7 +2496,7 @@ async fn finish_domain(state: &Shared, id: Uuid) -> Result<()> {
     .await?;
     sqlx::query("UPDATE operations SET status='succeeded',finished_at=now() WHERE id=(SELECT o.id FROM operations o JOIN tenant_domains d ON d.tenant_id=o.tenant_id WHERE d.id=$1 AND o.kind='custom_domain_attach' AND o.status='running' ORDER BY o.created_at DESC LIMIT 1)")
         .bind(id).execute(&state.db).await?;
-    temporal::wake_provisioning(state, tenant_id).await;
+    jobs::wake_provisioning(state, tenant_id).await;
     Ok(())
 }
 
@@ -2699,7 +2620,7 @@ async fn customer_delete_instance(
     }
     begin_deprovisioning(&mut tx, id, None, Some(user_id)).await?;
     tx.commit().await?;
-    temporal::wake_provisioning(&s, id).await;
+    jobs::wake_provisioning(&s, id).await;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -2819,7 +2740,7 @@ async fn deprovision_tenant(
     }
     begin_deprovisioning(&mut tx, id, Some(admin_user_id), None).await?;
     tx.commit().await?;
-    temporal::wake_provisioning(&s, id).await;
+    jobs::wake_provisioning(&s, id).await;
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -2890,7 +2811,7 @@ async fn queue_restore(
         .bind(operation_id).bind(admin_user_id).bind(user_id).bind(tenant_id).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Restore queued; retained data is served again once the instance is healthy.')")
         .bind(operation_id).execute(&mut **tx).await?;
-    enqueue_temporal_dispatch(tx, tenant_id, "provision").await?;
+    jobs::enqueue(tx, tenant_id, "provision").await?;
     Ok(())
 }
 
@@ -2912,19 +2833,7 @@ async fn begin_deprovisioning(
         .bind(operation_id).bind(admin_user_id).bind(user_id).bind(tenant_id).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Deprovisioning started; data is retained.')")
         .bind(operation_id).execute(&mut **tx).await?;
-    enqueue_temporal_dispatch(tx, tenant_id, "deprovision").await?;
-    Ok(())
-}
-
-async fn enqueue_temporal_dispatch(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: Uuid,
-    kind: &str,
-) -> Result<(), sqlx::Error> {
-    let workflow_id = format!("tenant-{kind}-v3-{tenant_id}-{}", Uuid::new_v4());
-    sqlx::query("INSERT INTO temporal_dispatches(id,tenant_id,workflow_kind,workflow_id) VALUES($1,$2,$3,$4) ON CONFLICT (workflow_id) DO NOTHING")
-        .bind(Uuid::new_v4()).bind(tenant_id).bind(kind).bind(workflow_id)
-        .execute(&mut **tx).await?;
+    jobs::enqueue(tx, tenant_id, "deprovision").await?;
     Ok(())
 }
 
@@ -2969,9 +2878,8 @@ const PURGE: LifecycleFlow = LifecycleFlow {
     exhausted: "an operator needs to finish removing the tenant's data",
 };
 
-/// A lifecycle step failed and is to be tried again: the activity fails with
-/// it, and Temporal's retry runs the flow again, which resumes at that step
-/// once `LIFECYCLE_RETRY_SECONDS` have passed.
+/// A lifecycle step failed and is to be tried again: the job runs the flow
+/// again, which resumes at that step once `LIFECYCLE_RETRY_SECONDS` have passed.
 #[derive(Debug)]
 pub(crate) struct LifecycleRetry(String);
 
@@ -2986,7 +2894,7 @@ impl std::error::Error for LifecycleRetry {}
 /// Run `flow` for `tenant_id` from its first unfinished step. A step that
 /// fails is retried, `LIFECYCLE_RETRY_SECONDS` apart, until it has been tried
 /// `LIFECYCLE_MAX_ATTEMPTS` times; then the operation is failed for an
-/// operator and this returns, so that the workflow does not retry forever.
+/// operator and this returns, so that the job does not retry forever.
 async fn run_lifecycle_flow(
     state: &Shared,
     tenant_id: Uuid,
@@ -3184,7 +3092,7 @@ async fn start_purge(
         .bind(reason)
         .execute(&mut **tx)
         .await?;
-    enqueue_temporal_dispatch(tx, tenant_id, "purge").await?;
+    jobs::enqueue(tx, tenant_id, "purge").await?;
     Ok(())
 }
 
@@ -3642,7 +3550,6 @@ async fn fail_provisioning(db: &PgPool, tenant_id: Uuid, step: &str, reason: Opt
         .bind(&message).bind(tenant_id).execute(db).await;
 }
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) enum ProvisionStepOutcome {
     Completed,
     Wait,
@@ -3999,6 +3906,7 @@ async fn migrate_tenant_database(state: &Shared, tenant_id: Uuid) -> Result<()> 
         .current_dir(runtime_root.join("current"))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .kill_on_drop(true)
         .status()
         .await?;
     anyhow::ensure!(status.success(), "tenant migration failed");
@@ -4063,6 +3971,7 @@ async fn import_tenant_database(state: &Shared, tenant_id: Uuid) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .output()
         .await?;
     anyhow::ensure!(
@@ -4131,6 +4040,7 @@ async fn upload_imported_media(state: &Shared, tenant_id: Uuid) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .kill_on_drop(true)
         .output()
         .await?;
     anyhow::ensure!(
@@ -5619,7 +5529,7 @@ pub(crate) async fn reconcile_runtime_drift(state: &Shared, runtime_id: Uuid) ->
         return Ok(0);
     }
     // Only a tenant that has finished provisioning and is meant to be running.
-    // One still provisioning has a workflow of its own rendering and reloading
+    // One still provisioning has a job of its own rendering and reloading
     // it, and a retained or purging one was taken off disk deliberately.
     let drifted = sqlx::query_as::<_, (Uuid, i64)>(
         "SELECT t.id,t.config_revision FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id WHERE t.runtime_id=$1 AND i.address=$2 AND t.lifecycle_state='ready' AND t.desired_state='running' AND t.reconcile_failures<$3 AND (t.rendered_revision IS NULL OR t.rendered_revision<t.config_revision) ORDER BY t.created_at",
@@ -6062,35 +5972,6 @@ mod tests {
         let message = connection_budget_error(100, 97).expect("100 does not fit in 97");
         assert!(message.contains("100"), "{message}");
         assert!(message.contains("97"), "{message}");
-    }
-
-    #[test]
-    fn temporal_links_stay_inside_the_configured_ui() {
-        let ui = |base: &str| super::TemporalUiConfig {
-            base: url::Url::parse(base).unwrap(),
-            namespace: "eunha-space".into(),
-        };
-        assert_eq!(
-            ui("http://127.0.0.1:8080/").workflow_url("tenant-provision-v3-abc"),
-            Some(
-                "http://127.0.0.1:8080/namespaces/eunha-space/workflows/tenant-provision-v3-abc"
-                    .into()
-            )
-        );
-        // A UI mounted under a path keeps it, with or without a trailing slash.
-        assert_eq!(
-            ui("https://ops.example.com/temporal").workflow_url("w"),
-            Some("https://ops.example.com/temporal/namespaces/eunha-space/workflows/w".into())
-        );
-        // The workflow ID is one path segment, so a stored ID can never walk
-        // out of the namespace or smuggle a query string into the link.
-        assert_eq!(
-            ui("http://127.0.0.1:8080").workflow_url("../../evil?x=1"),
-            Some(
-                "http://127.0.0.1:8080/namespaces/eunha-space/workflows/..%2F..%2Fevil%3Fx=1"
-                    .into()
-            )
-        );
     }
 
     #[test]

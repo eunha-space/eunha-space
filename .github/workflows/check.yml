@@ -24,7 +24,7 @@ jobs:
           . /etc/os-release
           printf 'deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt %s-pgdg main\n' "$VERSION_CODENAME" | sudo tee /etc/apt/sources.list.d/pgdg.list
           sudo apt-get update
-          sudo apt-get install -y protobuf-compiler postgresql-18
+          sudo apt-get install -y postgresql-18
       - name: Rust formatting component
         run: mise exec -- rustup component add rustfmt
       - name: Rust formatting and unit tests
@@ -51,8 +51,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: jdx/mise-action@v2
-      - name: System build dependencies
-        run: brew install protobuf
       - uses: Swatinem/rust-cache@v2
       - name: Frontend
         run: mise run frontend

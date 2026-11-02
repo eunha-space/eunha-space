@@ -28,12 +28,11 @@ export type Tenant = {
    * destroy the parts of it that were never ours.
    */
   imported: boolean;
-  /** Durable Temporal execution metadata; no workflow payloads or secrets are exposed. */
-  temporal_workflow_id: string | null;
-  /** The operator-only Temporal UI link for that execution, when one is configured. */
-  temporal_workflow_url: string | null;
-  temporal_workflow_kind: "provision" | "deprovision" | "purge" | null;
-  temporal_dispatch_attempts: number | null;
+  /** The tenant's latest lifecycle job. */
+  job_kind: "provision" | "deprovision" | "purge" | "domain_change" | null;
+  /** How many times in a row it has failed, and the fixed text of the last failure. */
+  job_failures: number | null;
+  job_error: string | null;
   lifecycle_step: string | null;
 };
 

@@ -161,7 +161,6 @@ fn state(pool: PgPool) -> Shared {
         cloudflare: None,
         provided_domain_suffixes: vec![],
         customer_email: None,
-        temporal_ui: None,
         runtime_reloads: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
     })
 }
@@ -245,7 +244,7 @@ async fn deletion_retains_data_and_restore_cancels_purge(pool: PgPool) {
         .unwrap(),
         ("provisioning".into(), true)
     );
-    temporal::schedule_due_purge(&state, id).await.unwrap();
+    jobs::schedule_due_purge(&state, id).await.unwrap();
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM purge_steps WHERE tenant_id=$1")
             .bind(id)
@@ -266,7 +265,7 @@ async fn restore_and_due_purge_serialize(pool: PgPool) {
         sqlx::query("UPDATE tenants SET lifecycle_state='retained',purge_scheduled_for=now()-interval '1 minute' WHERE id=$1").bind(id).execute(&pool).await.unwrap();
         let (restored, purged) = tokio::join!(
             restore_tenant(State(state.clone()), headers.clone(), Path(id)),
-            temporal::schedule_due_purge(&state, id)
+            jobs::schedule_due_purge(&state, id)
         );
         purged.unwrap();
         let lifecycle =
@@ -1234,4 +1233,287 @@ async fn site_settings_columns_are_removed(pool: PgPool) {
         .fetch_one(&pool).await.unwrap();
     assert_eq!(columns, 0);
     finish_provisioning(&state(pool.clone()), id).await;
+}
+
+async fn queue_job(pool: &PgPool, tenant_id: Uuid, kind: &str) {
+    let mut tx = pool.begin().await.unwrap();
+    jobs::enqueue(&mut tx, tenant_id, kind).await.unwrap();
+    tx.commit().await.unwrap();
+}
+
+async fn job_finished(pool: &PgPool, id: Uuid) -> bool {
+    sqlx::query_scalar("SELECT finished_at IS NOT NULL FROM lifecycle_jobs WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_job_is_claimed_once_until_its_lease_runs_out(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    queue_job(&pool, id, "provision").await;
+    queue_job(&pool, id, "provision").await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM lifecycle_jobs WHERE tenant_id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    let claims = futures::future::join_all((0..8).map(|_| jobs::claim(&pool))).await;
+    assert_eq!(
+        claims
+            .into_iter()
+            .filter(|claim| claim.as_ref().unwrap().is_some())
+            .count(),
+        1
+    );
+    assert!(jobs::claim(&pool).await.unwrap().is_none());
+    // The control plane that held it died.
+    sqlx::query("UPDATE lifecycle_jobs SET lease_until=now()-interval '1 second'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(jobs::claim(&pool).await.unwrap().is_some());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_request_during_a_run_is_not_lost_to_its_ending(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    let state = state(pool.clone());
+    queue_job(&pool, id, "provision").await;
+    let job = jobs::claim(&pool).await.unwrap().unwrap();
+    // A restore arrives while the run is concluding from the state before it.
+    queue_job(&pool, id, "provision").await;
+    jobs::settle(&pool, &job, &jobs::Next::Done).await.unwrap();
+    assert!(!job_finished(&pool, job.id).await);
+    let again = jobs::claim(&pool).await.unwrap().unwrap();
+    assert_eq!(again.id, job.id);
+    jobs::settle(&pool, &again, &jobs::Next::Done)
+        .await
+        .unwrap();
+    assert!(job_finished(&pool, job.id).await);
+    // A wake is such a request too, but a finished job has nothing to wake.
+    jobs::wake_provisioning(&state, id).await;
+    assert!(jobs::claim(&pool).await.unwrap().is_none());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_waiting_job_waits_until_woken_and_failures_back_off(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    let state = state(pool.clone());
+    queue_job(&pool, id, "provision").await;
+    let job = jobs::claim(&pool).await.unwrap().unwrap();
+    let wait = jobs::Next::After(Duration::from_secs(30));
+    jobs::settle(&pool, &job, &wait).await.unwrap();
+    assert!(jobs::claim(&pool).await.unwrap().is_none());
+    jobs::wake_provisioning(&state, id).await;
+    let job = jobs::claim(&pool).await.unwrap().unwrap();
+    let retry = jobs::Next::Retry("failed; retrying.".into(), Duration::from_secs(30));
+    jobs::settle(&pool, &job, &retry).await.unwrap();
+    assert!(jobs::claim(&pool).await.unwrap().is_none());
+    let row = || {
+        sqlx::query_as::<_, (i32, Option<String>)>(
+            "SELECT failures,last_error FROM lifecycle_jobs WHERE id=$1",
+        )
+        .bind(job.id)
+        .fetch_one(&pool)
+    };
+    assert_eq!(row().await.unwrap(), (1, Some("failed; retrying.".into())));
+    // Waiting again is not failing again.
+    sqlx::query("UPDATE lifecycle_jobs SET run_after=now()")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job = jobs::claim(&pool).await.unwrap().unwrap();
+    jobs::settle(&pool, &job, &wait).await.unwrap();
+    assert_eq!(row().await.unwrap(), (0, None));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn provisioning_waits_for_a_hostname_and_stops_for_a_changed_tenant(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    let state = state(pool.clone());
+    sqlx::query("UPDATE tenants SET lifecycle_state='provisioning' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) VALUES($1,'database')")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    queue_job(&pool, id, "provision").await;
+    let job = jobs::claim(&pool).await.unwrap().unwrap();
+    jobs::run(&state, &job).await;
+    // No hostname is routed, so nothing about the tenant exists yet.
+    assert!(!job_finished(&pool, job.id).await);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM provisioning_steps WHERE tenant_id=$1 AND step='database'"
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "pending"
+    );
+    assert!(jobs::claim(&pool).await.unwrap().is_none());
+    // Taken offline while waiting: the job has nothing left to do.
+    sqlx::query("UPDATE tenants SET lifecycle_state='deprovisioning' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    jobs::wake_provisioning(&state, id).await;
+    let job = jobs::claim(&pool).await.unwrap().unwrap();
+    jobs::run(&state, &job).await;
+    assert!(job_finished(&pool, job.id).await);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn the_sweep_purges_only_retained_tenants_past_their_date_and_only_once(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let due = tenant(&pool, runtime).await;
+    let waiting = tenant(&pool, runtime).await;
+    let serving = tenant(&pool, runtime).await;
+    sqlx::query("UPDATE tenants SET lifecycle_state='retained',purge_scheduled_for=now()-interval '1 minute' WHERE id=$1").bind(due).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE tenants SET lifecycle_state='retained',purge_scheduled_for=now()+interval '1 day' WHERE id=$1").bind(waiting).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE tenants SET lifecycle_state='ready',purge_scheduled_for=now()-interval '1 minute' WHERE id=$1").bind(serving).execute(&pool).await.unwrap();
+    let state = state(pool.clone());
+    jobs::sweep_due_purges(&state).await.unwrap();
+    jobs::sweep_due_purges(&state).await.unwrap();
+    let states = sqlx::query_as::<_, (Uuid, String)>("SELECT id,lifecycle_state FROM tenants")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    for (id, lifecycle) in states {
+        let expected = if id == due {
+            "purging"
+        } else if id == waiting {
+            "retained"
+        } else {
+            "ready"
+        };
+        assert_eq!(lifecycle, expected);
+    }
+    assert_eq!(
+        sqlx::query_as::<_, (Uuid, String)>("SELECT tenant_id,kind FROM lifecycle_jobs")
+            .fetch_all(&pool)
+            .await
+            .unwrap(),
+        vec![(due, "purge".to_owned())]
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn one_reconciliation_pass_is_in_flight_per_runtime(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let claims =
+        futures::future::join_all((0..8).map(|_| jobs::claim_reconcile(&pool, runtime))).await;
+    assert_eq!(
+        claims
+            .into_iter()
+            .filter(|claim| *claim.as_ref().unwrap())
+            .count(),
+        1
+    );
+}
+
+#[sqlx::test(migrations = false)]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn the_migration_adopts_temporals_work_and_spares_overdue_tenants(pool: PgPool) {
+    for migration in sqlx::migrate!("./migrations")
+        .iter()
+        .filter(|m| m.version < 54)
+    {
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+    }
+    let (runtime, _) = fixture(&pool).await;
+    let mut tenants = HashMap::new();
+    for lifecycle in [
+        "provisioning",
+        "deprovisioning",
+        "purging",
+        "retained",
+        "ready",
+    ] {
+        let id = tenant(&pool, runtime).await;
+        sqlx::query("UPDATE tenants SET lifecycle_state=$1,purge_scheduled_for=now()-interval '1 day' WHERE id=$2")
+            .bind(lifecycle)
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        tenants.insert(lifecycle, id);
+    }
+    let later = tenant(&pool, runtime).await;
+    sqlx::query("UPDATE tenants SET lifecycle_state='retained',purge_scheduled_for=now()+interval '1 day' WHERE id=$1").bind(later).execute(&pool).await.unwrap();
+    let moving = tenants["ready"];
+    let operation = Uuid::new_v4();
+    sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,started_at) VALUES($1,$2,$3,'tenant_domain_change','running',now())").bind(operation).bind(moving).bind(runtime).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO domain_changes(id,tenant_id,operation_id,from_domain,to_domain) VALUES($1,$2,$3,'a.example','b.example')").bind(Uuid::new_v4()).bind(moving).bind(operation).execute(&pool).await.unwrap();
+    sqlx::raw_sql(include_str!("../migrations/054_lifecycle_jobs.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut adopted =
+        sqlx::query_as::<_, (Uuid, String)>("SELECT tenant_id,kind FROM lifecycle_jobs")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    adopted.sort();
+    let mut expected = vec![
+        (tenants["provisioning"], "provision".to_owned()),
+        (tenants["deprovisioning"], "deprovision".to_owned()),
+        (tenants["purging"], "purge".to_owned()),
+        (moving, "domain_change".to_owned()),
+    ];
+    expected.sort();
+    assert_eq!(adopted, expected);
+    // Nothing is purged for a date that passed while Temporal was in charge,
+    // and a date still ahead is kept.
+    let state = state(pool.clone());
+    jobs::sweep_due_purges(&state).await.unwrap();
+    for id in [tenants["retained"], later] {
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT lifecycle_state FROM tenants WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            "retained"
+        );
+    }
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT purge_scheduled_for > now()+interval '6 days' FROM tenants WHERE id=$1"
+        )
+        .bind(tenants["retained"])
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT purge_scheduled_for < now()+interval '2 days' FROM tenants WHERE id=$1"
+        )
+        .bind(later)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    );
 }
