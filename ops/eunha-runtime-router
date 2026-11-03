@@ -59,6 +59,9 @@ write_slot_plist() {
   /usr/bin/plutil -create xml1 "$plist"
   /usr/bin/plutil -insert Label -string "$label" "$plist"
   /usr/bin/plutil -insert ProgramArguments -json "[\"/bin/sh\",\"-c\",\"exec '$ROOT/slots/$slot/eunha' --tenants '$TENANTS' --bind-address '$address' --metrics-bind-address '$metrics'\"]" "$plist"
+  # launchd's default PATH leaves out Homebrew, where ffmpeg and ffprobe are;
+  # Eunha runs them by name to process media.
+  /usr/bin/plutil -insert EnvironmentVariables -json '{"PATH":"/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"}' "$plist"
   /usr/bin/plutil -insert WorkingDirectory -string "$ROOT/slots/$slot" "$plist"
   /usr/bin/plutil -insert RunAtLoad -bool true "$plist"
   /usr/bin/plutil -insert KeepAlive -bool true "$plist"

@@ -330,4 +330,7 @@ launchd-managed Eunha slots on `blue_bind_address` and `green_bind_address`.
 The deployer starts and health-checks the inactive slot, gracefully reloads
 HAProxy so new connections use it, drains the old slot, and then stops it. The
 one-time `ops/eunha-runtime-router bootstrap` cutover is required before setting
-`router_enabled`; subsequent releases are blue/green.
+`router_enabled`; subsequent releases are blue/green. The router writes a slot's
+launch agent as it starts that slot, with Homebrew on its `PATH` for ffmpeg and
+ffprobe, so a change to it reaches a slot the next time that slot starts from a
+deploy, and the other slot one deploy later.
