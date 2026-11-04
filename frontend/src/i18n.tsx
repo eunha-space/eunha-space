@@ -175,6 +175,84 @@ const ko: Record<string, string> = {
   "Use a password with at least 14 characters.":
     "14자 이상의 비밀번호를 사용하세요.",
 
+  "This instance is offline because your subscription ended. Its data is kept, and subscribing again serves it again.":
+    "구독이 종료되어 이 인스턴스가 오프라인 상태입니다. 데이터는 보관되며, 다시 구독하면 다시 서비스됩니다.",
+  "The card could not be registered.":
+    "카드를 등록하지 못했습니다.",
+  "Your subscription is cancelled. Your instances keep running until the end of the paid period, then go offline with their data kept.":
+    "구독이 해지되었습니다. 결제한 기간이 끝날 때까지 인스턴스가 계속 운영되며, 이후 데이터는 보관된 채 오프라인으로 전환됩니다.",
+  "Your card is charged automatically each month.":
+    "매달 등록된 카드로 자동 결제됩니다.",
+  "Your last payment was declined. We'll try again, and your instances keep running meanwhile. Use another card to pay now.":
+    "최근 결제가 거절되었습니다. 다시 결제를 시도하며, 그동안 인스턴스는 계속 운영됩니다. 지금 결제하려면 다른 카드를 등록하세요.",
+  "Your payment is being confirmed.":
+    "결제를 확인하고 있습니다.",
+  "Your subscription has ended, so your instances are offline with their data kept. Subscribe again to serve them again.":
+    "구독이 종료되어 인스턴스가 오프라인 상태입니다. 데이터는 보관되며, 다시 구독하면 다시 서비스됩니다.",
+  "Subscribe to create and run instances.":
+    "인스턴스를 만들고 운영하려면 구독하세요.",
+  "Subscription":
+    "구독",
+  "Active":
+    "이용 중",
+  "Cancelled":
+    "해지됨",
+  "Payment declined":
+    "결제 거절",
+  "Monthly price":
+    "월 요금",
+  "Card":
+    "카드",
+  "Ends on":
+    "종료일",
+  "Renews on":
+    "다음 결제일",
+  "Next attempt":
+    "다음 결제 시도",
+  "Subscribe with a card":
+    "카드로 구독하기",
+  "Use another card":
+    "다른 카드 사용",
+  "Change card":
+    "카드 변경",
+  "Cancel subscription":
+    "구독 해지",
+  "Keep my subscription":
+    "구독 유지",
+  "Payments":
+    "결제 내역",
+  "Period":
+    "기간",
+  "Amount":
+    "금액",
+  "Status":
+    "상태",
+  "Paid":
+    "결제 완료",
+  "Confirming":
+    "확인 중",
+  "Declined":
+    "거절됨",
+  "Cancel your subscription?":
+    "구독을 해지할까요?",
+  "Your paid period is already over, so your instances go offline now. Their data is kept, and subscribing again serves them again.":
+    "결제한 기간이 이미 끝났으므로 인스턴스가 지금 오프라인으로 전환됩니다. 데이터는 보관되며, 다시 구독하면 다시 서비스됩니다.",
+  "Your instances keep running until the end of the paid period, then go offline. Their data is kept, and subscribing again serves them again.":
+    "결제한 기간이 끝날 때까지 인스턴스가 계속 운영되고, 이후 오프라인으로 전환됩니다. 데이터는 보관되며, 다시 구독하면 다시 서비스됩니다.",
+  "Subscribe":
+    "구독하기",
+  "Subscribe to run an instance.":
+    "인스턴스를 운영하려면 구독하세요.",
+  "Subscriptions are not available.":
+    "지금은 구독할 수 없습니다.",
+  "TossPayments could not be reached. Try again shortly.":
+    "토스페이먼츠에 연결하지 못했습니다. 잠시 후 다시 시도하세요.",
+  "There is no subscription to cancel.":
+    "해지할 구독이 없습니다.",
+  "This subscription has ended. Subscribe again to continue.":
+    "구독이 이미 종료되었습니다. 계속하려면 다시 구독하세요.",
+  "The payment was not approved.":
+    "결제가 승인되지 않았습니다.",
 };
 i18n.load("en", en);
 i18n.load("ko", ko);

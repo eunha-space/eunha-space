@@ -200,6 +200,15 @@ mise exec -- cargo run -- set-admin admin@example.com
 unset EUNHA_SPACE_ADMIN_PASSWORD
 ```
 
+## Subscriptions
+
+With `TOSSPAYMENTS_CLIENT_KEY`, `TOSSPAYMENTS_SECRET_KEY` and
+`EUNHA_SPACE_SUBSCRIPTION_AMOUNT` set, customers pay monthly through
+TossPayments automatic payments, and need a subscription to create or restore
+an instance. A subscription that ends takes their instances offline, keeps
+their data, and schedules no purge. Subscribing again serves them again. See
+[docs/billing.md](docs/billing.md).
+
 ## Importing an existing Mastodon instance
 
 **Import instance** in `/admin` takes over a server that already exists, rather

@@ -1,0 +1,1136 @@
+//! Customer subscriptions, charged through TossPayments automatic payments.
+//!
+//! The customer registers a card in TossPayments' billing window, which sends
+//! them back with an `authKey`. That is exchanged here for a billing key, which
+//! charges the card each month without the customer. TossPayments schedules
+//! nothing itself: a renewal is a row in `subscriptions` whose `next_attempt_at`
+//! has come, and the renewer charges it.
+//!
+//! A charge is written to `subscription_payments` before TossPayments is asked,
+//! and its order id is also the request's idempotency key. A control plane that
+//! dies mid-request leaves the payment pending, and the next attempt asks again
+//! under the same key, which returns the first answer rather than charging
+//! twice.
+//!
+//! The billing key and the secret key never leave this process: no API returns
+//! them, and no log or operation event formats a request that carries them.
+//! *docs/billing.md* describes what a customer sees and what an ended
+//! subscription does to their instances.
+
+use std::time::Duration;
+
+use anyhow::Result;
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+use crate::{
+    ApiError, Shared, begin_deprovisioning, customer, customer_instance_count,
+    customer_instance_limit, jobs, queue_restore,
+};
+
+/// How long after each declined renewal to try the card again. One more decline
+/// than there are entries ends the subscription: about a week after the period
+/// it was paying for ended.
+const RETRY_AFTER_DECLINE: [&str; 3] = ["1 day", "2 days", "4 days"];
+
+/// How long to wait before asking about a charge whose outcome is not known.
+const RETRY_UNKNOWN: &str = "5 minutes";
+
+/// How long a charge in flight holds its subscription. Longer than the request's
+/// own timeout, so a slow approval is not sent again while it is still running.
+const LEASE: &str = "3 minutes";
+
+/// How often the renewer looks for a subscription that is due.
+const POLL_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The most charges one pass makes, so a backlog cannot starve the loop's tick.
+const MAX_PER_PASS: usize = 50;
+
+/// What TossPayments says about one charge.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Charge {
+    Paid {
+        payment_key: String,
+        receipt_url: Option<String>,
+    },
+    /// The card or TossPayments refused it. The message is TossPayments' own,
+    /// written for the customer.
+    Declined { code: String, message: String },
+    /// No answer that says either way. The payment stays pending and is asked
+    /// about again under the same idempotency key.
+    Unknown,
+}
+
+pub(crate) struct Config {
+    client_key: String,
+    secret_key: String,
+    /// `https://api.tosspayments.com` unless `TOSSPAYMENTS_API_BASE` points at
+    /// a stand-in, which is how charging is tested.
+    api_base: String,
+    /// What a new subscription is charged each month, in won.
+    pub amount: i64,
+    order_name: String,
+    /// Card approval can take far longer than the four seconds the shared
+    /// client allows.
+    client: reqwest::Client,
+}
+
+impl Config {
+    pub(crate) fn from_env() -> Result<Option<Self>> {
+        let (Ok(client_key), Ok(secret_key)) = (
+            std::env::var("TOSSPAYMENTS_CLIENT_KEY"),
+            std::env::var("TOSSPAYMENTS_SECRET_KEY"),
+        ) else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            !client_key.trim().is_empty() && !secret_key.trim().is_empty(),
+            "TossPayments keys must not be empty"
+        );
+        let amount = std::env::var("EUNHA_SPACE_SUBSCRIPTION_AMOUNT")
+            .map_err(|_| {
+                anyhow::anyhow!("EUNHA_SPACE_SUBSCRIPTION_AMOUNT is required with TossPayments")
+            })?
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|amount| *amount > 0)
+            .ok_or_else(|| {
+                anyhow::anyhow!("EUNHA_SPACE_SUBSCRIPTION_AMOUNT must be a positive number of won")
+            })?;
+        Ok(Some(Self::new(
+            client_key.trim().into(),
+            secret_key.trim().into(),
+            std::env::var("TOSSPAYMENTS_API_BASE")
+                .unwrap_or_else(|_| "https://api.tosspayments.com".into()),
+            amount,
+            std::env::var("EUNHA_SPACE_SUBSCRIPTION_NAME")
+                .unwrap_or_else(|_| "eunha space 월간 구독".into()),
+        )?))
+    }
+
+    pub(crate) fn new(
+        client_key: String,
+        secret_key: String,
+        api_base: String,
+        amount: i64,
+        order_name: String,
+    ) -> Result<Self> {
+        Ok(Self {
+            client_key,
+            secret_key,
+            api_base: api_base.trim_end_matches('/').into(),
+            amount,
+            order_name: order_name.chars().take(100).collect(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()?,
+        })
+    }
+
+    fn authorization(&self) -> String {
+        format!("Basic {}", STANDARD.encode(format!("{}:", self.secret_key)))
+    }
+
+    /// Exchange the `authKey` the billing window returned for a billing key.
+    async fn issue_billing_key(
+        &self,
+        auth_key: &str,
+        customer_key: Uuid,
+    ) -> Result<IssuedBillingKey, ApiError> {
+        let response = self
+            .client
+            .post(format!("{}/v1/billing/authorizations/issue", self.api_base))
+            .header("Authorization", self.authorization())
+            .json(&serde_json::json!({
+                "authKey": auth_key,
+                "customerKey": customer_key.to_string(),
+            }))
+            .send()
+            .await
+            // The error would name the request; say only that it failed.
+            .map_err(|_| unreachable_toss())?;
+        let status = response.status();
+        let body = response.bytes().await.map_err(|_| unreachable_toss())?;
+        if status.is_success() {
+            let issued: IssuedBillingKey =
+                serde_json::from_slice(&body).map_err(|_| unreachable_toss())?;
+            if issued.customer_key != customer_key.to_string() || issued.billing_key.is_empty() {
+                return Err(unreachable_toss());
+            }
+            return Ok(issued);
+        }
+        Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            serde_json::from_slice::<TossError>(&body)
+                .map(|error| customer_message(&error.message))
+                .unwrap_or_else(|_| "The card could not be registered.".into()),
+        ))
+    }
+
+    /// Charge a billing key. Sent again with the same order id, it asks about
+    /// the first request rather than making a second one.
+    pub(crate) async fn charge(
+        &self,
+        billing_key: &str,
+        customer_key: Uuid,
+        order_id: &str,
+        amount: i64,
+        email: Option<&str>,
+    ) -> Charge {
+        let response = self
+            .client
+            .post(format!(
+                "{}/v1/billing/{}",
+                self.api_base,
+                urlencode(billing_key)
+            ))
+            .header("Authorization", self.authorization())
+            .header("Idempotency-Key", order_id)
+            .json(&serde_json::json!({
+                "customerKey": customer_key.to_string(),
+                "amount": amount,
+                "orderId": order_id,
+                "orderName": self.order_name,
+                "customerEmail": email,
+            }))
+            .send()
+            .await;
+        let Ok(response) = response else {
+            return Charge::Unknown;
+        };
+        let status = response.status();
+        let Ok(body) = response.bytes().await else {
+            return Charge::Unknown;
+        };
+        match charge_outcome(status, &body, order_id, amount) {
+            // The order was settled before, longer ago than the idempotency key
+            // is kept: what happened to it is on the payment itself.
+            Some(Charge::Declined { code, .. })
+                if matches!(
+                    code.as_str(),
+                    "DUPLICATED_ORDER_ID" | "ALREADY_PROCESSED_PAYMENT"
+                ) =>
+            {
+                self.payment_by_order(order_id, amount).await
+            }
+            Some(outcome) => outcome,
+            None => Charge::Unknown,
+        }
+    }
+
+    async fn payment_by_order(&self, order_id: &str, amount: i64) -> Charge {
+        let Ok(response) = self
+            .client
+            .get(format!(
+                "{}/v1/payments/orders/{}",
+                self.api_base,
+                urlencode(order_id)
+            ))
+            .header("Authorization", self.authorization())
+            .send()
+            .await
+        else {
+            return Charge::Unknown;
+        };
+        let status = response.status();
+        let Ok(body) = response.bytes().await else {
+            return Charge::Unknown;
+        };
+        if !status.is_success() {
+            return Charge::Unknown;
+        }
+        match serde_json::from_slice::<Payment>(&body) {
+            Ok(payment) if payment.status == "DONE" => {
+                charge_outcome(status, &body, order_id, amount).unwrap_or(Charge::Unknown)
+            }
+            Ok(payment) if matches!(payment.status.as_str(), "ABORTED" | "EXPIRED") => {
+                Charge::Declined {
+                    code: payment.status,
+                    message: "The payment was not approved.".into(),
+                }
+            }
+            _ => Charge::Unknown,
+        }
+    }
+}
+
+fn unreachable_toss() -> ApiError {
+    ApiError(
+        StatusCode::BAD_GATEWAY,
+        "TossPayments could not be reached. Try again shortly.".into(),
+    )
+}
+
+/// TossPayments' path segments are its own identifiers, but nothing here
+/// should be able to change which path is asked for.
+fn urlencode(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+/// TossPayments' messages are written for customers, but they are still text
+/// from outside: keep them short and on one line.
+fn customer_message(message: &str) -> String {
+    let message: String = message
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(200)
+        .collect();
+    let message = message.trim();
+    if message.is_empty() {
+        "The payment was not approved.".into()
+    } else {
+        message.into()
+    }
+}
+
+/// Codes that say TossPayments, not the card, could not finish: the charge may
+/// or may not have happened, so it is asked about again rather than retried
+/// as new.
+const UNSETTLED_CODES: [&str; 5] = [
+    "IDEMPOTENT_REQUEST_PROCESSING",
+    "PROVIDER_ERROR",
+    "FAILED_INTERNAL_SYSTEM_PROCESSING",
+    "FAILED_PAYMENT_INTERNAL_SYSTEM_PROCESSING",
+    "UNKNOWN_PAYMENT_ERROR",
+];
+
+/// Read a charge's response. `None` when it does not say what happened.
+pub(crate) fn charge_outcome(
+    status: reqwest::StatusCode,
+    body: &[u8],
+    order_id: &str,
+    amount: i64,
+) -> Option<Charge> {
+    if status.is_success() {
+        let payment = serde_json::from_slice::<Payment>(body).ok()?;
+        // An approval for anything but this order and amount is not one we
+        // can count.
+        if payment.status != "DONE"
+            || payment.order_id != order_id
+            || payment.total_amount != amount
+        {
+            return None;
+        }
+        return Some(Charge::Paid {
+            payment_key: payment.payment_key,
+            receipt_url: payment.receipt.and_then(|receipt| receipt.url),
+        });
+    }
+    if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return None;
+    }
+    let error = serde_json::from_slice::<TossError>(body).ok()?;
+    if UNSETTLED_CODES.contains(&error.code.as_str()) {
+        return None;
+    }
+    Some(Charge::Declined {
+        message: customer_message(&error.message),
+        code: error.code.chars().take(64).collect(),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct IssuedBillingKey {
+    billing_key: String,
+    customer_key: String,
+    card_company: Option<String>,
+    card_number: Option<String>,
+    card: Option<IssuedCard>,
+}
+
+#[derive(Deserialize)]
+struct IssuedCard {
+    number: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Payment {
+    #[serde(default)]
+    payment_key: String,
+    #[serde(default)]
+    order_id: String,
+    status: String,
+    #[serde(default)]
+    total_amount: i64,
+    receipt: Option<Receipt>,
+}
+
+#[derive(Deserialize)]
+struct Receipt {
+    url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TossError {
+    code: String,
+    message: String,
+}
+
+/// Whether a customer may run another instance: one whose renewal was declined
+/// is still subscribed while it is retried. Without TossPayments
+/// configured nobody is billed; administrators are never billed.
+pub(crate) async fn require_subscription(
+    s: &Shared,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+) -> Result<(), ApiError> {
+    if s.billing.is_none() {
+        return Ok(());
+    }
+    let allowed = sqlx::query_scalar::<_, bool>(
+        "SELECT u.is_admin OR COALESCE(s.status IN ('active','past_due'),false) FROM users u LEFT JOIN subscriptions s ON s.user_id=u.id WHERE u.id=$1",
+    )
+    .bind(user_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if allowed {
+        Ok(())
+    } else {
+        Err(ApiError(
+            StatusCode::PAYMENT_REQUIRED,
+            "Subscribe to run an instance.".into(),
+        ))
+    }
+}
+
+/// What the customer portal needs to know before showing instance actions.
+pub(crate) async fn subscription_required(s: &Shared, user_id: Uuid) -> Result<bool, ApiError> {
+    if s.billing.is_none() {
+        return Ok(false);
+    }
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT NOT (u.is_admin OR COALESCE(s.status IN ('active','past_due'),false)) FROM users u LEFT JOIN subscriptions s ON s.user_id=u.id WHERE u.id=$1",
+    )
+    .bind(user_id)
+    .fetch_one(&s.db)
+    .await?)
+}
+
+fn billing_config(s: &Shared) -> Result<&Config, ApiError> {
+    s.billing.as_deref().ok_or_else(|| {
+        ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Subscriptions are not available.".into(),
+        )
+    })
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct SubscriptionView {
+    status: String,
+    amount: i64,
+    card_company: Option<String>,
+    card_number: Option<String>,
+    has_card: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
+    current_period_end: Option<OffsetDateTime>,
+    cancel_at_period_end: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
+    next_attempt_at: Option<OffsetDateTime>,
+    last_error: Option<String>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct PaymentView {
+    order_id: String,
+    amount: i64,
+    status: String,
+    #[serde(with = "time::serde::rfc3339")]
+    period_start: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    period_end: OffsetDateTime,
+    receipt_url: Option<String>,
+    failure_message: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    requested_at: OffsetDateTime,
+}
+
+#[derive(Serialize)]
+pub(crate) struct BillingView {
+    enabled: bool,
+    /// What subscribing costs now, in won. An existing subscription keeps the
+    /// amount it was started at.
+    amount: Option<i64>,
+    subscription: Option<SubscriptionView>,
+    payments: Vec<PaymentView>,
+}
+
+async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiError> {
+    let subscription = sqlx::query_as::<_, SubscriptionView>(
+        "SELECT status,amount,card_company,card_number,billing_key IS NOT NULL has_card,current_period_end,cancel_at_period_end,next_attempt_at,last_error FROM subscriptions WHERE user_id=$1",
+    )
+    .bind(user_id)
+    .fetch_optional(&s.db)
+    .await?;
+    let payments = sqlx::query_as::<_, PaymentView>(
+        "SELECT order_id,amount,status,period_start,period_end,receipt_url,failure_message,requested_at FROM subscription_payments WHERE user_id=$1 ORDER BY requested_at DESC LIMIT 24",
+    )
+    .bind(user_id)
+    .fetch_all(&s.db)
+    .await?;
+    Ok(BillingView {
+        enabled: s.billing.is_some(),
+        amount: s.billing.as_ref().map(|billing| billing.amount),
+        subscription,
+        payments,
+    })
+}
+
+pub(crate) async fn get(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+) -> Result<Json<BillingView>, ApiError> {
+    let (user_id, _) = customer(&headers, &s.db).await?;
+    Ok(Json(view(&s, user_id).await?))
+}
+
+#[derive(Serialize)]
+pub(crate) struct Checkout {
+    client_key: String,
+    customer_key: Uuid,
+}
+
+/// What the billing window needs to open: the public client key and the key
+/// the card will be filed under.
+pub(crate) async fn checkout(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+) -> Result<Json<Checkout>, ApiError> {
+    let (user_id, _) = customer(&headers, &s.db).await?;
+    let billing = billing_config(&s)?;
+    let customer_key = sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO subscriptions(user_id,customer_key,amount) VALUES($1,$2,$3) ON CONFLICT (user_id) DO UPDATE SET user_id=excluded.user_id RETURNING customer_key",
+    )
+    .bind(user_id)
+    .bind(Uuid::new_v4())
+    .bind(billing.amount)
+    .fetch_one(&s.db)
+    .await?;
+    Ok(Json(Checkout {
+        client_key: billing.client_key.clone(),
+        customer_key,
+    }))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Authorization {
+    auth_key: String,
+    customer_key: Uuid,
+}
+
+/// The billing window's success redirect: register the card, and charge the
+/// first month when the subscription is not already paid for.
+pub(crate) async fn authorize(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<Authorization>,
+) -> Result<Json<BillingView>, ApiError> {
+    let (user_id, _) = customer(&headers, &s.db).await?;
+    let billing = billing_config(&s)?;
+    let auth_key = body.auth_key.trim();
+    if auth_key.is_empty() || auth_key.len() > 300 {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "The card could not be registered.".into(),
+        ));
+    }
+    // The customer key in the redirect is the customer's to change, so it
+    // has to be the one this account was given.
+    let owned = sqlx::query_scalar::<_, bool>(
+        "SELECT true FROM subscriptions WHERE user_id=$1 AND customer_key=$2",
+    )
+    .bind(user_id)
+    .bind(body.customer_key)
+    .fetch_optional(&s.db)
+    .await?
+    .is_some();
+    if !owned {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "The card could not be registered.".into(),
+        ));
+    }
+    let issued = billing
+        .issue_billing_key(auth_key, body.customer_key)
+        .await?;
+    let card_number = issued
+        .card_number
+        .or(issued.card.and_then(|card| card.number))
+        .map(|number| number.chars().take(32).collect::<String>());
+    let card_company = issued
+        .card_company
+        .map(|company| company.chars().take(32).collect::<String>());
+    let mut tx = s.db.begin().await?;
+    let status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM subscriptions WHERE user_id=$1 FOR UPDATE",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query("UPDATE subscriptions SET billing_key=$2,card_company=$3,card_number=$4,last_error=NULL,updated_at=now() WHERE user_id=$1")
+        .bind(user_id)
+        .bind(&issued.billing_key)
+        .bind(&card_company)
+        .bind(&card_number)
+        .execute(&mut *tx)
+        .await?;
+    let pending = sqlx::query_scalar::<_, bool>(
+        "SELECT true FROM subscription_payments WHERE user_id=$1 AND status='pending'",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    let detail = match status.as_str() {
+        // Nothing is paid for, so this starts a new subscription today, at
+        // today's price. A charge already in flight keeps the period it was
+        // for.
+        "incomplete" | "canceled" | "lapsed" => {
+            sqlx::query(if pending {
+                "UPDATE subscriptions SET status='incomplete',failed_attempts=0,cancel_at_period_end=false,next_attempt_at=now() WHERE user_id=$1"
+            } else {
+                "UPDATE subscriptions SET status='incomplete',amount=$2,anchor_at=now(),periods_paid=0,current_period_end=NULL,failed_attempts=0,cancel_at_period_end=false,next_attempt_at=now() WHERE user_id=$1"
+            })
+            .bind(user_id)
+            .bind(billing.amount)
+            .execute(&mut *tx)
+            .await?;
+            "subscribe"
+        }
+        // A new card for a renewal that was declined is tried at once, with
+        // the full run of retries ahead of it.
+        "past_due" => {
+            sqlx::query(
+                "UPDATE subscriptions SET failed_attempts=0,next_attempt_at=now() WHERE user_id=$1",
+            )
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+            "card_change"
+        }
+        _ => "card_change",
+    };
+    record(
+        &mut tx,
+        user_id,
+        "subscription_card",
+        "succeeded",
+        serde_json::json!({ "change": detail, "card_company": card_company }),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    // Charge now rather than leave the customer waiting on the renewer. If
+    // another control plane holds the charge, it settles it instead.
+    if let Err(_error) = charge_due(&s, Some(user_id)).await {
+        tracing::warn!(%user_id, "could not charge a new subscription");
+    }
+    Ok(Json(view(&s, user_id).await?))
+}
+
+/// Stop renewing. The instances keep running until the paid period ends.
+pub(crate) async fn cancel(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+) -> Result<Json<BillingView>, ApiError> {
+    let (user_id, _) = customer(&headers, &s.db).await?;
+    let mut tx = s.db.begin().await?;
+    // A declined renewal's period is already over, so cancelling it ends the
+    // subscription now instead of after the retries.
+    let cancelled = sqlx::query_scalar::<_, bool>(
+        "UPDATE subscriptions SET cancel_at_period_end=true,next_attempt_at=CASE WHEN status='past_due' THEN now() ELSE next_attempt_at END,updated_at=now() WHERE user_id=$1 AND status IN ('active','past_due') RETURNING true",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if !cancelled {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "There is no subscription to cancel.".into(),
+        ));
+    }
+    record(
+        &mut tx,
+        user_id,
+        "subscription_cancel",
+        "succeeded",
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(view(&s, user_id).await?))
+}
+
+/// Keep renewing a subscription that was cancelled but has not ended yet.
+pub(crate) async fn resume(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+) -> Result<Json<BillingView>, ApiError> {
+    let (user_id, _) = customer(&headers, &s.db).await?;
+    let mut tx = s.db.begin().await?;
+    let resumed = sqlx::query_scalar::<_, bool>(
+        "UPDATE subscriptions SET cancel_at_period_end=false,updated_at=now() WHERE user_id=$1 AND status='active' AND cancel_at_period_end RETURNING true",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if !resumed {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "This subscription has ended. Subscribe again to continue.".into(),
+        ));
+    }
+    record(
+        &mut tx,
+        user_id,
+        "subscription_resume",
+        "succeeded",
+        serde_json::json!({}),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(view(&s, user_id).await?))
+}
+
+/// An audit record of a billing change. Billing belongs to an account, not an
+/// instance, so it names no tenant. `detail` must never carry a key.
+async fn record(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    kind: &str,
+    status: &str,
+    detail: serde_json::Value,
+    error: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT INTO operations(id,kind,status,requested_by,detail,error,started_at,finished_at) VALUES($1,$2,$3,$4,$5,$6,now(),now())")
+        .bind(Uuid::new_v4())
+        .bind(kind)
+        .bind(status)
+        .bind(user_id)
+        .bind(detail)
+        .bind(error)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub async fn renewer(state: Shared) {
+    loop {
+        if state.billing.is_some() {
+            for _ in 0..MAX_PER_PASS {
+                match charge_due(&state, None).await {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(_error) => {
+                        tracing::warn!("could not renew the subscriptions that are due");
+                        break;
+                    }
+                }
+            }
+        }
+        state.health.tick("billing");
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct Due {
+    user_id: Uuid,
+    customer_key: Uuid,
+    status: String,
+    cancel_at_period_end: bool,
+    billing_key: Option<String>,
+    email: Option<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct PendingPayment {
+    order_id: String,
+    amount: i64,
+    period: i32,
+    period_end: OffsetDateTime,
+}
+
+/// Settle one subscription that is due, or the given user's if it is.
+/// Returns whether there was one.
+pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool> {
+    let Some(billing) = s.billing.as_deref() else {
+        return Ok(false);
+    };
+    let mut tx = s.db.begin().await?;
+    let Some(due) = sqlx::query_as::<_, Due>(
+        "SELECT s.user_id,s.customer_key,s.status,s.cancel_at_period_end,s.billing_key,u.email FROM subscriptions s JOIN users u ON u.id=s.user_id WHERE s.next_attempt_at<=now() AND (s.lease_until IS NULL OR s.lease_until<now()) AND s.status IN ('incomplete','active','past_due') AND ($1::uuid IS NULL OR s.user_id=$1) ORDER BY s.next_attempt_at LIMIT 1 FOR UPDATE OF s SKIP LOCKED",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    else {
+        return Ok(false);
+    };
+    if due.cancel_at_period_end && due.status != "incomplete" {
+        let tenants = end_subscription(&mut tx, due.user_id, "canceled").await?;
+        tx.commit().await?;
+        wake(s, &tenants).await;
+        notify(
+            s,
+            due.email.as_deref(),
+            "Your eunha space subscription has ended",
+            "Your subscription was cancelled and its paid period is over, so your instances are offline. Their data is kept: subscribe again from your account page to serve them again.",
+        )
+        .await;
+        return Ok(true);
+    }
+    let Some(billing_key) = due.billing_key.clone() else {
+        sqlx::query("UPDATE subscriptions SET next_attempt_at=NULL WHERE user_id=$1")
+            .bind(due.user_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        return Ok(true);
+    };
+    let pending = match sqlx::query_as::<_, PendingPayment>(
+        "SELECT order_id,amount,period,period_end FROM subscription_payments WHERE user_id=$1 AND status='pending'",
+    )
+    .bind(due.user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    {
+        Some(pending) => pending,
+        None => sqlx::query_as::<_, PendingPayment>(
+            "INSERT INTO subscription_payments(order_id,user_id,amount,period,period_start,period_end) SELECT $1,user_id,amount,periods_paid,anchor_at+make_interval(months => periods_paid),anchor_at+make_interval(months => periods_paid+1) FROM subscriptions WHERE user_id=$2 RETURNING order_id,amount,period,period_end",
+        )
+        .bind(format!("eunha-{}", Uuid::new_v4().simple()))
+        .bind(due.user_id)
+        .fetch_one(&mut *tx)
+        .await?,
+    };
+    sqlx::query(&format!(
+        "UPDATE subscriptions SET lease_until=now()+interval '{LEASE}' WHERE user_id=$1"
+    ))
+    .bind(due.user_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let outcome = billing
+        .charge(
+            &billing_key,
+            due.customer_key,
+            &pending.order_id,
+            pending.amount,
+            due.email.as_deref(),
+        )
+        .await;
+    settle(s, &due, &pending, outcome).await?;
+    Ok(true)
+}
+
+async fn settle(s: &Shared, due: &Due, pending: &PendingPayment, outcome: Charge) -> Result<()> {
+    let mut tx = s.db.begin().await?;
+    match outcome {
+        Charge::Paid {
+            payment_key,
+            receipt_url,
+        } => {
+            sqlx::query("UPDATE subscription_payments SET status='paid',payment_key=$2,receipt_url=$3,settled_at=now() WHERE order_id=$1")
+                .bind(&pending.order_id)
+                .bind(payment_key)
+                .bind(receipt_url)
+                .execute(&mut *tx)
+                .await?;
+            // A subscription cancelled while this charge was in flight is not
+            // renewed again, but the period it paid for is still served.
+            sqlx::query("UPDATE subscriptions SET status='active',periods_paid=$2+1,current_period_end=$3,next_attempt_at=$3,failed_attempts=0,last_error=NULL,lease_until=NULL,updated_at=now() WHERE user_id=$1")
+                .bind(due.user_id)
+                .bind(pending.period)
+                .bind(pending.period_end)
+                .execute(&mut *tx)
+                .await?;
+            record(
+                &mut tx,
+                due.user_id,
+                "subscription_charge",
+                "succeeded",
+                serde_json::json!({ "order_id": pending.order_id, "amount": pending.amount, "period": pending.period }),
+                None,
+            )
+            .await?;
+            restore_suspended(s, &mut tx, due.user_id).await?;
+            tx.commit().await?;
+        }
+        Charge::Declined { code, message } => {
+            sqlx::query("UPDATE subscription_payments SET status='failed',failure_code=$2,failure_message=$3,settled_at=now() WHERE order_id=$1")
+                .bind(&pending.order_id)
+                .bind(&code)
+                .bind(&message)
+                .execute(&mut *tx)
+                .await?;
+            record(
+                &mut tx,
+                due.user_id,
+                "subscription_charge",
+                "failed",
+                serde_json::json!({ "order_id": pending.order_id, "amount": pending.amount, "period": pending.period, "code": code }),
+                Some(&message),
+            )
+            .await?;
+            if due.status == "incomplete" {
+                // Nothing was ever paid for, so there is nothing to retry: the
+                // customer is in the billing window and can try another card.
+                sqlx::query("UPDATE subscriptions SET next_attempt_at=NULL,last_error=$2,lease_until=NULL,updated_at=now() WHERE user_id=$1")
+                    .bind(due.user_id)
+                    .bind(&message)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                return Ok(());
+            }
+            let failed_attempts = sqlx::query_scalar::<_, i32>(
+                "UPDATE subscriptions SET failed_attempts=failed_attempts+1,last_error=$2,lease_until=NULL,updated_at=now() WHERE user_id=$1 RETURNING failed_attempts",
+            )
+            .bind(due.user_id)
+            .bind(&message)
+            .fetch_one(&mut *tx)
+            .await?;
+            match RETRY_AFTER_DECLINE.get(failed_attempts as usize - 1) {
+                Some(wait) => {
+                    sqlx::query(&format!("UPDATE subscriptions SET status='past_due',next_attempt_at=now()+interval '{wait}' WHERE user_id=$1"))
+                        .bind(due.user_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    tx.commit().await?;
+                    notify(
+                        s,
+                        due.email.as_deref(),
+                        "Your eunha space payment was declined",
+                        &format!(
+                            "We could not renew your subscription: {message}\n\nWe will try again, and your instances keep running meanwhile. To use another card, open your account page."
+                        ),
+                    )
+                    .await;
+                }
+                None => {
+                    let tenants = end_subscription(&mut tx, due.user_id, "lapsed").await?;
+                    tx.commit().await?;
+                    wake(s, &tenants).await;
+                    notify(
+                        s,
+                        due.email.as_deref(),
+                        "Your eunha space subscription has ended",
+                        "We could not renew your subscription after several attempts, so your instances are offline. Their data is kept: subscribe again from your account page to serve them again.",
+                    )
+                    .await;
+                }
+            }
+        }
+        Charge::Unknown => {
+            sqlx::query(&format!("UPDATE subscriptions SET lease_until=NULL,next_attempt_at=now()+interval '{RETRY_UNKNOWN}' WHERE user_id=$1"))
+                .bind(due.user_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+        }
+    }
+    Ok(())
+}
+
+/// End a subscription and take its instances offline. Their data is kept and
+/// no purge is scheduled: nobody confirmed a deletion. Returns the tenants
+/// whose provisioning has to be woken to notice.
+async fn end_subscription(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    status: &str,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query("UPDATE subscriptions SET status=$2,next_attempt_at=NULL,cancel_at_period_end=false,lease_until=NULL,updated_at=now() WHERE user_id=$1")
+        .bind(user_id)
+        .bind(status)
+        .execute(&mut **tx)
+        .await?;
+    let tenants = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM tenants WHERE user_id=$1 AND lifecycle_state IN ('provisioning','ready','failed') ORDER BY created_at FOR UPDATE",
+    )
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for &tenant_id in &tenants {
+        begin_deprovisioning(tx, tenant_id, None, None).await?;
+        sqlx::query(
+            "UPDATE tenants SET purge_scheduled_for=NULL,billing_suspended_at=now() WHERE id=$1",
+        )
+        .bind(tenant_id)
+        .execute(&mut **tx)
+        .await?;
+        sqlx::query("INSERT INTO operation_events(operation_id,message) SELECT id,'Taken offline because the subscription ended; no purge is scheduled.' FROM operations WHERE tenant_id=$1 AND kind='tenant_deprovision' ORDER BY created_at DESC LIMIT 1")
+            .bind(tenant_id)
+            .execute(&mut **tx)
+            .await?;
+    }
+    record(
+        tx,
+        user_id,
+        "subscription_end",
+        "succeeded",
+        serde_json::json!({ "status": status, "suspended_tenants": tenants.len() }),
+        None,
+    )
+    .await?;
+    Ok(tenants)
+}
+
+/// Serve again the instances an ended subscription took offline, as far as the
+/// customer's instance limit allows. One that cannot come back, such as one
+/// whose custom domain another instance took meanwhile, stays retained for the
+/// customer to see.
+async fn restore_suspended(
+    s: &Shared,
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+) -> Result<()> {
+    let suspended = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM tenants WHERE user_id=$1 AND lifecycle_state='retained' AND billing_suspended_at IS NOT NULL ORDER BY created_at FOR UPDATE",
+    )
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for tenant_id in suspended {
+        let limit = customer_instance_limit(tx, user_id).await?;
+        let count = customer_instance_count(tx, user_id).await?;
+        if limit.is_some_and(|limit| count >= limit) {
+            break;
+        }
+        let mut savepoint = sqlx::Acquire::begin(&mut **tx).await?;
+        match queue_restore(s, &mut savepoint, tenant_id, None, None).await {
+            Ok(()) => savepoint.commit().await?,
+            Err(_) => savepoint.rollback().await?,
+        }
+    }
+    Ok(())
+}
+
+async fn wake(s: &Shared, tenants: &[Uuid]) {
+    for &tenant_id in tenants {
+        jobs::wake_provisioning(s, tenant_id).await;
+    }
+}
+
+/// Tell the customer about their subscription, if mail is configured. Best
+/// effort: the account page says the same.
+async fn notify(s: &Shared, email: Option<&str>, subject: &str, body: &str) {
+    let (Some(mail), Some(email)) = (s.customer_email.as_ref(), email) else {
+        return;
+    };
+    let Ok(to) = email.parse() else {
+        return;
+    };
+    use lettre::AsyncTransport;
+    let Ok(message) = lettre::Message::builder()
+        .from(mail.from.clone())
+        .to(to)
+        .subject(subject)
+        .body(format!(
+            "{body}\n\n{}/account",
+            mail.public_url.trim_end_matches('/')
+        ))
+    else {
+        return;
+    };
+    if mail.transport.send(message).await.is_err() {
+        tracing::warn!("could not send a subscription email");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_approval_counts_only_for_its_own_order_and_amount() {
+        let ok = reqwest::StatusCode::OK;
+        let body = br#"{"paymentKey":"pk","orderId":"eunha-1","status":"DONE","totalAmount":9900,"receipt":{"url":"https://receipt.example/1"}}"#;
+        assert_eq!(
+            charge_outcome(ok, body, "eunha-1", 9900),
+            Some(Charge::Paid {
+                payment_key: "pk".into(),
+                receipt_url: Some("https://receipt.example/1".into())
+            })
+        );
+        assert_eq!(charge_outcome(ok, body, "eunha-2", 9900), None);
+        assert_eq!(charge_outcome(ok, body, "eunha-1", 100), None);
+        let waiting =
+            br#"{"paymentKey":"pk","orderId":"eunha-1","status":"IN_PROGRESS","totalAmount":9900}"#;
+        assert_eq!(charge_outcome(ok, waiting, "eunha-1", 9900), None);
+    }
+
+    #[test]
+    fn a_decline_keeps_its_reason_and_an_outage_is_asked_about_again() {
+        let declined = charge_outcome(
+            reqwest::StatusCode::FORBIDDEN,
+            "{\"code\":\"REJECT_CARD_COMPANY\",\"message\":\"잔액이 부족합니다.\\n\"}".as_bytes(),
+            "eunha-1",
+            9900,
+        );
+        assert_eq!(
+            declined,
+            Some(Charge::Declined {
+                code: "REJECT_CARD_COMPANY".into(),
+                message: "잔액이 부족합니다.".into()
+            })
+        );
+        assert_eq!(
+            charge_outcome(
+                reqwest::StatusCode::CONFLICT,
+                br#"{"code":"IDEMPOTENT_REQUEST_PROCESSING","message":"x"}"#,
+                "eunha-1",
+                9900
+            ),
+            None
+        );
+        assert_eq!(
+            charge_outcome(
+                reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+                br#"{"code":"REJECT_CARD_COMPANY","message":"x"}"#,
+                "eunha-1",
+                9900
+            ),
+            None
+        );
+        assert_eq!(
+            charge_outcome(reqwest::StatusCode::BAD_REQUEST, b"<html>", "eunha-1", 9900),
+            None
+        );
+    }
+
+    #[test]
+    fn the_secret_key_is_sent_as_basic_credentials() {
+        let config = Config::new(
+            "ck".into(),
+            "test_sk_secret".into(),
+            "https://toss.example/".into(),
+            9900,
+            "plan".into(),
+        )
+        .unwrap();
+        assert_eq!(config.authorization(), "Basic dGVzdF9za19zZWNyZXQ6");
+        assert_eq!(config.api_base, "https://toss.example");
+    }
+
+    #[test]
+    fn path_segments_cannot_escape_their_place() {
+        assert_eq!(urlencode("a/../b?c"), "a%2F..%2Fb%3Fc");
+    }
+}

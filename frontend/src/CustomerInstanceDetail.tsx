@@ -475,7 +475,8 @@ function DeleteInstance(
       }
       onChanged();
     } catch (failure) {
-      setError(errorMessage(failure));
+      // Server messages are catalog keys too, so they localize like the rest.
+      setError(t(errorMessage(failure)));
     } finally {
       setBusy(false);
       setConfirmation("");
@@ -491,6 +492,10 @@ function DeleteInstance(
         "This instance was deleted because its custom domain wasn't connected within 7 days, so it was never set up. Restore it to try the domain again.",
       )
     }`;
+  } else if (retained && tenant.billing_suspended) {
+    description = t(
+      "This instance is offline because your subscription ended. Its data is kept, and subscribing again serves it again.",
+    );
   } else if (retained) {
     description = t(
       "This instance is offline. Its data is kept until the date below, then permanently deleted unless you restore it.",

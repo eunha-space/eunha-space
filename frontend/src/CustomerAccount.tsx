@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { SubscriptionCard } from "@/CustomerSubscription";
 
 export function CustomerAccount(
   { customer, onChanged }: { customer: Customer; onChanged: () => Promise<void> },
@@ -28,6 +29,9 @@ export function CustomerAccount(
         <h1 className="text-2xl font-semibold tracking-tight">{t("Account")}</h1>
         <p className="text-muted-foreground text-sm">{customer.email}</p>
       </div>
+      {customer.has_password && (
+        <SubscriptionCard customer={customer} onChanged={onChanged} />
+      )}
       <PasswordCard customer={customer} onChanged={onChanged} />
     </div>
   );

@@ -159,6 +159,7 @@ fn state(pool: PgPool) -> Shared {
         tenant_pooler_address: None,
         tenant_pooler_client_slots: None,
         cloudflare: None,
+        billing: None,
         provided_domain_suffixes: vec![],
         customer_email: None,
         runtime_reloads: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -1563,5 +1564,372 @@ async fn the_migration_adopts_temporals_work_and_spares_overdue_tenants(pool: Pg
         .fetch_one(&pool)
         .await
         .unwrap()
+    );
+}
+
+/// What the TossPayments stand-in answers the next charge with.
+#[derive(Clone, Copy)]
+enum TossScript {
+    Approve,
+    Decline,
+    Outage,
+}
+
+#[derive(Clone, Default)]
+struct TossStandIn {
+    script: Arc<std::sync::Mutex<std::collections::VecDeque<TossScript>>>,
+    /// The idempotency key and order id of every charge, in order.
+    charges: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+impl TossStandIn {
+    fn answer(&self, answers: &[TossScript]) {
+        self.script.lock().unwrap().extend(answers);
+    }
+    fn charges(&self) -> Vec<(String, String)> {
+        self.charges.lock().unwrap().clone()
+    }
+}
+
+async fn toss_stand_in() -> (TossStandIn, String) {
+    let toss = TossStandIn::default();
+    let issue = |Json(body): Json<serde_json::Value>| async move {
+        Json(serde_json::json!({
+            "mId": "tvivarepublica",
+            "customerKey": body["customerKey"],
+            "billingKey": "bk_never_shown",
+            "cardCompany": "현대",
+            "cardNumber": "43301234****123*",
+        }))
+    };
+    let charge = |State(toss): State<TossStandIn>,
+                  headers: HeaderMap,
+                  Json(body): Json<serde_json::Value>| async move {
+        let order_id = body["orderId"].as_str().unwrap().to_owned();
+        let key = headers
+            .get("Idempotency-Key")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        assert_eq!(
+            headers.get(header::AUTHORIZATION).unwrap(),
+            "Basic dGVzdF9za19zZWNyZXQ6"
+        );
+        toss.charges.lock().unwrap().push((key, order_id.clone()));
+        let next = toss
+            .script
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(TossScript::Approve);
+        match next {
+            TossScript::Approve => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "paymentKey": format!("pk_{order_id}"),
+                    "orderId": order_id,
+                    "status": "DONE",
+                    "totalAmount": body["amount"],
+                    "receipt": {"url": "https://receipt.example/r"},
+                })),
+            ),
+            TossScript::Decline => (
+                StatusCode::FORBIDDEN,
+                Json(
+                    serde_json::json!({"code":"REJECT_CARD_COMPANY","message":"잔액이 부족합니다."}),
+                ),
+            ),
+            TossScript::Outage => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"code":"FAILED_INTERNAL_SYSTEM_PROCESSING","message":"x"})),
+            ),
+        }
+    };
+    let app = Router::new()
+        .route("/v1/billing/authorizations/issue", post(issue))
+        .route("/v1/billing/{billing_key}", post(charge))
+        .with_state(toss.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (toss, base)
+}
+
+fn billed_state(pool: PgPool, toss_base: &str) -> Shared {
+    let mut state = Arc::into_inner(state(pool)).unwrap();
+    state.billing = Some(Arc::new(
+        billing::Config::new(
+            "test_ck".into(),
+            "test_sk_secret".into(),
+            toss_base.into(),
+            9900,
+            "eunha space".into(),
+        )
+        .unwrap(),
+    ));
+    Arc::new(state)
+}
+
+async fn billed_customer(pool: &PgPool) -> (Uuid, HeaderMap) {
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at) VALUES($1,'customer@example.com','unused',now())")
+        .bind(user_id).execute(pool).await.unwrap();
+    sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '1 hour')").bind(token_hash("customer-session")).bind(user_id).execute(pool).await.unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::COOKIE,
+        "eunha_space_customer_session=customer-session"
+            .parse()
+            .unwrap(),
+    );
+    (user_id, headers)
+}
+
+async fn subscribe(state: &Shared, headers: &HeaderMap) -> serde_json::Value {
+    let Json(checkout) = billing::checkout(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    let checkout = serde_json::to_value(checkout).unwrap();
+    assert_eq!(checkout["client_key"], "test_ck");
+    let customer_key: Uuid = serde_json::from_value(checkout["customer_key"].clone()).unwrap();
+    let Json(view) = billing::authorize(
+        State(state.clone()),
+        headers.clone(),
+        Json(
+            serde_json::from_value(
+                serde_json::json!({"auth_key":"auth","customer_key":customer_key}),
+            )
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    serde_json::to_value(view).unwrap()
+}
+
+async fn subscription_status(pool: &PgPool, user_id: Uuid) -> String {
+    sqlx::query_scalar("SELECT status FROM subscriptions WHERE user_id=$1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn make_due(pool: &PgPool, user_id: Uuid) {
+    sqlx::query("UPDATE subscriptions SET next_attempt_at=now() WHERE user_id=$1")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_charge_with_no_answer_is_asked_again_under_the_same_key(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    let mut tx = pool.begin().await.unwrap();
+    assert_eq!(
+        billing::require_subscription(&state, &mut tx, user_id)
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::PAYMENT_REQUIRED
+    );
+    tx.rollback().await.unwrap();
+
+    // A redirect carrying somebody else's customer key registers nothing.
+    billing::checkout(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    let foreign = billing::authorize(
+        State(state.clone()),
+        headers.clone(),
+        Json(
+            serde_json::from_value(
+                serde_json::json!({"auth_key":"auth","customer_key":Uuid::new_v4()}),
+            )
+            .unwrap(),
+        ),
+    )
+    .await;
+    assert_eq!(foreign.err().unwrap().0, StatusCode::BAD_REQUEST);
+
+    toss.answer(&[TossScript::Outage]);
+    let view = subscribe(&state, &headers).await;
+    assert_eq!(view["subscription"]["status"], "incomplete");
+    assert_eq!(view["payments"][0]["status"], "pending");
+    assert_eq!(view["subscription"]["card_number"], "43301234****123*");
+    assert!(!view.to_string().contains("bk_never_shown"));
+
+    make_due(&pool, user_id).await;
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    let charges = toss.charges();
+    assert_eq!(charges.len(), 2);
+    assert_eq!(charges[0], charges[1]);
+    assert_eq!(charges[0].0, charges[0].1);
+    assert_eq!(subscription_status(&pool, user_id).await, "active");
+    let (paid, months) = sqlx::query_as::<_, (i64, bool)>(
+        "SELECT count(*) FILTER (WHERE p.status='paid'),bool_and(s.current_period_end=s.anchor_at+interval '1 month' AND s.next_attempt_at=s.current_period_end) FROM subscription_payments p JOIN subscriptions s ON s.user_id=p.user_id WHERE p.user_id=$1",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((paid, months), (1, true));
+    let mut tx = pool.begin().await.unwrap();
+    billing::require_subscription(&state, &mut tx, user_id)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    // Nothing is due until the period ends.
+    assert!(!billing::charge_due(&state, None).await.unwrap());
+    let audit: String = sqlx::query_scalar("SELECT string_agg(detail::text||coalesce(error,''),' ') FROM operations WHERE requested_by=$1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(!audit.contains("bk_never_shown"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn declined_renewals_suspend_instances_without_a_purge_until_paid_again(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (runtime, _) = fixture(&pool).await;
+    let (user_id, headers) = billed_customer(&pool).await;
+    assert_eq!(
+        subscribe(&state, &headers).await["subscription"]["status"],
+        "active"
+    );
+    let id = tenant(&pool, runtime).await;
+    sqlx::query("UPDATE tenants SET user_id=$2,lifecycle_state='ready' WHERE id=$1")
+        .bind(id)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    toss.answer(&[TossScript::Decline; 4]);
+    for attempt in 1..=3 {
+        make_due(&pool, user_id).await;
+        assert!(billing::charge_due(&state, None).await.unwrap());
+        assert_eq!(subscription_status(&pool, user_id).await, "past_due");
+        let (failed, last_error): (i32, String) =
+            sqlx::query_as("SELECT failed_attempts,last_error FROM subscriptions WHERE user_id=$1")
+                .bind(user_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            (failed, last_error.as_str()),
+            (attempt, "잔액이 부족합니다.")
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT lifecycle_state FROM tenants WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            "ready"
+        );
+    }
+    make_due(&pool, user_id).await;
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(subscription_status(&pool, user_id).await, "lapsed");
+    // Every declined attempt was its own order.
+    let orders: std::collections::HashSet<_> =
+        toss.charges().into_iter().map(|(_, order)| order).collect();
+    assert_eq!(orders.len(), 5);
+    let (lifecycle, purge_unscheduled, suspended) = sqlx::query_as::<_, (String, bool, bool)>(
+        "SELECT lifecycle_state,purge_scheduled_for IS NULL,billing_suspended_at IS NOT NULL FROM tenants WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (lifecycle.as_str(), purge_unscheduled, suspended),
+        ("deprovisioning", true, true)
+    );
+    // Retained with no date, the sweep never purges it.
+    sqlx::query("UPDATE tenants SET lifecycle_state='retained' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    jobs::schedule_due_purge(&state, id).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT lifecycle_state FROM tenants WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "retained"
+    );
+    // A restore needs a subscription first.
+    assert_eq!(
+        customer_restore(State(state.clone()), headers.clone(), Path(id))
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::PAYMENT_REQUIRED
+    );
+
+    // Paying again starts a new period today and serves the instance again.
+    let view = subscribe(&state, &headers).await;
+    assert_eq!(view["subscription"]["status"], "active");
+    let (lifecycle, suspended) = sqlx::query_as::<_, (String, bool)>(
+        "SELECT lifecycle_state,billing_suspended_at IS NOT NULL FROM tenants WHERE id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((lifecycle.as_str(), suspended), ("provisioning", false));
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT periods_paid=1 AND anchor_at>now()-interval '1 minute' FROM subscriptions WHERE user_id=$1"
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_cancelled_subscription_ends_with_its_period(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    subscribe(&state, &headers).await;
+    let Json(view) = billing::cancel(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    let view = serde_json::to_value(view).unwrap();
+    assert_eq!(view["subscription"]["status"], "active");
+    assert_eq!(view["subscription"]["cancel_at_period_end"], true);
+    billing::resume(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    billing::cancel(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    assert!(!billing::charge_due(&state, None).await.unwrap());
+    make_due(&pool, user_id).await;
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(subscription_status(&pool, user_id).await, "canceled");
+    assert_eq!(toss.charges().len(), 1);
+    assert_eq!(
+        billing::resume(State(state.clone()), headers.clone())
+            .await
+            .err()
+            .unwrap()
+            .0,
+        StatusCode::CONFLICT
     );
 }

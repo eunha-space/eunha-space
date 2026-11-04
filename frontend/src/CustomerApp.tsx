@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CircleAlert, LogOut, Plus, UserRound } from "lucide-react";
+import { CircleAlert, CreditCard, LogOut, Plus, UserRound } from "lucide-react";
 import {
   api,
   countsTowardInstanceLimit,
@@ -220,7 +220,7 @@ export function CustomerApp() {
       </main>
     );
   }
-  if (location.pathname === "/account") {
+  if (location.pathname === "/account" || location.pathname === "/account/billing") {
     return (
       <main className="mx-auto min-h-screen max-w-2xl p-4 md:py-10">
         <CustomerHeader customer={customer} onSignOut={signOut} />
@@ -228,7 +228,10 @@ export function CustomerApp() {
       </main>
     );
   }
-  if (location.pathname === "/instances/new" && customer.has_password) {
+  if (
+    location.pathname === "/instances/new" && customer.has_password &&
+    !customer.subscription_required
+  ) {
     return (
       <main className="mx-auto min-h-screen max-w-2xl p-4 md:py-10">
         <CustomerHeader customer={customer} onSignOut={signOut} />
@@ -283,7 +286,7 @@ export function CustomerApp() {
                   : `${activeInstances} of ${customer.instance_limit} used.`}
               </CardDescription>
             )}
-            {!reachedInstanceLimit && (
+            {!reachedInstanceLimit && !customer.subscription_required && (
               <CardAction>
                 <Button render={<a href="/instances/new" />}>
                   <Plus /> {t("Create an instance")}
@@ -292,6 +295,19 @@ export function CustomerApp() {
             )}
           </CardHeader>
           <CardContent className="grid gap-3">
+            {customer.subscription_required && (
+              <Alert>
+                <CreditCard />
+                <AlertDescription className="grid gap-3">
+                  {t("Subscribe to create and run instances.")}
+                  <div>
+                    <Button size="sm" render={<a href="/account" />}>
+                      {t("Subscribe")}
+                    </Button>
+                  </div>
+                </AlertDescription>
+              </Alert>
+            )}
             {tenants.length === 0
               ? (
                 <p className="text-muted-foreground text-sm">

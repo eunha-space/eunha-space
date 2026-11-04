@@ -114,6 +114,44 @@ export type Customer = {
   // False in a session established by an email link, which is itself the
   // proof a forgotten password needs.
   requires_current_password: boolean;
+  /** Billing is on and this account has no active subscription. */
+  subscription_required: boolean;
+};
+
+export type SubscriptionStatus =
+  | "incomplete"
+  | "active"
+  | "past_due"
+  | "canceled"
+  | "lapsed";
+
+export type Billing = {
+  enabled: boolean;
+  /** What subscribing costs each month, in won. */
+  amount: number | null;
+  subscription: {
+    status: SubscriptionStatus;
+    amount: number;
+    card_company: string | null;
+    /** Masked by TossPayments. */
+    card_number: string | null;
+    has_card: boolean;
+    current_period_end: string | null;
+    cancel_at_period_end: boolean;
+    next_attempt_at: string | null;
+    /** TossPayments' or the card company's reason for the last decline. */
+    last_error: string | null;
+  } | null;
+  payments: {
+    order_id: string;
+    amount: number;
+    status: "pending" | "paid" | "failed";
+    period_start: string;
+    period_end: string;
+    receipt_url: string | null;
+    failure_message: string | null;
+    requested_at: string;
+  }[];
 };
 
 export type CustomerTenantDetail = {
@@ -132,6 +170,8 @@ export type CustomerTenantDetail = {
     /** What the owner signs in to Eunha with. */
     owner_email: string | null;
     owner_ready: boolean;
+    /** Taken offline because the subscription ended, rather than deleted. */
+    billing_suspended: boolean;
     /** When the customer area last issued a password for the Owner. */
     owner_password_issued_at: string | null;
   };

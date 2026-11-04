@@ -37,6 +37,7 @@ use tower_http::{
 use uuid::Uuid;
 
 mod auth;
+mod billing;
 mod ci_release;
 mod domain_change;
 mod health;
@@ -78,6 +79,9 @@ struct AppState {
     /// size its tenants' pools against the limit that actually applies.
     tenant_pooler_client_slots: Option<u64>,
     cloudflare: Option<CloudflareConfig>,
+    /// TossPayments automatic payments. Unset, nobody is billed and creating
+    /// an instance needs no subscription.
+    billing: Option<Arc<billing::Config>>,
     provided_domain_suffixes: Vec<String>,
     customer_email: Option<CustomerEmailConfig>,
     /// One reload at a time per runtime: a second launchd signal that arrives
@@ -410,6 +414,8 @@ struct CustomerTenantInfo {
     purge_scheduled_for: Option<OffsetDateTime>,
     /// A custom domain chosen at creation that never connected.
     abandoned_custom_domain: Option<String>,
+    /// Taken offline because the subscription ended, rather than deleted.
+    billing_suspended: bool,
 }
 
 #[derive(Serialize)]
@@ -789,6 +795,7 @@ async fn main() -> Result<()> {
             }),
             _ => None,
         },
+        billing: billing::Config::from_env()?.map(Arc::new),
         provided_domain_suffixes: std::env::var("EUNHA_PROVIDED_DOMAIN_SUFFIXES")
             .unwrap_or_else(|_| "eunha.space".into())
             .split(',')
@@ -841,7 +848,10 @@ async fn main() -> Result<()> {
                             "jobs::purge_sweeper",
                             jobs::purge_sweeper,
                         );
-                        health::supervise(jobs_state, "jobs::reconciler", jobs::reconciler);
+                        health::supervise(jobs_state.clone(), "jobs::reconciler", jobs::reconciler);
+                        // Charging cards is work a local process must stay out
+                        // of as much as any lifecycle job.
+                        health::supervise(jobs_state, "billing::renewer", billing::renewer);
                         std::future::pending::<()>().await
                     }),
                     Err(error) => {
@@ -895,7 +905,12 @@ async fn main() -> Result<()> {
             "/customer/tenants/{id}/domain-change/cancel",
             post(domain_change::customer_cancel),
         )
-        .route("/customer/dns-check", get(customer_dns_check));
+        .route("/customer/dns-check", get(customer_dns_check))
+        .route("/customer/billing", get(billing::get))
+        .route("/customer/billing/checkout", post(billing::checkout))
+        .route("/customer/billing/authorization", post(billing::authorize))
+        .route("/customer/billing/cancel", post(billing::cancel))
+        .route("/customer/billing/resume", post(billing::resume));
     let admin_api = Router::new()
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/usage", get(usage::usage))
@@ -969,7 +984,8 @@ async fn main() -> Result<()> {
         .route_service("/", index.clone())
         .route_service("/signup", index.clone())
         .route_service("/verify", index.clone())
-        .route_service("/account", index)
+        .route_service("/account", index.clone())
+        .route_service("/account/billing", index)
         .route_service(
             "/instances/{id}",
             ServeFile::new(frontend_directory.join("index.html")),
@@ -1296,8 +1312,9 @@ async fn customer_me(
     .await?;
     let requires_current_password =
         has_password && !customer_email_link_session(&headers, &s.db).await?;
+    let subscription_required = billing::subscription_required(&s, id).await?;
     Ok(Json(
-        serde_json::json!({"email":email,"is_admin":is_admin,"instance_limit":instance_limit,"has_password":has_password,"requires_current_password":requires_current_password}),
+        serde_json::json!({"email":email,"is_admin":is_admin,"instance_limit":instance_limit,"has_password":has_password,"requires_current_password":requires_current_password,"subscription_required":subscription_required}),
     ))
 }
 async fn customer_tenants(
@@ -1314,7 +1331,7 @@ async fn customer_tenant_detail(
     Path(id): Path<Uuid>,
 ) -> Result<Json<CustomerTenantDetail>, ApiError> {
     let (user_id, _) = customer(&headers, &s.db).await?;
-    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.lifecycle_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,t.owner_email,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.purge_scheduled_for,t.abandoned_custom_domain FROM tenants t JOIN users c ON c.id=t.user_id WHERE t.id=$1 AND t.user_id=$2 AND t.lifecycle_state NOT IN ('purging','purged')")
+    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.lifecycle_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,t.owner_email,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.purge_scheduled_for,t.abandoned_custom_domain,t.billing_suspended_at IS NOT NULL billing_suspended FROM tenants t JOIN users c ON c.id=t.user_id WHERE t.id=$1 AND t.user_id=$2 AND t.lifecycle_state NOT IN ('purging','purged')")
         .bind(id)
         .bind(user_id)
         .fetch_optional(&s.db)
@@ -1580,6 +1597,7 @@ async fn create_tenant_inner(
                 "You have reached your instance limit.".into(),
             ));
         }
+        billing::require_subscription(s, &mut tx, user_id).await?;
     }
     sqlx::query("INSERT INTO tenants(id,domain,aliases,runtime_id,desired_state,observed_state,lifecycle_state,vapid_private_key,vapid_public_key,user_id,owner_username,owner_email) VALUES($1,$2,$3,$4,'running','unknown','provisioning',$5,$6,$7,$8,$9)")
         .bind(tenant_id).bind(&domain).bind(&aliases).bind(body.runtime_id)
@@ -2683,6 +2701,7 @@ async fn customer_restore(
             "Delete another instance before restoring this one.".into(),
         ));
     }
+    billing::require_subscription(&s, &mut tx, user_id).await?;
     queue_restore(&s, &mut tx, id, None, Some(user_id)).await?;
     tx.commit().await?;
     Ok(StatusCode::ACCEPTED)
@@ -2798,7 +2817,7 @@ async fn queue_restore(
             .bind(Uuid::new_v4()).bind(tenant_id).bind(&hostname).bind(&cname_target)
             .execute(&mut **tx).await.map_err(taken)?;
     }
-    sqlx::query("UPDATE tenants SET lifecycle_state='provisioning',desired_state='running',observed_state='unknown',observed_at=NULL,observation_error=NULL,purge_scheduled_for=NULL,updated_at=now() WHERE id=$1")
+    sqlx::query("UPDATE tenants SET lifecycle_state='provisioning',desired_state='running',observed_state='unknown',observed_at=NULL,observation_error=NULL,purge_scheduled_for=NULL,billing_suspended_at=NULL,updated_at=now() WHERE id=$1")
         .bind(tenant_id).execute(&mut **tx).await?;
     sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) SELECT $1,unnest(ARRAY['migrate','render','reload','health']) ON CONFLICT (tenant_id,step) DO UPDATE SET status='pending',error=NULL,started_at=NULL,finished_at=NULL,updated_at=now()")
         .bind(tenant_id).execute(&mut **tx).await?;

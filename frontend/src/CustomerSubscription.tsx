@@ -1,0 +1,345 @@
+import { useEffect, useState } from "react";
+import { CircleAlert, CreditCard, ExternalLink } from "lucide-react";
+import { useLingui } from "@lingui/react";
+import { loadTossPayments } from "@tosspayments/tosspayments-sdk";
+import { api, type Billing, type Customer, errorMessage } from "@/api";
+import { absoluteTime } from "@/format";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+import { Spinner } from "@/components/console/status";
+
+/** Where TossPayments' billing window sends the customer back, either way. */
+const RETURN_PATH = "/account/billing";
+
+/**
+ * A billing window's `authKey` can be exchanged once. React may run an effect
+ * twice, so the exchange is remembered outside the component.
+ */
+let returnHandled = false;
+
+function won(amount: number): string {
+  return new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW" })
+    .format(amount);
+}
+
+function day(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? iso : date.toLocaleDateString();
+}
+
+export function SubscriptionCard(
+  { customer, onChanged }: { customer: Customer; onChanged: () => Promise<void> },
+) {
+  const { i18n } = useLingui();
+  const t = (message: string) => i18n._(message);
+  const [billing, setBilling] = useState<Billing | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [confirmingCancel, setConfirmingCancel] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    async function load() {
+      const query = new URLSearchParams(location.search);
+      if (location.pathname === RETURN_PATH && !returnHandled) {
+        returnHandled = true;
+        // Leave the one-time key out of the address bar and history.
+        history.replaceState(null, "", "/account");
+        const authKey = query.get("authKey");
+        const customerKey = query.get("customerKey");
+        if (authKey && customerKey) {
+          setBusy(true);
+          try {
+            const next = await api<Billing>("/customer/billing/authorization", {
+              method: "POST",
+              body: JSON.stringify({ auth_key: authKey, customer_key: customerKey }),
+            });
+            if (active) setBilling(next);
+            await onChanged();
+          } catch (e) {
+            if (active) setError(t(errorMessage(e)));
+          } finally {
+            if (active) setBusy(false);
+          }
+        } else if (query.get("code") && query.get("code") !== "PAY_PROCESS_CANCELED") {
+          // TossPayments' own message, written for the customer.
+          setError(query.get("message") || t("The card could not be registered."));
+        }
+      }
+      const next = await api<Billing>("/customer/billing");
+      if (active) setBilling(next);
+    }
+    load().catch((e) => active && setError(t(errorMessage(e))));
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (!billing || !billing.enabled) return null;
+
+  async function openBillingWindow() {
+    setError("");
+    setBusy(true);
+    try {
+      const checkout = await api<{ client_key: string; customer_key: string }>(
+        "/customer/billing/checkout",
+        { method: "POST" },
+      );
+      const toss = await loadTossPayments(checkout.client_key);
+      await toss.payment({ customerKey: checkout.customer_key }).requestBillingAuth({
+        method: "CARD",
+        successUrl: location.origin + RETURN_PATH,
+        failUrl: location.origin + RETURN_PATH,
+        customerEmail: customer.email,
+      });
+    } catch (e) {
+      // Closing the window is not a failure worth reporting.
+      const code = (e as { code?: string } | null)?.code;
+      if (code !== "USER_CANCEL") setError(t(errorMessage(e)));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function change(path: "/cancel" | "/resume") {
+    setError("");
+    setBusy(true);
+    try {
+      setBilling(await api<Billing>(`/customer/billing${path}`, { method: "POST" }));
+      await onChanged();
+    } catch (e) {
+      setError(t(errorMessage(e)));
+    } finally {
+      setBusy(false);
+      setConfirmingCancel(false);
+    }
+  }
+
+  const subscription = billing.subscription;
+  const status = subscription?.status;
+  const subscribed = status === "active" || status === "past_due";
+  const pending = billing.payments.some((payment) => payment.status === "pending");
+  const amount = subscription && subscribed ? subscription.amount : billing.amount;
+
+  let description: string;
+  if (status === "active" && subscription?.cancel_at_period_end) {
+    description = t(
+      "Your subscription is cancelled. Your instances keep running until the end of the paid period, then go offline with their data kept.",
+    );
+  } else if (status === "active") {
+    description = t("Your card is charged automatically each month.");
+  } else if (status === "past_due") {
+    description = t(
+      "Your last payment was declined. We'll try again, and your instances keep running meanwhile. Use another card to pay now.",
+    );
+  } else if (pending) {
+    description = t("Your payment is being confirmed.");
+  } else if (status === "canceled" || status === "lapsed") {
+    description = t(
+      "Your subscription has ended, so your instances are offline with their data kept. Subscribe again to serve them again.",
+    );
+  } else {
+    description = t("Subscribe to create and run instances.");
+  }
+
+  return (
+    <Card className={customer.subscription_required ? "border-primary/40" : undefined}>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          {t("Subscription")}
+          {status === "active" && !subscription?.cancel_at_period_end && (
+            <Badge>{t("Active")}</Badge>
+          )}
+          {status === "active" && subscription?.cancel_at_period_end && (
+            <Badge variant="secondary">{t("Cancelled")}</Badge>
+          )}
+          {status === "past_due" && (
+            <Badge variant="destructive">{t("Payment declined")}</Badge>
+          )}
+        </CardTitle>
+        <CardDescription>{description}</CardDescription>
+      </CardHeader>
+      <CardContent className="grid gap-5">
+        <dl className="grid grid-cols-2 gap-4 text-sm">
+          {amount != null && (
+            <div className="grid gap-1">
+              <dt className="text-muted-foreground text-xs">{t("Monthly price")}</dt>
+              <dd className="font-medium">{won(amount)}</dd>
+            </div>
+          )}
+          {subscribed && subscription?.has_card && (
+            <div className="grid gap-1">
+              <dt className="text-muted-foreground text-xs">{t("Card")}</dt>
+              <dd className="font-medium">
+                {[subscription.card_company, subscription.card_number]
+                  .filter(Boolean)
+                  .join(" ")}
+              </dd>
+            </div>
+          )}
+          {status === "active" && subscription?.current_period_end && (
+            <div className="grid gap-1">
+              <dt className="text-muted-foreground text-xs">
+                {subscription.cancel_at_period_end ? t("Ends on") : t("Renews on")}
+              </dt>
+              <dd className="font-medium">{day(subscription.current_period_end)}</dd>
+            </div>
+          )}
+          {status === "past_due" && subscription?.next_attempt_at && (
+            <div className="grid gap-1">
+              <dt className="text-muted-foreground text-xs">{t("Next attempt")}</dt>
+              <dd className="font-medium">{absoluteTime(subscription.next_attempt_at)}</dd>
+            </div>
+          )}
+        </dl>
+        {subscription?.last_error && (status === "past_due" || status === "incomplete") &&
+          !pending && (
+          <Alert variant="destructive">
+            <CircleAlert />
+            <AlertDescription>{t(subscription.last_error)}</AlertDescription>
+          </Alert>
+        )}
+        {error && (
+          <Alert variant="destructive">
+            <CircleAlert />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+        <div className="flex flex-wrap gap-2">
+          {!subscribed && !pending && (
+            <Button disabled={busy} onClick={() => void openBillingWindow()}>
+              {busy ? <Spinner label={t("Please wait…")} /> : <CreditCard />}
+              {t("Subscribe with a card")}
+            </Button>
+          )}
+          {subscribed && (
+            <Button
+              variant={status === "past_due" ? "default" : "outline"}
+              disabled={busy}
+              onClick={() => void openBillingWindow()}
+            >
+              <CreditCard />
+              {status === "past_due" ? t("Use another card") : t("Change card")}
+            </Button>
+          )}
+          {subscribed && !subscription?.cancel_at_period_end && (
+            <Button
+              variant="ghost"
+              disabled={busy}
+              onClick={() => setConfirmingCancel(true)}
+            >
+              {t("Cancel subscription")}
+            </Button>
+          )}
+          {status === "active" && subscription?.cancel_at_period_end && (
+            <Button disabled={busy} onClick={() => void change("/resume")}>
+              {t("Keep my subscription")}
+            </Button>
+          )}
+        </div>
+        {billing.payments.length > 0 && (
+          <div className="grid gap-2">
+            <h3 className="text-sm font-medium">{t("Payments")}</h3>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{t("Period")}</TableHead>
+                  <TableHead className="text-right">{t("Amount")}</TableHead>
+                  <TableHead>{t("Status")}</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {billing.payments.map((payment) => (
+                  <TableRow key={payment.order_id}>
+                    <TableCell>
+                      {day(payment.period_start)} – {day(payment.period_end)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {won(payment.amount)}
+                    </TableCell>
+                    <TableCell>
+                      {payment.status === "paid" && payment.receipt_url
+                        ? (
+                          <a
+                            href={payment.receipt_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 underline-offset-4 hover:underline"
+                          >
+                            {t("Paid")} <ExternalLink className="size-3" />
+                          </a>
+                        )
+                        : payment.status === "paid"
+                        ? t("Paid")
+                        : payment.status === "pending"
+                        ? t("Confirming")
+                        : (
+                          <span
+                            className="text-destructive"
+                            title={payment.failure_message ?? undefined}
+                          >
+                            {t("Declined")}
+                          </span>
+                        )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
+        <AlertDialog open={confirmingCancel} onOpenChange={setConfirmingCancel}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>{t("Cancel your subscription?")}</AlertDialogTitle>
+              <AlertDialogDescription>
+                {status === "past_due"
+                  ? t(
+                    "Your paid period is already over, so your instances go offline now. Their data is kept, and subscribing again serves them again.",
+                  )
+                  : t(
+                    "Your instances keep running until the end of the paid period, then go offline. Their data is kept, and subscribing again serves them again.",
+                  )}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>{t("Keep my subscription")}</AlertDialogCancel>
+              <AlertDialogAction
+                variant="destructive"
+                onClick={() => void change("/cancel")}
+              >
+                {t("Cancel subscription")}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </CardContent>
+    </Card>
+  );
+}
