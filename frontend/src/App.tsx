@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   CircleAlert,
+  CreditCard,
   HardDrive,
   LogOut,
   RefreshCw,
@@ -19,6 +20,7 @@ import {
   type Tenant,
 } from "@/api";
 import { relativeTime } from "@/format";
+import { Billing } from "@/Billing";
 import { Usage } from "@/Usage";
 import { Instances } from "@/Instances";
 import { Operations } from "@/Operations";
@@ -201,6 +203,7 @@ export function App() {
     { id: "usage", label: "Resource usage", icon: Activity },
     { id: "instances", label: "Instances", icon: HardDrive },
     { id: "releases", label: "Releases", icon: Rocket },
+    { id: "billing", label: "Billing", icon: CreditCard },
     { id: "operations", label: "Operations", icon: Activity },
   ];
   const heading = sections.find((section) => section.id === view)?.label ??
@@ -343,6 +346,7 @@ export function App() {
           {view === "releases" && (
             <Releases runtimes={runtimes} busy={busy} act={act} />
           )}
+          {view === "billing" && <Billing />}
           {view === "operations" && <Operations operations={operations} />}
         </main>
       </div>

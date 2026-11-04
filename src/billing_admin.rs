@@ -1,0 +1,273 @@
+//! The operators' view of billing: who is subscribed, what they paid, and the
+//! few things an operator does about it — charging a declined renewal again,
+//! exempting an account, refunding outside the customer's seven days.
+//!
+//! Nothing here returns a billing key, a customer key or a secret: an account's
+//! card is its company and the number as TossPayments masked it.
+
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
+};
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+use crate::{ApiError, Shared, admin_user, billing, billing_sync};
+
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct Summary {
+    active: i64,
+    past_due: i64,
+    canceling: i64,
+    ended: i64,
+    /// What the active and retried subscriptions bring in each month, in won.
+    monthly_revenue: i64,
+    /// Accounts running instances with no subscription and no exemption, such
+    /// as customers from before billing.
+    unbilled: i64,
+    refunds_open: i64,
+    /// Retired billing keys TossPayments has not confirmed deleting after
+    /// several tries.
+    keys_waiting: i64,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct Account {
+    user_id: Uuid,
+    email: Option<String>,
+    is_admin: bool,
+    billing_exempt: bool,
+    /// Null for an account that never subscribed.
+    status: Option<String>,
+    amount: Option<i64>,
+    card_company: Option<String>,
+    card_number: Option<String>,
+    has_card: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
+    current_period_end: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    next_attempt_at: Option<OffsetDateTime>,
+    cancel_at_period_end: bool,
+    failed_attempts: i32,
+    last_error: Option<String>,
+    /// Instances counting against the account's limit.
+    instances: i64,
+    /// Instances an ended subscription took offline.
+    suspended_instances: i64,
+    refund_open: bool,
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_paid_at: Option<OffsetDateTime>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct Overview {
+    enabled: bool,
+    amount: Option<i64>,
+    summary: Summary,
+    accounts: Vec<Account>,
+}
+
+pub(crate) async fn overview(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+) -> Result<Json<Overview>, ApiError> {
+    admin_user(&headers, &s.db).await?;
+    let summary = sqlx::query_as::<_, Summary>(
+        "SELECT
+            (SELECT count(*) FROM subscriptions WHERE status='active' AND NOT cancel_at_period_end) active,
+            (SELECT count(*) FROM subscriptions WHERE status='past_due') past_due,
+            (SELECT count(*) FROM subscriptions WHERE status='active' AND cancel_at_period_end) canceling,
+            (SELECT count(*) FROM subscriptions WHERE status IN ('canceled','lapsed')) ended,
+            (SELECT coalesce(sum(amount),0)::bigint FROM subscriptions WHERE status IN ('active','past_due') AND NOT cancel_at_period_end) monthly_revenue,
+            (SELECT count(*) FROM users u WHERE NOT u.is_admin AND NOT u.billing_exempt
+                AND EXISTS(SELECT 1 FROM tenants t WHERE t.user_id=u.id AND t.lifecycle_state IN ('provisioning','ready','failed'))
+                AND NOT EXISTS(SELECT 1 FROM subscriptions s WHERE s.user_id=u.id AND s.status IN ('active','past_due'))) unbilled,
+            (SELECT count(*) FROM subscription_payments WHERE refund_requested_at IS NOT NULL AND refunded_at IS NULL) refunds_open,
+            (SELECT count(*) FROM retired_billing_keys WHERE deleted_at IS NULL AND attempts>=3) keys_waiting",
+    )
+    .fetch_one(&s.db)
+    .await?;
+    let accounts = sqlx::query_as::<_, Account>(
+        "SELECT u.id user_id,u.email,u.is_admin,u.billing_exempt,s.status,s.amount,s.card_company,s.card_number,
+            coalesce(s.billing_key IS NOT NULL,false) has_card,s.current_period_end,s.next_attempt_at,
+            coalesce(s.cancel_at_period_end,false) cancel_at_period_end,coalesce(s.failed_attempts,0) failed_attempts,s.last_error,
+            (SELECT count(*) FROM tenants t WHERE t.user_id=u.id AND t.lifecycle_state IN ('provisioning','ready','failed')) instances,
+            (SELECT count(*) FROM tenants t WHERE t.user_id=u.id AND t.billing_suspended_at IS NOT NULL AND t.lifecycle_state IN ('deprovisioning','retained')) suspended_instances,
+            EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=u.id AND p.refund_requested_at IS NOT NULL AND p.refunded_at IS NULL) refund_open,
+            (SELECT max(settled_at) FROM subscription_payments p WHERE p.user_id=u.id AND p.status IN ('paid','refunded')) last_paid_at
+        FROM users u LEFT JOIN subscriptions s ON s.user_id=u.id
+        WHERE u.email IS NOT NULL AND (
+            (s.user_id IS NOT NULL AND (s.status<>'incomplete' OR s.billing_key IS NOT NULL
+                OR EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=u.id)))
+            OR u.billing_exempt
+            OR (NOT u.is_admin AND EXISTS(SELECT 1 FROM tenants t WHERE t.user_id=u.id AND t.lifecycle_state IN ('provisioning','ready','failed'))))
+        ORDER BY CASE s.status WHEN 'past_due' THEN 0 WHEN 'incomplete' THEN 1 WHEN 'active' THEN 2 ELSE 3 END, u.email
+        LIMIT 500",
+    )
+    .fetch_all(&s.db)
+    .await?;
+    Ok(Json(Overview {
+        enabled: s.billing.is_some(),
+        amount: s.billing.as_ref().map(|billing| billing.amount),
+        summary,
+        accounts,
+    }))
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct Payment {
+    order_id: String,
+    amount: i64,
+    status: String,
+    #[serde(with = "time::serde::rfc3339")]
+    period_start: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    period_end: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    requested_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    settled_at: Option<OffsetDateTime>,
+    receipt_url: Option<String>,
+    failure_code: Option<String>,
+    failure_message: Option<String>,
+    refunded_amount: i64,
+    refund_pending: bool,
+    refund_error: Option<String>,
+    /// An operator may refund any paid payment not refunded yet.
+    refundable: bool,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct RetiredKey {
+    #[serde(with = "time::serde::rfc3339")]
+    retired_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339::option")]
+    deleted_at: Option<OffsetDateTime>,
+    attempts: i32,
+    last_error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct AccountDetail {
+    payments: Vec<Payment>,
+    retired_keys: Vec<RetiredKey>,
+}
+
+pub(crate) async fn account(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(user_id): Path<Uuid>,
+) -> Result<Json<AccountDetail>, ApiError> {
+    admin_user(&headers, &s.db).await?;
+    let payments = sqlx::query_as::<_, Payment>(
+        "SELECT order_id,amount,status,period_start,period_end,requested_at,settled_at,receipt_url,failure_code,failure_message,refunded_amount,
+            (refund_requested_at IS NOT NULL AND refunded_at IS NULL) refund_pending,refund_error,
+            (status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND payment_key IS NOT NULL) refundable
+        FROM subscription_payments WHERE user_id=$1 ORDER BY requested_at DESC LIMIT 100",
+    )
+    .bind(user_id)
+    .fetch_all(&s.db)
+    .await?;
+    let retired_keys = sqlx::query_as::<_, RetiredKey>(
+        "SELECT retired_at,deleted_at,attempts,last_error FROM retired_billing_keys WHERE user_id=$1 ORDER BY retired_at DESC LIMIT 20",
+    )
+    .bind(user_id)
+    .fetch_all(&s.db)
+    .await?;
+    Ok(Json(AccountDetail {
+        payments,
+        retired_keys,
+    }))
+}
+
+/// Charge a declined renewal, or a first charge that failed, again now, on
+/// the card on file. It counts as one of the retries.
+pub(crate) async fn retry(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(user_id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let (admin_id, _) = admin_user(&headers, &s.db).await?;
+    if s.billing.is_none() {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Subscriptions are not available.".into(),
+        ));
+    }
+    let mut tx = s.db.begin().await?;
+    let queued = sqlx::query("UPDATE subscriptions SET next_attempt_at=now(),updated_at=now() WHERE user_id=$1 AND status IN ('past_due','incomplete') AND billing_key IS NOT NULL AND (lease_until IS NULL OR lease_until<now())")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    if queued.rows_affected() == 0 {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Only a declined subscription with a card on file can be charged again.".into(),
+        ));
+    }
+    billing::record(
+        &mut tx,
+        admin_id,
+        "subscription_retry",
+        "succeeded",
+        serde_json::json!({ "customer": user_id }),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    if billing::charge_due(&s, Some(user_id)).await.is_err() {
+        tracing::warn!(%user_id, "could not charge a subscription an operator retried");
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub(crate) struct Exemption {
+    exempt: bool,
+}
+
+/// Let an account run instances without a subscription, or stop letting it.
+/// Lifting an exemption takes nothing offline: the account just cannot create
+/// or restore instances until it subscribes.
+pub(crate) async fn exempt(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(user_id): Path<Uuid>,
+    Json(body): Json<Exemption>,
+) -> Result<StatusCode, ApiError> {
+    let (admin_id, _) = admin_user(&headers, &s.db).await?;
+    let mut tx = s.db.begin().await?;
+    let changed = sqlx::query(
+        "UPDATE users SET billing_exempt=$2 WHERE id=$1 AND email IS NOT NULL AND billing_exempt<>$2",
+    )
+    .bind(user_id)
+    .bind(body.exempt)
+    .execute(&mut *tx)
+    .await?;
+    if changed.rows_affected() > 0 {
+        billing::record(
+            &mut tx,
+            admin_id,
+            "billing_exemption",
+            "succeeded",
+            serde_json::json!({ "customer": user_id, "exempt": body.exempt }),
+            None,
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Refund any paid payment, outside the customer's seven days as well.
+pub(crate) async fn refund(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(order_id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let (admin_id, _) = admin_user(&headers, &s.db).await?;
+    billing_sync::start_refund(&s, &order_id, None, admin_id, false).await?;
+    Ok(StatusCode::NO_CONTENT)
+}

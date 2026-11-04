@@ -38,6 +38,7 @@ use uuid::Uuid;
 
 mod auth;
 mod billing;
+mod billing_admin;
 mod billing_sync;
 mod ci_release;
 mod domain_change;
@@ -956,6 +957,20 @@ async fn main() -> Result<()> {
         )
         .route("/operations/{id}/events", get(operation_events))
         .route("/operations", get(operations))
+        .route("/billing", get(billing_admin::overview))
+        .route("/billing/accounts/{user_id}", get(billing_admin::account))
+        .route(
+            "/billing/accounts/{user_id}/retry",
+            post(billing_admin::retry),
+        )
+        .route(
+            "/billing/accounts/{user_id}/exempt",
+            post(billing_admin::exempt),
+        )
+        .route(
+            "/billing/payments/{order_id}/refund",
+            post(billing_admin::refund),
+        )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_admin,

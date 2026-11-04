@@ -183,6 +183,21 @@ pub(crate) async fn request_refund(
     Path(order_id): Path<String>,
 ) -> Result<Json<BillingView>, ApiError> {
     let (user_id, _) = customer(&headers, &s.db).await?;
+    start_refund(&s, &order_id, Some(user_id), user_id, true).await?;
+    Ok(Json(view(&s, user_id).await?))
+}
+
+/// Record a refund request and carry it out as far as it goes now; the renewer
+/// finishes it otherwise. `owner` limits it to one customer's payments, and
+/// `within_window` to `REFUND_WINDOW` after paying: an operator is bound by
+/// neither. Returns the customer whose payment it is.
+pub(crate) async fn start_refund(
+    s: &Shared,
+    order_id: &str,
+    owner: Option<Uuid>,
+    requested_by: Uuid,
+    within_window: bool,
+) -> Result<Uuid, ApiError> {
     if s.billing.is_none() {
         return Err(ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -190,11 +205,12 @@ pub(crate) async fn request_refund(
         ));
     }
     let mut tx = s.db.begin().await?;
-    let refundable = sqlx::query_scalar::<_, bool>(&format!(
-        "SELECT status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND settled_at>now()-interval '{REFUND_WINDOW}' AND payment_key IS NOT NULL FROM subscription_payments WHERE order_id=$1 AND user_id=$2 FOR UPDATE"
+    let (user_id, refundable) = sqlx::query_as::<_, (Uuid, bool)>(&format!(
+        "SELECT user_id,status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND (NOT $3 OR settled_at>now()-interval '{REFUND_WINDOW}') AND payment_key IS NOT NULL FROM subscription_payments WHERE order_id=$1 AND ($2::uuid IS NULL OR user_id=$2) FOR UPDATE"
     ))
-    .bind(&order_id)
-    .bind(user_id)
+    .bind(order_id)
+    .bind(owner)
+    .bind(within_window)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Payment not found.".into()))?;
@@ -220,25 +236,24 @@ pub(crate) async fn request_refund(
         ));
     }
     sqlx::query("UPDATE subscription_payments SET refund_requested_at=now(),refund_requested_by=$2,refund_next_attempt_at=now(),refund_error=NULL WHERE order_id=$1")
-        .bind(&order_id)
-        .bind(user_id)
+        .bind(order_id)
+        .bind(requested_by)
         .execute(&mut *tx)
         .await?;
     record(
         &mut tx,
-        user_id,
+        requested_by,
         "subscription_refund_request",
         "succeeded",
-        serde_json::json!({ "order_id": order_id }),
+        serde_json::json!({ "order_id": order_id, "customer": user_id }),
         None,
     )
     .await?;
     tx.commit().await?;
-    // Carry it out now; the renewer finishes it if this cannot.
-    if refund_due(&s, Some(&order_id)).await.is_err() {
+    if refund_due(s, Some(order_id)).await.is_err() {
         tracing::warn!(%user_id, "could not carry out a refund at once");
     }
-    Ok(Json(view(&s, user_id).await?))
+    Ok(user_id)
 }
 
 #[derive(sqlx::FromRow)]

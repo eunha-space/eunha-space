@@ -2373,3 +2373,157 @@ async fn a_card_removed_at_tosspayments_ends_with_the_period_unless_replaced(poo
     assert_eq!(view["subscription"]["cancel_at_period_end"], false);
     assert_eq!(view["subscription"]["has_card"], true);
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn operators_see_billing_and_customers_do_not(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (runtime, admin) = fixture(&pool).await;
+    let (user_id, headers) = billed_customer(&pool).await;
+    subscribe(&state, &headers).await;
+    // A customer from before billing, running an instance unbilled.
+    let grandfathered = Uuid::new_v4();
+    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at) VALUES($1,'early@example.com','unused',now())")
+        .bind(grandfathered).execute(&pool).await.unwrap();
+    let id = tenant(&pool, runtime).await;
+    sqlx::query("UPDATE tenants SET user_id=$2,lifecycle_state='ready' WHERE id=$1")
+        .bind(id)
+        .bind(grandfathered)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        billing_admin::overview(State(state.clone()), headers.clone())
+            .await
+            .err()
+            .unwrap()
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    let Json(overview) = billing_admin::overview(State(state.clone()), admin.clone())
+        .await
+        .unwrap();
+    let overview = serde_json::to_value(overview).unwrap();
+    assert!(!overview.to_string().contains("bk_never_shown"));
+    assert_eq!(overview["summary"]["active"], 1);
+    assert_eq!(overview["summary"]["monthly_revenue"], 9900);
+    assert_eq!(overview["summary"]["unbilled"], 1);
+    let accounts = overview["accounts"].as_array().unwrap();
+    assert_eq!(accounts.len(), 2);
+    let early = accounts
+        .iter()
+        .find(|account| account["email"] == "early@example.com")
+        .unwrap();
+    assert!(early["status"].is_null());
+    assert_eq!(early["instances"], 1);
+
+    // An operator refunds outside the customer's seven days.
+    let Json(detail) = billing_admin::account(State(state.clone()), admin.clone(), Path(user_id))
+        .await
+        .unwrap();
+    let detail = serde_json::to_value(detail).unwrap();
+    let order_id = detail["payments"][0]["order_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    sqlx::query(
+        "UPDATE subscription_payments SET settled_at=now()-interval '30 days' WHERE order_id=$1",
+    )
+    .bind(&order_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        billing_admin::refund(State(state.clone()), admin.clone(), Path(order_id.clone()))
+            .await
+            .unwrap(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(subscription_status(&pool, user_id).await, "canceled");
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT refund_requested_by FROM subscription_payments WHERE order_id=$1"
+        )
+        .bind(&order_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .is_some(),
+        true
+    );
+    drop(toss);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn an_exempt_account_runs_instances_and_keeps_them(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (runtime, admin) = fixture(&pool).await;
+    let (user_id, headers) = billed_customer(&pool).await;
+    subscribe(&state, &headers).await;
+    let id = tenant(&pool, runtime).await;
+    sqlx::query("UPDATE tenants SET user_id=$2,lifecycle_state='ready' WHERE id=$1")
+        .bind(id)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        billing_admin::exempt(
+            State(state.clone()),
+            admin.clone(),
+            Path(user_id),
+            Json(serde_json::from_value(serde_json::json!({"exempt": true})).unwrap()),
+        )
+        .await
+        .unwrap(),
+        StatusCode::NO_CONTENT
+    );
+    // Its subscription lapsing takes nothing offline.
+    toss.answer(&[TossScript::Decline; 4]);
+    for _ in 0..4 {
+        make_due(&pool, user_id).await;
+        assert!(billing::charge_due(&state, None).await.unwrap());
+    }
+    assert_eq!(subscription_status(&pool, user_id).await, "lapsed");
+    assert_eq!(lifecycle(&pool, id).await.0, "ready");
+    let mut tx = pool.begin().await.unwrap();
+    billing::require_subscription(&state, &mut tx, user_id)
+        .await
+        .unwrap();
+    tx.rollback().await.unwrap();
+    // An operator's retry needs a card on file, which an ended subscription
+    // no longer has.
+    assert_eq!(
+        billing_admin::retry(State(state.clone()), admin.clone(), Path(user_id))
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::CONFLICT
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn an_operator_charges_a_declined_renewal_again(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (_, admin) = fixture(&pool).await;
+    let (user_id, headers) = billed_customer(&pool).await;
+    subscribe(&state, &headers).await;
+    toss.answer(&[TossScript::Decline]);
+    make_due(&pool, user_id).await;
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(subscription_status(&pool, user_id).await, "past_due");
+    assert_eq!(
+        billing_admin::retry(State(state.clone()), admin.clone(), Path(user_id))
+            .await
+            .unwrap(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(subscription_status(&pool, user_id).await, "active");
+    assert_eq!(toss.charges().len(), 3);
+}

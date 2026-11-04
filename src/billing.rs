@@ -510,7 +510,8 @@ pub(crate) struct TossError {
 
 /// Whether a customer may run another instance: one whose renewal was declined
 /// is still subscribed while it is retried. Without TossPayments
-/// configured nobody is billed; administrators are never billed.
+/// configured nobody is billed; administrators and accounts an operator
+/// exempted are never billed.
 pub(crate) async fn require_subscription(
     s: &Shared,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -520,7 +521,7 @@ pub(crate) async fn require_subscription(
         return Ok(());
     }
     let allowed = sqlx::query_scalar::<_, bool>(
-        "SELECT u.is_admin OR COALESCE(s.status IN ('active','past_due'),false) FROM users u LEFT JOIN subscriptions s ON s.user_id=u.id WHERE u.id=$1",
+        "SELECT u.is_admin OR u.billing_exempt OR COALESCE(s.status IN ('active','past_due'),false) FROM users u LEFT JOIN subscriptions s ON s.user_id=u.id WHERE u.id=$1",
     )
     .bind(user_id)
     .fetch_one(&mut **tx)
@@ -541,7 +542,7 @@ pub(crate) async fn subscription_required(s: &Shared, user_id: Uuid) -> Result<b
         return Ok(false);
     }
     Ok(sqlx::query_scalar::<_, bool>(
-        "SELECT NOT (u.is_admin OR COALESCE(s.status IN ('active','past_due'),false)) FROM users u LEFT JOIN subscriptions s ON s.user_id=u.id WHERE u.id=$1",
+        "SELECT NOT (u.is_admin OR u.billing_exempt OR COALESCE(s.status IN ('active','past_due'),false)) FROM users u LEFT JOIN subscriptions s ON s.user_id=u.id WHERE u.id=$1",
     )
     .bind(user_id)
     .fetch_one(&s.db)
@@ -1245,8 +1246,10 @@ pub(crate) async fn end_subscription(
         .bind(status)
         .execute(&mut **tx)
         .await?;
+    // An account that needs no subscription keeps its instances whatever
+    // becomes of one it had.
     let tenants = sqlx::query_scalar::<_, Uuid>(
-        "SELECT id FROM tenants WHERE user_id=$1 AND lifecycle_state IN ('provisioning','ready','failed') ORDER BY created_at FOR UPDATE",
+        "SELECT t.id FROM tenants t JOIN users u ON u.id=t.user_id WHERE t.user_id=$1 AND t.lifecycle_state IN ('provisioning','ready','failed') AND NOT (u.is_admin OR u.billing_exempt) ORDER BY t.created_at FOR UPDATE OF t",
     )
     .bind(user_id)
     .fetch_all(&mut **tx)

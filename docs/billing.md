@@ -161,6 +161,30 @@ day. Once TossPayments confirms, or answers `NOT_FOUND_BILLING`, the key itself
 is erased. A key from another MID cannot be deleted with this one's secret key;
 it waits with `last_error` set, for deletion in the TossPayments dashboard.
 
+## Operators
+
+`/admin/billing` shows monthly revenue and counts of active, past-due and
+canceling subscriptions, accounts running instances unbilled (such as customers
+from before billing), open refunds, and retired card keys TossPayments has not
+confirmed deleting after three tries. Below that is every account that
+subscribed, is exempt, or runs instances unbilled, with its standing, card,
+renewal date and instances. Selecting one shows its payments.
+
+From there an operator can:
+
+- **Charge again now** a past-due subscription, or a first charge that was
+  declined, on the card on file. A decline counts as one of the retries.
+- **Refund** any paid payment, outside the customer's seven days too, through
+  the same pipeline as a customer's refund.
+- **Exempt** an account from billing (`users.billing_exempt`). Like an
+  administrator, it can create and restore instances without a subscription,
+  and a subscription of its that ends takes nothing offline. Lifting the
+  exemption takes nothing offline either: the account just cannot add or
+  restore instances until it subscribes.
+
+Each of these is recorded as an operation attributed to the operator. The page
+never shows a billing key or customer key.
+
 ## Audit
 
 Each card registration, cancellation, resumption, charge, refund request,
