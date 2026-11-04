@@ -33,6 +33,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Spinner } from "@/components/console/status";
+import { RefundPolicy } from "./RefundPolicy";
 
 /** Where TossPayments' billing window sends the customer back, either way. */
 const RETURN_PATH = "/account/billing";
@@ -407,6 +408,7 @@ export function SubscriptionCard(
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+        <RefundPolicy />
       </CardContent>
     </Card>
   );
