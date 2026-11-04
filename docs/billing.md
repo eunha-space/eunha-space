@@ -185,6 +185,27 @@ From there an operator can:
 Each of these is recorded as an operation attributed to the operator. The page
 never shows a billing key or customer key.
 
+## Emails
+
+Billing emails go out through an outbox, `billing_emails`. Each is written in
+the same transaction as what it is about, with a dedupe key, so a receipt exists
+exactly when its charge was recorded as paid and is never written twice. The
+renewer sends what is due through control-plane SMTP, backing off from five
+minutes to six hours, and gives up on an email it could not send within three
+days rather than deliver one about something long past. Without SMTP
+configured, nothing is sent.
+
+- **Receipt**, for every paid charge: the amount, the card's company and last
+  digits, the period, the order id and TossPayments' receipt link.
+- **Renewal reminder**, seven days before a subscription renews: the date, the
+  amount and the card, and how to cancel or change the card. Not sent for a
+  subscription set to end, or one renewing within a day.
+- **Refund confirmation**, for every refund recorded, saying whether the
+  subscription ended with it.
+
+Declines, a subscription ending, and a card removed at TossPayments are still
+emailed directly, best effort; the account page says the same.
+
 ## Audit
 
 Each card registration, cancellation, resumption, charge, refund request,

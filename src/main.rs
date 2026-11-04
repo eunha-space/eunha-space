@@ -39,6 +39,7 @@ use uuid::Uuid;
 mod auth;
 mod billing;
 mod billing_admin;
+mod billing_mail;
 mod billing_sync;
 mod ci_release;
 mod domain_change;

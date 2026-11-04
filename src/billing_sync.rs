@@ -372,7 +372,7 @@ async fn apply_cancellation(
 ) -> anyhow::Result<()> {
     let refunded = payment.refunded();
     let mut tx = s.db.begin().await?;
-    let Some((user_id, amount, previously, ends_period, email)) = sqlx::query_as::<_, (Uuid, i64, i64, bool, Option<String>)>(
+    let Some((user_id, amount, previously, ends_period, _email)) = sqlx::query_as::<_, (Uuid, i64, i64, bool, Option<String>)>(
         "SELECT p.user_id,p.amount,p.refunded_amount,(p.period_end=s.current_period_end AND s.status IN ('active','past_due')),u.email FROM subscription_payments p JOIN subscriptions s ON s.user_id=p.user_id JOIN users u ON u.id=p.user_id WHERE p.order_id=$1 AND p.status IN ('paid','refunded') FOR UPDATE OF p,s",
     )
     .bind(order_id)
@@ -400,22 +400,15 @@ async fn apply_cancellation(
         None,
     )
     .await?;
-    let tenants = if full && ends_period {
+    let ends = full && ends_period;
+    let tenants = if ends {
         end_subscription(&mut tx, user_id, "canceled").await?
     } else {
         Vec::new()
     };
+    crate::billing_mail::refund(&mut tx, user_id, order_id, refunded, ends).await?;
     tx.commit().await?;
-    if full && ends_period {
-        wake(s, &tenants).await;
-        notify(
-            s,
-            email.as_deref(),
-            "Your eunha space payment was refunded",
-            "Your payment was refunded and your subscription has ended, so your instances are offline. Their data is kept: subscribe again from your account page to serve them again.",
-        )
-        .await;
-    }
+    wake(s, &tenants).await;
     Ok(())
 }
 

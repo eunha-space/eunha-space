@@ -2527,3 +2527,158 @@ async fn an_operator_charges_a_declined_renewal_again(pool: PgPool) {
     assert_eq!(subscription_status(&pool, user_id).await, "active");
     assert_eq!(toss.charges().len(), 3);
 }
+
+async fn emails(pool: &PgPool, user_id: Uuid) -> Vec<(String, String, String)> {
+    sqlx::query_as(
+        "SELECT kind,subject,body FROM billing_emails WHERE user_id=$1 ORDER BY created_at",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn every_paid_charge_gets_one_receipt(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    let view = subscribe(&state, &headers).await;
+    let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+    let sent = emails(&pool, user_id).await;
+    assert_eq!(sent.len(), 1);
+    let (kind, subject, body) = &sent[0];
+    assert_eq!(kind, "receipt");
+    assert_eq!(subject, "Your eunha space receipt: ₩9,900");
+    assert!(body.contains("We charged ₩9,900 to your 현대 card ending 123*"));
+    assert!(body.contains(&order_id));
+    assert!(body.contains("Receipt: https://receipt.example/r"));
+    assert!(!body.contains("bk_never_shown"));
+
+    // A renewal gets its own receipt; a declined one gets none.
+    toss.answer(&[TossScript::Decline, TossScript::Approve]);
+    make_due(&pool, user_id).await;
+    billing::charge_due(&state, None).await.unwrap();
+    assert_eq!(emails(&pool, user_id).await.len(), 1);
+    make_due(&pool, user_id).await;
+    billing::charge_due(&state, None).await.unwrap();
+    let kinds: Vec<String> = emails(&pool, user_id)
+        .await
+        .into_iter()
+        .map(|e| e.0)
+        .collect();
+    assert_eq!(kinds, vec!["receipt", "receipt"]);
+
+    // Without control-plane SMTP nothing is sent, and nothing is lost.
+    assert!(!billing_mail::send_due(&state).await.unwrap());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM billing_emails WHERE sent_at IS NULL AND abandoned_at IS NULL"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        2
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_renewal_is_announced_once_a_week_ahead(pool: PgPool) {
+    let (_toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    subscribe(&state, &headers).await;
+    let set_end = |interval: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(&format!("UPDATE subscriptions SET current_period_end=now()+interval '{interval}',next_attempt_at=now()+interval '{interval}' WHERE user_id=$1"))
+                .bind(user_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    };
+    // A month away: too early.
+    assert_eq!(
+        billing_mail::schedule_renewal_notices(&state)
+            .await
+            .unwrap(),
+        0
+    );
+    // Five days away: announced, once.
+    set_end("5 days").await;
+    assert_eq!(
+        billing_mail::schedule_renewal_notices(&state)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        billing_mail::schedule_renewal_notices(&state)
+            .await
+            .unwrap(),
+        0
+    );
+    let notice = emails(&pool, user_id)
+        .await
+        .into_iter()
+        .find(|email| email.0 == "renewal_notice")
+        .unwrap();
+    assert!(
+        notice
+            .1
+            .starts_with("Your eunha space subscription renews on ")
+    );
+    assert!(
+        notice
+            .2
+            .contains("we will charge ₩9,900 to your 현대 card ending 123*")
+    );
+
+    // A subscription that will not renew is not announced.
+    set_end("6 days").await;
+    sqlx::query("UPDATE subscriptions SET cancel_at_period_end=true WHERE user_id=$1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        billing_mail::schedule_renewal_notices(&state)
+            .await
+            .unwrap(),
+        0
+    );
+    // Nor is one renewing within the day.
+    sqlx::query("UPDATE subscriptions SET cancel_at_period_end=false WHERE user_id=$1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    set_end("12 hours").await;
+    assert_eq!(
+        billing_mail::schedule_renewal_notices(&state)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_refund_is_confirmed_by_email(pool: PgPool) {
+    let (_toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    let view = subscribe(&state, &headers).await;
+    let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+    refund(&state, &headers, &order_id).await.unwrap();
+    let refund = emails(&pool, user_id)
+        .await
+        .into_iter()
+        .find(|email| email.0 == "refund")
+        .unwrap();
+    assert_eq!(refund.1, "Your eunha space refund: ₩9,900");
+    assert!(refund.2.contains("your subscription has ended"));
+}

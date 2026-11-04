@@ -914,6 +914,22 @@ pub async fn renewer(state: Shared) {
                     }
                 }
             }
+            if crate::billing_mail::schedule_renewal_notices(&state)
+                .await
+                .is_err()
+            {
+                tracing::warn!("could not schedule renewal reminders");
+            }
+            for _ in 0..MAX_PER_PASS {
+                match crate::billing_mail::send_due(&state).await {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(_error) => {
+                        tracing::warn!("could not send billing emails");
+                        break;
+                    }
+                }
+            }
             for _ in 0..MAX_PER_PASS {
                 match crate::billing_sync::delete_retired_key(&state).await {
                     Ok(true) => continue,
@@ -1141,6 +1157,7 @@ async fn settle(s: &Shared, due: &Due, pending: &PendingPayment, outcome: Charge
                 .bind(pending.period_end)
                 .execute(&mut *tx)
                 .await?;
+            crate::billing_mail::receipt(&mut tx, &pending.order_id).await?;
             record(
                 &mut tx,
                 due.user_id,
