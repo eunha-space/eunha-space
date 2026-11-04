@@ -49,6 +49,9 @@ const RETRY_UNKNOWN: &str = "5 minutes";
 /// a request that timed out may still be approved for a while after.
 const ABANDON_UNRECORDED_ORDER: &str = "45 minutes";
 
+/// How often a subscription held back by an MID mismatch is looked at again.
+const MID_MISMATCH_RECHECK: &str = "1 hour";
+
 /// How long a charge in flight holds its subscription. Longer than the request's
 /// own timeout, so a slow approval is not sent again while it is still running.
 const LEASE: &str = "3 minutes";
@@ -92,6 +95,11 @@ pub(crate) struct Config {
     /// What a new subscription is charged each month, in won.
     pub amount: i64,
     order_name: String,
+    /// The merchant ID (MID) the secret key belongs to. A billing key can only
+    /// be charged through the MID that issued it, so a subscription whose key
+    /// another MID issued (test keys, before the switch to live) is not
+    /// charged at all rather than declined. Required with a live key.
+    mid: Option<String>,
     /// Card approval can take far longer than the four seconds the shared
     /// client allows.
     client: reqwest::Client,
@@ -120,6 +128,14 @@ impl Config {
             .ok_or_else(|| {
                 anyhow::anyhow!("EUNHA_SPACE_SUBSCRIPTION_AMOUNT must be a positive number of won")
             })?;
+        let mid = std::env::var("TOSSPAYMENTS_MID")
+            .ok()
+            .map(|mid| mid.trim().to_owned())
+            .filter(|mid| !mid.is_empty());
+        anyhow::ensure!(
+            mid.is_some() || !secret_key.trim().starts_with("live_"),
+            "TOSSPAYMENTS_MID is required with a live TossPayments secret key"
+        );
         Ok(Some(Self::new(
             client_key.trim().into(),
             secret_key.trim().into(),
@@ -128,6 +144,7 @@ impl Config {
             amount,
             std::env::var("EUNHA_SPACE_SUBSCRIPTION_NAME")
                 .unwrap_or_else(|_| "eunha space 월간 구독".into()),
+            mid,
         )?))
     }
 
@@ -137,6 +154,7 @@ impl Config {
         api_base: String,
         amount: i64,
         order_name: String,
+        mid: Option<String>,
     ) -> Result<Self> {
         Ok(Self {
             client_key,
@@ -144,6 +162,7 @@ impl Config {
             api_base: api_base.trim_end_matches('/').into(),
             amount,
             order_name: order_name.chars().take(100).collect(),
+            mid,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(60))
                 .build()?,
@@ -225,6 +244,12 @@ impl Config {
         let Ok(body) = response.bytes().await else {
             return Charge::Unknown;
         };
+        if let Some(code) = merchant_setup_error(status, &body) {
+            tracing::error!(
+                %code,
+                "TossPayments refused a charge over this control plane's keys or merchant setup; nothing is counted against the card until it is fixed"
+            );
+        }
         match charge_outcome(status, &body, order_id, amount) {
             // The order was settled before, longer ago than the idempotency key
             // is kept: what happened to it is on the payment itself.
@@ -328,13 +353,55 @@ fn customer_message(message: &str) -> String {
 /// Codes that say TossPayments, not the card, could not finish: the charge may
 /// or may not have happened, so it is asked about again rather than retried
 /// as new.
-const UNSETTLED_CODES: [&str; 5] = [
+const UNSETTLED_CODES: [&str; 8] = [
     "IDEMPOTENT_REQUEST_PROCESSING",
     "PROVIDER_ERROR",
     "FAILED_INTERNAL_SYSTEM_PROCESSING",
     "FAILED_PAYMENT_INTERNAL_SYSTEM_PROCESSING",
     "UNKNOWN_PAYMENT_ERROR",
+    "ALREADY_PROCESSING_REQUEST",
+    "DUPLICATED_REQUEST",
+    "FORBIDDEN_CONSECUTIVE_REQUEST",
 ];
+
+/// Codes that are about this control plane's keys, requests or merchant setup,
+/// never about the card. Counted as declines, one bad key or an unfinished
+/// contract would decline every renewal at once and, days later, take every
+/// subscriber's instances offline. They are left unsettled instead, and logged
+/// for an operator: subscriptions keep running until it is fixed.
+/// https://docs.tosspayments.com/reference/error-codes
+const MERCHANT_SETUP_CODES: [&str; 12] = [
+    "UNAUTHORIZED_KEY",
+    "INVALID_API_KEY",
+    "INCORRECT_BASIC_AUTH_FORMAT",
+    "FORBIDDEN_REQUEST",
+    "NOT_SUPPORTED_METHOD",
+    "NOT_FOUND_TERMINAL_ID",
+    "NOT_FOUND_MERCHANT",
+    "NOT_FOUND_MERCHANT_INTEGRATION",
+    "API_VERSION_UPDATE_NEEDED",
+    "INVALID_UNREGISTERED_SUBMALL",
+    "INVALID_REQUEST",
+    "NOT_MATCHES_CUSTOMER_KEY",
+];
+
+/// Whether a failed charge's answer is about this control plane's setup rather
+/// than the card. The code is TossPayments' own and safe to log.
+pub(crate) fn merchant_setup_error(status: reqwest::StatusCode, body: &[u8]) -> Option<String> {
+    let code = serde_json::from_slice::<TossError>(body)
+        .map(|error| error.code)
+        .unwrap_or_default();
+    if status == reqwest::StatusCode::UNAUTHORIZED || MERCHANT_SETUP_CODES.contains(&code.as_str())
+    {
+        Some(if code.is_empty() {
+            status.as_u16().to_string()
+        } else {
+            code.chars().take(64).collect()
+        })
+    } else {
+        None
+    }
+}
 
 /// Read a charge's response. `None` when it does not say what happened.
 pub(crate) fn charge_outcome(
@@ -358,7 +425,11 @@ pub(crate) fn charge_outcome(
             receipt_url: payment.receipt.and_then(|receipt| receipt.url),
         });
     }
-    if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+    if status.is_server_error()
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::CONFLICT
+        || merchant_setup_error(status, body).is_some()
+    {
         return None;
     }
     let error = serde_json::from_slice::<TossError>(body).ok()?;
@@ -376,6 +447,8 @@ pub(crate) fn charge_outcome(
 struct IssuedBillingKey {
     billing_key: String,
     customer_key: String,
+    /// The merchant ID that issued the key, and the only one that can charge it.
+    m_id: Option<String>,
     card_company: Option<String>,
     card_number: Option<String>,
     card: Option<IssuedCard>,
@@ -611,11 +684,12 @@ pub(crate) async fn authorize(
     .bind(user_id)
     .fetch_one(&mut *tx)
     .await?;
-    sqlx::query("UPDATE subscriptions SET billing_key=$2,card_company=$3,card_number=$4,last_error=NULL,updated_at=now() WHERE user_id=$1")
+    sqlx::query("UPDATE subscriptions SET billing_key=$2,card_company=$3,card_number=$4,toss_mid=$5,last_error=NULL,updated_at=now() WHERE user_id=$1")
         .bind(user_id)
         .bind(&issued.billing_key)
         .bind(&card_company)
         .bind(&card_number)
+        .bind(issued.m_id.as_deref().map(|mid| mid.chars().take(64).collect::<String>()))
         .execute(&mut *tx)
         .await?;
     let pending = sqlx::query_scalar::<_, bool>(
@@ -788,6 +862,7 @@ struct Due {
     status: String,
     cancel_at_period_end: bool,
     billing_key: Option<String>,
+    toss_mid: Option<String>,
     email: Option<String>,
 }
 
@@ -803,6 +878,19 @@ struct PendingPayment {
     abandonable: bool,
 }
 
+/// Why a billing key cannot be charged through the configured MID, or `None`
+/// when it can. Without a configured MID (test keys) nothing is held back.
+pub(crate) fn mid_problem(configured: Option<&str>, key_mid: Option<&str>) -> Option<String> {
+    let configured = configured?;
+    if key_mid == Some(configured) {
+        return None;
+    }
+    Some(format!(
+        "key issued by MID {}, current key is MID {configured}",
+        key_mid.unwrap_or("(unrecorded)")
+    ))
+}
+
 /// Settle one subscription that is due, or the given user's if it is.
 /// Returns whether there was one.
 pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool> {
@@ -811,7 +899,7 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
     };
     let mut tx = s.db.begin().await?;
     let Some(due) = sqlx::query_as::<_, Due>(
-        "SELECT s.user_id,s.customer_key,s.status,s.cancel_at_period_end,s.billing_key,u.email FROM subscriptions s JOIN users u ON u.id=s.user_id WHERE s.next_attempt_at<=now() AND (s.lease_until IS NULL OR s.lease_until<now()) AND s.status IN ('incomplete','active','past_due') AND ($1::uuid IS NULL OR s.user_id=$1) ORDER BY s.next_attempt_at LIMIT 1 FOR UPDATE OF s SKIP LOCKED",
+        "SELECT s.user_id,s.customer_key,s.status,s.cancel_at_period_end,s.billing_key,s.toss_mid,u.email FROM subscriptions s JOIN users u ON u.id=s.user_id WHERE s.next_attempt_at<=now() AND (s.lease_until IS NULL OR s.lease_until<now()) AND s.status IN ('incomplete','active','past_due') AND ($1::uuid IS NULL OR s.user_id=$1) ORDER BY s.next_attempt_at LIMIT 1 FOR UPDATE OF s SKIP LOCKED",
     )
     .bind(user_id)
     .fetch_optional(&mut *tx)
@@ -840,6 +928,18 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
         tx.commit().await?;
         return Ok(true);
     };
+    if let Some(problem) = mid_problem(billing.mid.as_deref(), due.toss_mid.as_deref()) {
+        // Charging would only be refused, and counting that against the card
+        // would end the subscription over a key the customer did nothing to.
+        // The subscription stays as it is and is looked at again in an hour.
+        sqlx::query(&format!("UPDATE subscriptions SET next_attempt_at=now()+interval '{MID_MISMATCH_RECHECK}' WHERE user_id=$1"))
+            .bind(due.user_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        tracing::error!(user_id = %due.user_id, %problem, "subscription not charged: its billing key belongs to another TossPayments MID");
+        return Ok(true);
+    }
     let pending = match sqlx::query_as::<_, PendingPayment>(
         &format!("SELECT order_id,amount,period,period_end,charge_attempted_at,coalesce(charge_attempted_at<now()-interval '{ABANDON_UNRECORDED_ORDER}',false) abandonable FROM subscription_payments WHERE user_id=$1 AND status='pending'"),
     )
@@ -1217,10 +1317,59 @@ mod tests {
             "https://toss.example/".into(),
             9900,
             "plan".into(),
+            None,
         )
         .unwrap();
         assert_eq!(config.authorization(), "Basic dGVzdF9za19zZWNyZXQ6");
         assert_eq!(config.api_base, "https://toss.example");
+    }
+
+    #[test]
+    fn merchant_setup_errors_are_never_declines() {
+        for (status, code) in [
+            (reqwest::StatusCode::UNAUTHORIZED, "UNAUTHORIZED_KEY"),
+            (reqwest::StatusCode::BAD_REQUEST, "INVALID_API_KEY"),
+            (reqwest::StatusCode::NOT_FOUND, "NOT_FOUND_MERCHANT"),
+            (reqwest::StatusCode::BAD_REQUEST, "NOT_FOUND_TERMINAL_ID"),
+            (reqwest::StatusCode::FORBIDDEN, "FORBIDDEN_REQUEST"),
+            (reqwest::StatusCode::BAD_REQUEST, "NOT_MATCHES_CUSTOMER_KEY"),
+            (reqwest::StatusCode::CONFLICT, "ALREADY_PROCESSING_REQUEST"),
+        ] {
+            let body = format!("{{\"code\":\"{code}\",\"message\":\"x\"}}");
+            assert_eq!(
+                charge_outcome(status, body.as_bytes(), "eunha-1", 9900),
+                None,
+                "{code}"
+            );
+        }
+        // A 401 is about the key whatever its body says.
+        assert_eq!(
+            charge_outcome(reqwest::StatusCode::UNAUTHORIZED, b"", "eunha-1", 9900),
+            None
+        );
+        assert_eq!(
+            merchant_setup_error(
+                reqwest::StatusCode::NOT_FOUND,
+                br#"{"code":"NOT_FOUND_MERCHANT","message":"x"}"#
+            ),
+            Some("NOT_FOUND_MERCHANT".into())
+        );
+        assert_eq!(
+            merchant_setup_error(
+                reqwest::StatusCode::FORBIDDEN,
+                br#"{"code":"REJECT_CARD_COMPANY","message":"x"}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_key_is_charged_only_through_the_mid_that_issued_it() {
+        assert_eq!(mid_problem(None, None), None);
+        assert_eq!(mid_problem(None, Some("tosstest")), None);
+        assert_eq!(mid_problem(Some("live1"), Some("live1")), None);
+        assert!(mid_problem(Some("live1"), Some("tosstest")).is_some());
+        assert!(mid_problem(Some("live1"), None).is_some());
     }
 
     #[test]

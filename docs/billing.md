@@ -12,6 +12,7 @@ creating an instance needs no subscription.
 ```sh
 TOSSPAYMENTS_CLIENT_KEY=live_ck_...        # public; handed to the billing window
 TOSSPAYMENTS_SECRET_KEY=live_sk_...        # process-only
+TOSSPAYMENTS_MID=...                       # the secret key's merchant ID; required with a live key
 EUNHA_SPACE_SUBSCRIPTION_AMOUNT=9900       # won per month, required with the keys
 EUNHA_SPACE_SUBSCRIPTION_NAME='eunha space 월간 구독'   # optional order name
 TOSSPAYMENTS_API_BASE=https://api.tosspayments.com    # optional; a stand-in for tests
@@ -20,6 +21,21 @@ TOSSPAYMENTS_API_BASE=https://api.tosspayments.com    # optional; a stand-in for
 The TossPayments contract must have automatic payments enabled for the
 client key's merchant ID. A subscription keeps the amount it started at, so a
 new price applies only to new and restarted subscriptions.
+
+A billing key can be charged only through the merchant ID (MID) that issued
+it. Each subscription records its key's MID, and with `TOSSPAYMENTS_MID` set a
+subscription whose key another MID issued is not charged at all: it is logged
+and looked at again hourly, and nothing counts against the card. Keys from a
+test setup therefore stay uncharged after the switch to live keys, instead of
+being declined until their subscriptions end. Subscribers re-register a card to
+move to the live MID.
+
+Answers about this control plane's own setup are never counted as declines:
+a 401, or codes such as `UNAUTHORIZED_KEY`, `INVALID_API_KEY`,
+`NOT_FOUND_MERCHANT`, `NOT_FOUND_TERMINAL_ID` or `INVALID_REQUEST`. The charge
+stays pending and is logged as an error, and subscriptions keep running until
+the setup is fixed. Without this, one wrong key would decline every renewal and
+take every subscriber's instances offline days later.
 
 ## Subscribing
 

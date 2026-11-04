@@ -1576,6 +1576,8 @@ enum TossScript {
     Outage,
     /// Approves, then the answer is lost.
     LostApproval,
+    /// Refuses the control plane's own secret key.
+    BadKey,
 }
 
 #[derive(Clone, Default)]
@@ -1642,6 +1644,12 @@ async fn toss_stand_in() -> (TossStandIn, String) {
                     .insert(order_id, approved.clone());
                 (StatusCode::OK, Json(approved))
             }
+            TossScript::BadKey => (
+                StatusCode::UNAUTHORIZED,
+                Json(
+                    serde_json::json!({"code":"UNAUTHORIZED_KEY","message":"인증되지 않은 시크릿 키 혹은 클라이언트 키 입니다."}),
+                ),
+            ),
             TossScript::LostApproval => {
                 toss.orders.lock().unwrap().insert(order_id, approved);
                 (
@@ -1692,6 +1700,7 @@ fn billed_state(pool: PgPool, toss_base: &str) -> Shared {
             toss_base.into(),
             9900,
             "eunha space".into(),
+            Some("tvivarepublica".into()),
         )
         .unwrap(),
     ));
@@ -2010,5 +2019,89 @@ async fn an_approval_whose_answer_was_lost_is_found_and_not_charged_again(pool: 
         .await
         .unwrap(),
         1
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_key_from_another_mid_is_not_charged_or_counted(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    assert_eq!(
+        subscribe(&state, &headers).await["subscription"]["status"],
+        "active"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT toss_mid FROM subscriptions WHERE user_id=$1"
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .as_deref(),
+        Some("tvivarepublica")
+    );
+    // Issued under the test MID before the switch to live keys.
+    sqlx::query("UPDATE subscriptions SET toss_mid='tosstest' WHERE user_id=$1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    make_due(&pool, user_id).await;
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(toss.charges().len(), 1);
+    let (status, failed, later): (String, i32, bool) = sqlx::query_as(
+        "SELECT status,failed_attempts,next_attempt_at>now()+interval '50 minutes' FROM subscriptions WHERE user_id=$1",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), failed, later), ("active", 0, true));
+    assert!(!billing::charge_due(&state, None).await.unwrap());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_bad_secret_key_never_counts_against_the_card(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (runtime, _) = fixture(&pool).await;
+    let (user_id, headers) = billed_customer(&pool).await;
+    subscribe(&state, &headers).await;
+    let id = tenant(&pool, runtime).await;
+    sqlx::query("UPDATE tenants SET user_id=$2,lifecycle_state='ready' WHERE id=$1")
+        .bind(id)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // More renewals than it takes declines to end a subscription.
+    toss.answer(&[TossScript::BadKey; 6]);
+    for _ in 0..6 {
+        sqlx::query("UPDATE subscription_payments SET charge_attempted_at=now()-interval '1 hour' WHERE user_id=$1 AND status='pending'")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        make_due(&pool, user_id).await;
+        assert!(billing::charge_due(&state, None).await.unwrap());
+    }
+    let (status, failed): (String, i32) =
+        sqlx::query_as("SELECT status,failed_attempts FROM subscriptions WHERE user_id=$1")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((status.as_str(), failed), ("active", 0));
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT lifecycle_state FROM tenants WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "ready"
     );
 }
