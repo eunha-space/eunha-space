@@ -1572,7 +1572,10 @@ async fn the_migration_adopts_temporals_work_and_spares_overdue_tenants(pool: Pg
 enum TossScript {
     Approve,
     Decline,
+    /// Fails without recording anything.
     Outage,
+    /// Approves, then the answer is lost.
+    LostApproval,
 }
 
 #[derive(Clone, Default)]
@@ -1580,6 +1583,8 @@ struct TossStandIn {
     script: Arc<std::sync::Mutex<std::collections::VecDeque<TossScript>>>,
     /// The idempotency key and order id of every charge, in order.
     charges: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    /// What TossPayments recorded, by order id.
+    orders: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
 }
 
 impl TossStandIn {
@@ -1622,17 +1627,30 @@ async fn toss_stand_in() -> (TossStandIn, String) {
             .unwrap()
             .pop_front()
             .unwrap_or(TossScript::Approve);
+        let approved = serde_json::json!({
+            "paymentKey": format!("pk_{order_id}"),
+            "orderId": order_id,
+            "status": "DONE",
+            "totalAmount": body["amount"],
+            "receipt": {"url": "https://receipt.example/r"},
+        });
         match next {
-            TossScript::Approve => (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "paymentKey": format!("pk_{order_id}"),
-                    "orderId": order_id,
-                    "status": "DONE",
-                    "totalAmount": body["amount"],
-                    "receipt": {"url": "https://receipt.example/r"},
-                })),
-            ),
+            TossScript::Approve => {
+                toss.orders
+                    .lock()
+                    .unwrap()
+                    .insert(order_id, approved.clone());
+                (StatusCode::OK, Json(approved))
+            }
+            TossScript::LostApproval => {
+                toss.orders.lock().unwrap().insert(order_id, approved);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        serde_json::json!({"code":"FAILED_INTERNAL_SYSTEM_PROCESSING","message":"x"}),
+                    ),
+                )
+            }
             TossScript::Decline => (
                 StatusCode::FORBIDDEN,
                 Json(
@@ -1645,9 +1663,19 @@ async fn toss_stand_in() -> (TossStandIn, String) {
             ),
         }
     };
+    let lookup = |State(toss): State<TossStandIn>, Path(order_id): Path<String>| async move {
+        match toss.orders.lock().unwrap().get(&order_id) {
+            Some(payment) => (StatusCode::OK, Json(payment.clone())),
+            None => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"code":"NOT_FOUND_PAYMENT","message":"없음"})),
+            ),
+        }
+    };
     let app = Router::new()
         .route("/v1/billing/authorizations/issue", post(issue))
         .route("/v1/billing/{billing_key}", post(charge))
+        .route("/v1/payments/orders/{order_id}", get(lookup))
         .with_state(toss.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1740,7 +1768,7 @@ async fn a_charge_with_no_answer_is_asked_again_under_the_same_key(pool: PgPool)
     tx.rollback().await.unwrap();
 
     // A redirect carrying somebody else's customer key registers nothing.
-    billing::checkout(State(state.clone()), headers.clone())
+    let _ = billing::checkout(State(state.clone()), headers.clone())
         .await
         .unwrap();
     let foreign = billing::authorize(
@@ -1762,13 +1790,39 @@ async fn a_charge_with_no_answer_is_asked_again_under_the_same_key(pool: PgPool)
     assert_eq!(view["payments"][0]["status"], "pending");
     assert_eq!(view["subscription"]["card_number"], "43301234****123*");
     assert!(!view.to_string().contains("bk_never_shown"));
+    let first_order = toss.charges()[0].1.clone();
+    assert_eq!(toss.charges()[0].0, first_order);
 
+    // Asked again soon after, the order is looked up rather than sent again
+    // under a key that would only replay the failure.
+    make_due(&pool, user_id).await;
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(toss.charges().len(), 1);
+    assert_eq!(subscription_status(&pool, user_id).await, "incomplete");
+
+    // Long enough after it was sent, an order TossPayments never recorded is
+    // given up for a new one, which is charged.
+    sqlx::query("UPDATE subscription_payments SET charge_attempted_at=now()-interval '1 hour' WHERE order_id=$1")
+        .bind(&first_order)
+        .execute(&pool)
+        .await
+        .unwrap();
     make_due(&pool, user_id).await;
     assert!(billing::charge_due(&state, None).await.unwrap());
     let charges = toss.charges();
     assert_eq!(charges.len(), 2);
-    assert_eq!(charges[0], charges[1]);
-    assert_eq!(charges[0].0, charges[0].1);
+    assert_ne!(charges[1].1, first_order);
+    assert_eq!(charges[1].0, charges[1].1);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM subscription_payments WHERE order_id=$1"
+        )
+        .bind(&first_order)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "expired"
+    );
     assert_eq!(subscription_status(&pool, user_id).await, "active");
     let (paid, months) = sqlx::query_as::<_, (i64, bool)>(
         "SELECT count(*) FILTER (WHERE p.status='paid'),bool_and(s.current_period_end=s.anchor_at+interval '1 month' AND s.next_attempt_at=s.current_period_end) FROM subscription_payments p JOIN subscriptions s ON s.user_id=p.user_id WHERE p.user_id=$1",
@@ -1913,10 +1967,10 @@ async fn a_cancelled_subscription_ends_with_its_period(pool: PgPool) {
     let view = serde_json::to_value(view).unwrap();
     assert_eq!(view["subscription"]["status"], "active");
     assert_eq!(view["subscription"]["cancel_at_period_end"], true);
-    billing::resume(State(state.clone()), headers.clone())
+    let _ = billing::resume(State(state.clone()), headers.clone())
         .await
         .unwrap();
-    billing::cancel(State(state.clone()), headers.clone())
+    let _ = billing::cancel(State(state.clone()), headers.clone())
         .await
         .unwrap();
     assert!(!billing::charge_due(&state, None).await.unwrap());
@@ -1931,5 +1985,30 @@ async fn a_cancelled_subscription_ends_with_its_period(pool: PgPool) {
             .unwrap()
             .0,
         StatusCode::CONFLICT
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn an_approval_whose_answer_was_lost_is_found_and_not_charged_again(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    toss.answer(&[TossScript::LostApproval]);
+    let view = subscribe(&state, &headers).await;
+    assert_eq!(view["subscription"]["status"], "incomplete");
+    make_due(&pool, user_id).await;
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(toss.charges().len(), 1);
+    assert_eq!(subscription_status(&pool, user_id).await, "active");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM subscription_payments WHERE user_id=$1 AND status='paid'"
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
     );
 }

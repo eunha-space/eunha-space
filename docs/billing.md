@@ -48,13 +48,17 @@ the 31st after them. The renewer runs with the lifecycle jobs, which
 `CONTROL_JOBS_DISABLED` turns off, and checks every 30 seconds for subscriptions
 that are due.
 
-A charge is written to `subscription_payments` as `pending` before TossPayments
-is called. Its order id is also the `Idempotency-Key`. If the outcome is
-unknown (a timeout, a 5xx response, or a TossPayments-side processing code),
-the payment stays pending and is sent again five minutes later under the same
-key. TossPayments then returns the first answer instead of charging again. If
-the key has expired, the order is looked up instead. A charge in flight holds
-a lease, so two control planes cannot send it at once.
+A charge is written to `subscription_payments` as `pending` before
+TossPayments is called. Its order id is also the `Idempotency-Key`, and
+`charge_attempted_at` records when it went out. TossPayments keeps a key's first
+answer for 15 days, errors included, so a charge whose outcome is unknown (a
+timeout, a 5xx response, or a TossPayments-side processing code) is never sent
+again under its key. Five minutes later the order is looked up instead. An
+approved order is settled as paid, and one TossPayments ended (`ABORTED`,
+`EXPIRED`) as declined. An order TossPayments has no record of
+(`NOT_FOUND_PAYMENT`) 45 minutes after it was sent is `expired`, and a new order
+for the same period is charged at once; that is not counted as a decline. A
+charge in flight holds a lease, so two control planes cannot send it at once.
 
 A declined renewal is retried after 1, 2, and 4 more days. During those retries
 the subscription is `past_due`, its instances keep running, and the customer is

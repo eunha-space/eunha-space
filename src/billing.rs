@@ -7,10 +7,11 @@
 //! has come, and the renewer charges it.
 //!
 //! A charge is written to `subscription_payments` before TossPayments is asked,
-//! and its order id is also the request's idempotency key. A control plane that
-//! dies mid-request leaves the payment pending, and the next attempt asks again
-//! under the same key, which returns the first answer rather than charging
-//! twice.
+//! and its order id is also the request's idempotency key. TossPayments keeps
+//! a key's first answer for 15 days, errors included, so a charge whose answer
+//! was lost is never sent again under its key: the order is looked up instead.
+//! One TossPayments approved is settled as paid; one it never recorded is
+//! given up 45 minutes after it was sent, and a new order takes its place.
 //!
 //! The billing key and the secret key never leave this process: no API returns
 //! them, and no log or operation event formats a request that carries them.
@@ -43,6 +44,11 @@ const RETRY_AFTER_DECLINE: [&str; 3] = ["1 day", "2 days", "4 days"];
 /// How long to wait before asking about a charge whose outcome is not known.
 const RETRY_UNKNOWN: &str = "5 minutes";
 
+/// How long after its last charge request an order TossPayments has no record
+/// of is given up. TossPayments takes up to a minute to approve a charge, and
+/// a request that timed out may still be approved for a while after.
+const ABANDON_UNRECORDED_ORDER: &str = "45 minutes";
+
 /// How long a charge in flight holds its subscription. Longer than the request's
 /// own timeout, so a slow approval is not sent again while it is still running.
 const LEASE: &str = "3 minutes";
@@ -65,6 +71,15 @@ pub(crate) enum Charge {
     Declined { code: String, message: String },
     /// No answer that says either way. The payment stays pending and is asked
     /// about again under the same idempotency key.
+    Unknown,
+}
+
+/// What TossPayments recorded for an order.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Lookup {
+    Settled(Charge),
+    /// TossPayments has no such order: nothing was charged under it.
+    NotFound,
     Unknown,
 }
 
@@ -175,8 +190,8 @@ impl Config {
         ))
     }
 
-    /// Charge a billing key. Sent again with the same order id, it asks about
-    /// the first request rather than making a second one.
+    /// Charge a billing key once for an order. A charge whose answer was lost
+    /// is settled by `lookup`, never by sending it again.
     pub(crate) async fn charge(
         &self,
         billing_key: &str,
@@ -227,6 +242,15 @@ impl Config {
     }
 
     async fn payment_by_order(&self, order_id: &str, amount: i64) -> Charge {
+        match self.lookup(order_id, amount).await {
+            Lookup::Settled(outcome) => outcome,
+            Lookup::NotFound | Lookup::Unknown => Charge::Unknown,
+        }
+    }
+
+    /// What TossPayments recorded for an order. Only its own `NOT_FOUND_PAYMENT`
+    /// says the order was never recorded; any other failure says nothing.
+    pub(crate) async fn lookup(&self, order_id: &str, amount: i64) -> Lookup {
         let Ok(response) = self
             .client
             .get(format!(
@@ -238,26 +262,36 @@ impl Config {
             .send()
             .await
         else {
-            return Charge::Unknown;
+            return Lookup::Unknown;
         };
         let status = response.status();
         let Ok(body) = response.bytes().await else {
-            return Charge::Unknown;
+            return Lookup::Unknown;
         };
         if !status.is_success() {
-            return Charge::Unknown;
+            return match serde_json::from_slice::<TossError>(&body) {
+                Ok(error) if error.code == "NOT_FOUND_PAYMENT" => Lookup::NotFound,
+                _ => Lookup::Unknown,
+            };
         }
         match serde_json::from_slice::<Payment>(&body) {
             Ok(payment) if payment.status == "DONE" => {
-                charge_outcome(status, &body, order_id, amount).unwrap_or(Charge::Unknown)
-            }
-            Ok(payment) if matches!(payment.status.as_str(), "ABORTED" | "EXPIRED") => {
-                Charge::Declined {
-                    code: payment.status,
-                    message: "The payment was not approved.".into(),
+                match charge_outcome(status, &body, order_id, amount) {
+                    Some(outcome) => Lookup::Settled(outcome),
+                    None => Lookup::Unknown,
                 }
             }
-            _ => Charge::Unknown,
+            Ok(payment)
+                if payment.order_id == order_id
+                    && matches!(payment.status.as_str(), "ABORTED" | "EXPIRED") =>
+            {
+                Lookup::Settled(Charge::Declined {
+                    code: payment.status,
+                    message: "The payment was not approved.".into(),
+                })
+            }
+            // IN_PROGRESS, READY, or a record for another order: not settled.
+            _ => Lookup::Unknown,
         }
     }
 }
@@ -473,7 +507,7 @@ async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiError> {
     .fetch_optional(&s.db)
     .await?;
     let payments = sqlx::query_as::<_, PaymentView>(
-        "SELECT order_id,amount,status,period_start,period_end,receipt_url,failure_message,requested_at FROM subscription_payments WHERE user_id=$1 ORDER BY requested_at DESC LIMIT 24",
+        "SELECT order_id,amount,status,period_start,period_end,receipt_url,failure_message,requested_at FROM subscription_payments WHERE user_id=$1 AND status<>'expired' ORDER BY requested_at DESC LIMIT 24",
     )
     .bind(user_id)
     .fetch_all(&s.db)
@@ -763,6 +797,10 @@ struct PendingPayment {
     amount: i64,
     period: i32,
     period_end: OffsetDateTime,
+    /// When a charge for this order last went out; null if none ever did.
+    charge_attempted_at: Option<OffsetDateTime>,
+    /// Whether that was long enough ago to give up an unrecorded order.
+    abandonable: bool,
 }
 
 /// Settle one subscription that is due, or the given user's if it is.
@@ -803,7 +841,7 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
         return Ok(true);
     };
     let pending = match sqlx::query_as::<_, PendingPayment>(
-        "SELECT order_id,amount,period,period_end FROM subscription_payments WHERE user_id=$1 AND status='pending'",
+        &format!("SELECT order_id,amount,period,period_end,charge_attempted_at,coalesce(charge_attempted_at<now()-interval '{ABANDON_UNRECORDED_ORDER}',false) abandonable FROM subscription_payments WHERE user_id=$1 AND status='pending'"),
     )
     .bind(due.user_id)
     .fetch_optional(&mut *tx)
@@ -811,7 +849,7 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
     {
         Some(pending) => pending,
         None => sqlx::query_as::<_, PendingPayment>(
-            "INSERT INTO subscription_payments(order_id,user_id,amount,period,period_start,period_end) SELECT $1,user_id,amount,periods_paid,anchor_at+make_interval(months => periods_paid),anchor_at+make_interval(months => periods_paid+1) FROM subscriptions WHERE user_id=$2 RETURNING order_id,amount,period,period_end",
+            "INSERT INTO subscription_payments(order_id,user_id,amount,period,period_start,period_end) SELECT $1,user_id,amount,periods_paid,anchor_at+make_interval(months => periods_paid),anchor_at+make_interval(months => periods_paid+1) FROM subscriptions WHERE user_id=$2 RETURNING order_id,amount,period,period_end,charge_attempted_at,false abandonable",
         )
         .bind(format!("eunha-{}", Uuid::new_v4().simple()))
         .bind(due.user_id)
@@ -826,6 +864,30 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
     .await?;
     tx.commit().await?;
 
+    // A charge that already went out is not sent again under its key, which
+    // would only replay its first answer: the order is looked up instead.
+    let mut pending = pending;
+    if pending.charge_attempted_at.is_some() {
+        match billing.lookup(&pending.order_id, pending.amount).await {
+            Lookup::Settled(outcome) => {
+                settle(s, &due, &pending, outcome).await?;
+                return Ok(true);
+            }
+            // Never recorded, and long enough ago that it will not be: nothing
+            // was charged, so a new order takes its place now. Not a decline.
+            Lookup::NotFound if pending.abandonable => {
+                pending = replace_unrecorded_order(s, due.user_id, &pending.order_id).await?;
+            }
+            Lookup::NotFound | Lookup::Unknown => {
+                settle(s, &due, &pending, Charge::Unknown).await?;
+                return Ok(true);
+            }
+        }
+    }
+    sqlx::query("UPDATE subscription_payments SET charge_attempted_at=now() WHERE order_id=$1")
+        .bind(&pending.order_id)
+        .execute(&s.db)
+        .await?;
     let outcome = billing
         .charge(
             &billing_key,
@@ -837,6 +899,38 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
         .await;
     settle(s, &due, &pending, outcome).await?;
     Ok(true)
+}
+
+/// Expire an order TossPayments never recorded and request a new one for the
+/// same period, under the lease the caller holds.
+async fn replace_unrecorded_order(
+    s: &Shared,
+    user_id: Uuid,
+    order_id: &str,
+) -> Result<PendingPayment> {
+    let mut tx = s.db.begin().await?;
+    sqlx::query("UPDATE subscription_payments SET status='expired',settled_at=now() WHERE order_id=$1 AND status='pending'")
+        .bind(order_id)
+        .execute(&mut *tx)
+        .await?;
+    let pending = sqlx::query_as::<_, PendingPayment>(
+        "INSERT INTO subscription_payments(order_id,user_id,amount,period,period_start,period_end) SELECT $1,user_id,amount,period,period_start,period_end FROM subscription_payments WHERE order_id=$2 RETURNING order_id,amount,period,period_end,charge_attempted_at,false abandonable",
+    )
+    .bind(format!("eunha-{}", Uuid::new_v4().simple()))
+    .bind(order_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    record(
+        &mut tx,
+        user_id,
+        "subscription_charge",
+        "failed",
+        serde_json::json!({ "order_id": order_id, "replaced_by": pending.order_id }),
+        Some("TossPayments has no record of this charge; a new order replaces it."),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(pending)
 }
 
 async fn settle(s: &Shared, due: &Due, pending: &PendingPayment, outcome: Charge) -> Result<()> {
