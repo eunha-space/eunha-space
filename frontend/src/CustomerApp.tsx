@@ -110,7 +110,7 @@ export function CustomerApp() {
     activeInstances >= customer.instance_limit;
   if (!sessionLoaded) {
     return (
-      <main className="grid min-h-screen place-items-center p-4">
+      <main className="grid flex-1 place-items-center p-4">
         <div className="grid justify-items-center gap-4">
           <Mark />
           <Spinner label={t("Loading…")} />
@@ -120,7 +120,7 @@ export function CustomerApp() {
   }
   if (!customer) {
     return (
-      <main className="grid min-h-screen place-items-center p-4">
+      <main className="grid flex-1 place-items-center p-4">
         <div className="fixed top-5 right-5">
           <div className="flex gap-2">
             <LanguageToggle />
@@ -223,7 +223,7 @@ export function CustomerApp() {
   }
   if (location.pathname === "/account" || location.pathname === "/account/billing") {
     return (
-      <main className="mx-auto min-h-screen max-w-2xl p-4 md:py-10">
+      <main className="mx-auto w-full max-w-2xl flex-1 p-4 md:py-10">
         <CustomerHeader customer={customer} onSignOut={signOut} />
         <CustomerAccount customer={customer} onChanged={load} />
       </main>
@@ -234,7 +234,7 @@ export function CustomerApp() {
     !customer.subscription_required
   ) {
     return (
-      <main className="mx-auto min-h-screen max-w-2xl p-4 md:py-10">
+      <main className="mx-auto w-full max-w-2xl flex-1 p-4 md:py-10">
         <CustomerHeader customer={customer} onSignOut={signOut} />
         <CustomerCreateInstance
           customer={customer}
@@ -246,14 +246,14 @@ export function CustomerApp() {
   const instanceId = location.pathname.match(/^\/instances\/([^/]+)$/)?.[1];
   if (instanceId) {
     return (
-      <main className="mx-auto min-h-screen max-w-2xl p-4 md:py-10">
+      <main className="mx-auto w-full max-w-2xl flex-1 p-4 md:py-10">
         <CustomerHeader customer={customer} onSignOut={signOut} />
         <CustomerInstanceDetail id={instanceId} />
       </main>
     );
   }
   return (
-    <main className="mx-auto min-h-screen max-w-2xl p-4 md:py-10">
+    <main className="mx-auto w-full max-w-2xl flex-1 p-4 md:py-10">
       <CustomerHeader customer={customer} onSignOut={signOut} />
       {error && (
         <Alert variant="destructive" className="mb-4">
