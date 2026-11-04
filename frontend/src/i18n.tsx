@@ -253,6 +253,28 @@ const ko: Record<string, string> = {
     "구독이 이미 종료되었습니다. 계속하려면 다시 구독하세요.",
   "The payment was not approved.":
     "결제가 승인되지 않았습니다.",
+  "Refund":
+    "환불",
+  "Refunded":
+    "환불됨",
+  "Refund pending":
+    "환불 처리 중",
+  "Refund refused":
+    "환불 거절",
+  "Refund this payment?":
+    "이 결제를 환불할까요?",
+  "The full amount goes back to your card. Refunding the period you are in ends your subscription now and takes your instances offline. Their data is kept, and subscribing again serves them again.":
+    "전액이 카드로 환불됩니다. 지금 이용 중인 기간을 환불하면 구독이 바로 종료되고 인스턴스가 오프라인으로 전환됩니다. 데이터는 보관되며, 다시 구독하면 다시 서비스됩니다.",
+  "This payment can no longer be refunded.":
+    "이 결제는 더 이상 환불할 수 없습니다.",
+  "A payment is being confirmed. Try again shortly.":
+    "결제를 확인하고 있습니다. 잠시 후 다시 시도하세요.",
+  "Payment not found.":
+    "결제 내역을 찾을 수 없습니다.",
+  "This payment was taken under an earlier payment setup and cannot be refunded here. Please contact us.":
+    "이전 결제 설정으로 이루어진 결제라 여기서 환불할 수 없습니다. 문의해 주세요.",
+  "This payment cannot be refunded here. Please contact us.":
+    "이 결제는 여기서 환불할 수 없습니다. 문의해 주세요.",
 };
 i18n.load("en", en);
 i18n.load("ko", ko);

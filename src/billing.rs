@@ -91,7 +91,7 @@ pub(crate) struct Config {
     secret_key: String,
     /// `https://api.tosspayments.com` unless `TOSSPAYMENTS_API_BASE` points at
     /// a stand-in, which is how charging is tested.
-    api_base: String,
+    pub(crate) api_base: String,
     /// What a new subscription is charged each month, in won.
     pub amount: i64,
     order_name: String,
@@ -99,10 +99,10 @@ pub(crate) struct Config {
     /// be charged through the MID that issued it, so a subscription whose key
     /// another MID issued (test keys, before the switch to live) is not
     /// charged at all rather than declined. Required with a live key.
-    mid: Option<String>,
+    pub(crate) mid: Option<String>,
     /// Card approval can take far longer than the four seconds the shared
     /// client allows.
-    client: reqwest::Client,
+    pub(crate) client: reqwest::Client,
 }
 
 impl Config {
@@ -169,7 +169,7 @@ impl Config {
         })
     }
 
-    fn authorization(&self) -> String {
+    pub(crate) fn authorization(&self) -> String {
         format!("Basic {}", STANDARD.encode(format!("{}:", self.secret_key)))
     }
 
@@ -330,13 +330,13 @@ fn unreachable_toss() -> ApiError {
 
 /// TossPayments' path segments are its own identifiers, but nothing here
 /// should be able to change which path is asked for.
-fn urlencode(value: &str) -> String {
+pub(crate) fn urlencode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 /// TossPayments' messages are written for customers, but they are still text
 /// from outside: keep them short and on one line.
-fn customer_message(message: &str) -> String {
+pub(crate) fn customer_message(message: &str) -> String {
     let message: String = message
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -455,8 +455,33 @@ struct IssuedBillingKey {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct IssuedCard {
     number: Option<String>,
+    /// TossPayments' two-character code for the issuer, which replaced
+    /// `cardCompany` in API version 2024-06-01.
+    issuer_code: Option<String>,
+}
+
+/// The card company an issuer code stands for. Only codes whose company is
+/// certain are named; any other shows the masked number alone.
+fn card_company_name(issuer_code: &str) -> Option<&'static str> {
+    Some(match issuer_code {
+        "11" => "KB국민",
+        "15" => "카카오뱅크",
+        "21" => "하나",
+        "24" => "토스뱅크",
+        "31" => "BC",
+        "36" => "씨티",
+        "3A" => "케이뱅크",
+        "41" => "신한",
+        "51" => "삼성",
+        "61" => "현대",
+        "71" => "롯데",
+        "91" => "NH농협",
+        "W1" => "우리",
+        _ => return None,
+    })
 }
 
 #[derive(Deserialize)]
@@ -478,9 +503,9 @@ struct Receipt {
 }
 
 #[derive(Deserialize)]
-struct TossError {
-    code: String,
-    message: String,
+pub(crate) struct TossError {
+    pub(crate) code: String,
+    pub(crate) message: String,
 }
 
 /// Whether a customer may run another instance: one whose renewal was declined
@@ -560,6 +585,12 @@ pub(crate) struct PaymentView {
     failure_message: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     requested_at: OffsetDateTime,
+    /// Whether the customer may ask for this payment back now.
+    refundable: bool,
+    refund_pending: bool,
+    refunded_amount: i64,
+    /// TossPayments' reason for refusing the last refund asked for.
+    refund_error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -572,7 +603,7 @@ pub(crate) struct BillingView {
     payments: Vec<PaymentView>,
 }
 
-async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiError> {
+pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiError> {
     let subscription = sqlx::query_as::<_, SubscriptionView>(
         "SELECT status,amount,card_company,card_number,billing_key IS NOT NULL has_card,current_period_end,cancel_at_period_end,next_attempt_at,last_error FROM subscriptions WHERE user_id=$1",
     )
@@ -580,7 +611,7 @@ async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiError> {
     .fetch_optional(&s.db)
     .await?;
     let payments = sqlx::query_as::<_, PaymentView>(
-        "SELECT order_id,amount,status,period_start,period_end,receipt_url,failure_message,requested_at FROM subscription_payments WHERE user_id=$1 AND status<>'expired' ORDER BY requested_at DESC LIMIT 24",
+        &format!("SELECT order_id,amount,status,period_start,period_end,receipt_url,failure_message,requested_at,(status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND settled_at>now()-interval '{}' AND payment_key IS NOT NULL) refundable,(refund_requested_at IS NOT NULL AND refunded_at IS NULL) refund_pending,refunded_amount,refund_error FROM subscription_payments WHERE user_id=$1 AND status<>'expired' ORDER BY requested_at DESC LIMIT 24", crate::billing_sync::REFUND_WINDOW),
     )
     .bind(user_id)
     .fetch_all(&s.db)
@@ -672,18 +703,41 @@ pub(crate) async fn authorize(
         .await?;
     let card_number = issued
         .card_number
-        .or(issued.card.and_then(|card| card.number))
+        .or(issued.card.as_ref().and_then(|card| card.number.clone()))
         .map(|number| number.chars().take(32).collect::<String>());
     let card_company = issued
         .card_company
+        .or_else(|| {
+            issued
+                .card
+                .as_ref()
+                .and_then(|card| card.issuer_code.as_deref())
+                .and_then(card_company_name)
+                .map(str::to_owned)
+        })
         .map(|company| company.chars().take(32).collect::<String>());
     let mut tx = s.db.begin().await?;
-    let status = sqlx::query_scalar::<_, String>(
-        "SELECT status FROM subscriptions WHERE user_id=$1 FOR UPDATE",
+    let (status, had_key) = sqlx::query_as::<_, (String, bool)>(
+        "SELECT status,billing_key IS NOT NULL FROM subscriptions WHERE user_id=$1 FOR UPDATE",
     )
     .bind(user_id)
     .fetch_one(&mut *tx)
     .await?;
+    // The card this replaces is never charged again, so its key is deleted at
+    // TossPayments.
+    sqlx::query("INSERT INTO retired_billing_keys(user_id,billing_key,toss_mid) SELECT user_id,billing_key,toss_mid FROM subscriptions WHERE user_id=$1 AND billing_key IS NOT NULL AND billing_key<>$2")
+        .bind(user_id)
+        .bind(&issued.billing_key)
+        .execute(&mut *tx)
+        .await?;
+    // A running subscription whose key TossPayments deleted was set to end
+    // with its period; a new card keeps it going.
+    if status == "active" && !had_key {
+        sqlx::query("UPDATE subscriptions SET cancel_at_period_end=false WHERE user_id=$1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     sqlx::query("UPDATE subscriptions SET billing_key=$2,card_company=$3,card_number=$4,toss_mid=$5,last_error=NULL,updated_at=now() WHERE user_id=$1")
         .bind(user_id)
         .bind(&issued.billing_key)
@@ -816,7 +870,7 @@ pub(crate) async fn resume(
 
 /// An audit record of a billing change. Billing belongs to an account, not an
 /// instance, so it names no tenant. `detail` must never carry a key.
-async fn record(
+pub(crate) async fn record(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: Uuid,
     kind: &str,
@@ -840,11 +894,31 @@ pub async fn renewer(state: Shared) {
     loop {
         if state.billing.is_some() {
             for _ in 0..MAX_PER_PASS {
+                match crate::billing_sync::refund_due(&state, None).await {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(_error) => {
+                        tracing::warn!("could not carry out the refunds that are due");
+                        break;
+                    }
+                }
+            }
+            for _ in 0..MAX_PER_PASS {
                 match charge_due(&state, None).await {
                     Ok(true) => continue,
                     Ok(false) => break,
                     Err(_error) => {
                         tracing::warn!("could not renew the subscriptions that are due");
+                        break;
+                    }
+                }
+            }
+            for _ in 0..MAX_PER_PASS {
+                match crate::billing_sync::delete_retired_key(&state).await {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(_error) => {
+                        tracing::warn!("could not delete retired billing keys");
                         break;
                     }
                 }
@@ -899,7 +973,7 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
     };
     let mut tx = s.db.begin().await?;
     let Some(due) = sqlx::query_as::<_, Due>(
-        "SELECT s.user_id,s.customer_key,s.status,s.cancel_at_period_end,s.billing_key,s.toss_mid,u.email FROM subscriptions s JOIN users u ON u.id=s.user_id WHERE s.next_attempt_at<=now() AND (s.lease_until IS NULL OR s.lease_until<now()) AND s.status IN ('incomplete','active','past_due') AND ($1::uuid IS NULL OR s.user_id=$1) ORDER BY s.next_attempt_at LIMIT 1 FOR UPDATE OF s SKIP LOCKED",
+        "SELECT s.user_id,s.customer_key,s.status,s.cancel_at_period_end,s.billing_key,s.toss_mid,u.email FROM subscriptions s JOIN users u ON u.id=s.user_id WHERE s.next_attempt_at<=now() AND (s.lease_until IS NULL OR s.lease_until<now()) AND s.status IN ('incomplete','active','past_due') AND NOT EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=s.user_id AND p.refund_requested_at IS NOT NULL AND p.refunded_at IS NULL) AND ($1::uuid IS NULL OR s.user_id=$1) ORDER BY s.next_attempt_at LIMIT 1 FOR UPDATE OF s SKIP LOCKED",
     )
     .bind(user_id)
     .fetch_optional(&mut *tx)
@@ -907,7 +981,16 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
     else {
         return Ok(false);
     };
-    if due.cancel_at_period_end && due.status != "incomplete" {
+    // A charge still in flight is settled before anything ends: TossPayments
+    // may have approved it.
+    let in_flight = sqlx::query_scalar::<_, bool>(
+        "SELECT true FROM subscription_payments WHERE user_id=$1 AND status='pending'",
+    )
+    .bind(due.user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if due.cancel_at_period_end && due.status != "incomplete" && !in_flight {
         let tenants = end_subscription(&mut tx, due.user_id, "canceled").await?;
         tx.commit().await?;
         wake(s, &tenants).await;
@@ -921,7 +1004,10 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
         return Ok(true);
     }
     let Some(billing_key) = due.billing_key.clone() else {
-        sqlx::query("UPDATE subscriptions SET next_attempt_at=NULL WHERE user_id=$1")
+        // No card to charge: a running subscription ends with its period
+        // rather than staying active unpaid; an incomplete one waits for a
+        // card.
+        sqlx::query("UPDATE subscriptions SET next_attempt_at=CASE WHEN status='incomplete' THEN NULL ELSE now() END,cancel_at_period_end=(status<>'incomplete') WHERE user_id=$1")
             .bind(due.user_id)
             .execute(&mut *tx)
             .await?;
@@ -1145,12 +1231,16 @@ async fn settle(s: &Shared, due: &Due, pending: &PendingPayment, outcome: Charge
 /// End a subscription and take its instances offline. Their data is kept and
 /// no purge is scheduled: nobody confirmed a deletion. Returns the tenants
 /// whose provisioning has to be woken to notice.
-async fn end_subscription(
+pub(crate) async fn end_subscription(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: Uuid,
     status: &str,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query("UPDATE subscriptions SET status=$2,next_attempt_at=NULL,cancel_at_period_end=false,lease_until=NULL,updated_at=now() WHERE user_id=$1")
+    sqlx::query("INSERT INTO retired_billing_keys(user_id,billing_key,toss_mid) SELECT user_id,billing_key,toss_mid FROM subscriptions WHERE user_id=$1 AND billing_key IS NOT NULL")
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("UPDATE subscriptions SET status=$2,billing_key=NULL,toss_mid=NULL,next_attempt_at=NULL,cancel_at_period_end=false,lease_until=NULL,updated_at=now() WHERE user_id=$1")
         .bind(user_id)
         .bind(status)
         .execute(&mut **tx)
@@ -1216,7 +1306,7 @@ async fn restore_suspended(
     Ok(())
 }
 
-async fn wake(s: &Shared, tenants: &[Uuid]) {
+pub(crate) async fn wake(s: &Shared, tenants: &[Uuid]) {
     for &tenant_id in tenants {
         jobs::wake_provisioning(s, tenant_id).await;
     }
@@ -1224,7 +1314,7 @@ async fn wake(s: &Shared, tenants: &[Uuid]) {
 
 /// Tell the customer about their subscription, if mail is configured. Best
 /// effort: the account page says the same.
-async fn notify(s: &Shared, email: Option<&str>, subject: &str, body: &str) {
+pub(crate) async fn notify(s: &Shared, email: Option<&str>, subject: &str, body: &str) {
     let (Some(mail), Some(email)) = (s.customer_email.as_ref(), email) else {
         return;
     };

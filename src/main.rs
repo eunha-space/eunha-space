@@ -38,6 +38,7 @@ use uuid::Uuid;
 
 mod auth;
 mod billing;
+mod billing_sync;
 mod ci_release;
 mod domain_change;
 mod health;
@@ -910,7 +911,12 @@ async fn main() -> Result<()> {
         .route("/customer/billing/checkout", post(billing::checkout))
         .route("/customer/billing/authorization", post(billing::authorize))
         .route("/customer/billing/cancel", post(billing::cancel))
-        .route("/customer/billing/resume", post(billing::resume));
+        .route("/customer/billing/resume", post(billing::resume))
+        .route(
+            "/customer/billing/payments/{order_id}/refund",
+            post(billing_sync::request_refund),
+        )
+        .route("/webhooks/tosspayments", post(billing_sync::webhook));
     let admin_api = Router::new()
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/usage", get(usage::usage))

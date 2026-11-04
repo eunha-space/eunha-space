@@ -62,6 +62,7 @@ export function SubscriptionCard(
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const [refunding, setRefunding] = useState<Billing["payments"][number] | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -124,6 +125,25 @@ export function SubscriptionCard(
       if (code !== "USER_CANCEL") setError(t(errorMessage(e)));
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function refund(orderId: string) {
+    setError("");
+    setBusy(true);
+    try {
+      setBilling(
+        await api<Billing>(
+          `/customer/billing/payments/${encodeURIComponent(orderId)}/refund`,
+          { method: "POST" },
+        ),
+      );
+      await onChanged();
+    } catch (e) {
+      setError(t(errorMessage(e)));
+    } finally {
+      setBusy(false);
+      setRefunding(null);
     }
   }
 
@@ -272,6 +292,7 @@ export function SubscriptionCard(
                   <TableHead>{t("Period")}</TableHead>
                   <TableHead className="text-right">{t("Amount")}</TableHead>
                   <TableHead>{t("Status")}</TableHead>
+                  <TableHead />
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -284,7 +305,11 @@ export function SubscriptionCard(
                       {won(payment.amount)}
                     </TableCell>
                     <TableCell>
-                      {payment.status === "paid" && payment.receipt_url
+                      {payment.status === "refunded"
+                        ? t("Refunded")
+                        : payment.refund_pending
+                        ? t("Refund pending")
+                        : payment.status === "paid" && payment.receipt_url
                         ? (
                           <a
                             href={payment.receipt_url}
@@ -307,6 +332,23 @@ export function SubscriptionCard(
                             {t("Declined")}
                           </span>
                         )}
+                      {payment.refund_error && !payment.refund_pending && (
+                        <p className="text-destructive text-xs">
+                          {t("Refund refused")}: {t(payment.refund_error)}
+                        </p>
+                      )}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {payment.refundable && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={busy}
+                          onClick={() => setRefunding(payment)}
+                        >
+                          {t("Refund")}
+                        </Button>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -314,6 +356,32 @@ export function SubscriptionCard(
             </Table>
           </div>
         )}
+        <AlertDialog
+          open={refunding !== null}
+          onOpenChange={(open) => !open && setRefunding(null)}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                {refunding ? `${t("Refund this payment?")} ${won(refunding.amount)}` : ""}
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                {t(
+                  "The full amount goes back to your card. Refunding the period you are in ends your subscription now and takes your instances offline. Their data is kept, and subscribing again serves them again.",
+                )}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>{t("Keep my subscription")}</AlertDialogCancel>
+              <AlertDialogAction
+                variant="destructive"
+                onClick={() => refunding && void refund(refunding.order_id)}
+              >
+                {t("Refund")}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
         <AlertDialog open={confirmingCancel} onOpenChange={setConfirmingCancel}>
           <AlertDialogContent>
             <AlertDialogHeader>

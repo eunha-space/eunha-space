@@ -106,10 +106,65 @@ A customer needs an `active` or `past_due` subscription to create or restore an
 instance. Administrators are never billed. Customers whose instances predate
 billing keep them running, but cannot add instances without subscribing.
 
+## Refunds
+
+A customer can ask for a payment back from the payment history on `/account`
+within seven days of paying (`POST /api/customer/billing/payments/{order_id}/refund`).
+The full amount is refunded; there are no partial refunds here. The request is
+recorded first and carried out by the renewer, which looks the payment up
+before every attempt, so a refund interrupted mid-request is finished later and
+never asked for twice:
+
+- A payment TossPayments shows as cancelled is settled as refunded without
+  asking again.
+- A cancel that gets no clear answer (a timeout, a 5xx, `ALREADY_CANCELED_PAYMENT`,
+  a key or merchant setup error) is looked up again five minutes later. Cancels
+  carry no idempotency key: TossPayments would replay a refusal under it for 15
+  days, and it refuses to cancel a payment twice anyway.
+- A refusal on the merits (e.g. `NOT_CANCELABLE_PAYMENT`), a payment taken under
+  another MID, or one with no payment key withdraws the request:
+  `refund_requested_at` goes back to null and `refund_error` shows the customer
+  why, so they can ask again.
+
+While a refund is open the subscription is not charged, and a refund cannot be
+asked for while a charge is being confirmed. A full refund of the period being
+served ends the subscription the way a lapse does: its instances go offline
+with their data kept and no purge scheduled. A refund of an earlier period, or
+a partial one made in the dashboard, is recorded without ending anything.
+
+Operators refund in the TossPayments dashboard. The webhook below brings each
+cancellation into the ledger by the same rules.
+
+## Webhooks
+
+Point TossPayments' webhook at `/api/webhooks/tosspayments` for
+`PAYMENT_STATUS_CHANGED` and `BILLING_DELETED`.
+
+Payment events are unsigned, so their content is only a reason to look the
+payment up. A cancellation found that way is recorded as above. A change to a
+charge still being confirmed brings the renewer's next look at it forward. An
+event the control plane cannot look up is answered with a 503, so TossPayments
+sends it again.
+
+`BILLING_DELETED` cannot be looked up, but it names the billing key, which only
+TossPayments and this control plane know. All it does is stop charging that
+key. A running subscription keeps its paid period and ends with it unless the
+customer registers a new card, which keeps it going. The customer is emailed.
+
+## Deleting billing keys
+
+A billing key stays chargeable for as long as its card is valid. When a
+subscription ends, or a new card replaces the old one, the old key goes to
+`retired_billing_keys`, and the renewer deletes it at TossPayments
+(`DELETE /v1/billing/{billingKey}`), retrying after an hour, doubling up to a
+day. Once TossPayments confirms, or answers `NOT_FOUND_BILLING`, the key itself
+is erased. A key from another MID cannot be deleted with this one's secret key;
+it waits with `last_error` set, for deletion in the TossPayments dashboard.
+
 ## Audit
 
-Each card registration, cancellation, resumption, charge, and subscription end
-is recorded as an operation with no tenant (`subscription_*`), attributed to the
+Each card registration, cancellation, resumption, charge, refund request,
+refund, and subscription end is recorded as an operation with no tenant (`subscription_*`), attributed to the
 customer. Charges record the order id, amount, period, and the decline code.
 `subscription_payments` keeps every charge, including the TossPayments payment
 key and receipt URL. Customers see their receipts on the account page.

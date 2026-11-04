@@ -1587,6 +1587,10 @@ struct TossStandIn {
     charges: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     /// What TossPayments recorded, by order id.
     orders: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
+    /// Whether the next cancel is refused on its merits.
+    refuse_cancel: Arc<std::sync::atomic::AtomicBool>,
+    /// Billing keys deleted, in order.
+    deleted_keys: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl TossStandIn {
@@ -1595,6 +1599,13 @@ impl TossStandIn {
     }
     fn charges(&self) -> Vec<(String, String)> {
         self.charges.lock().unwrap().clone()
+    }
+    /// Cancel an order as the TossPayments dashboard would.
+    fn cancel_in_dashboard(&self, order_id: &str) {
+        let mut orders = self.orders.lock().unwrap();
+        let order = orders.get_mut(order_id).unwrap();
+        order["status"] = "CANCELED".into();
+        order["balanceAmount"] = 0.into();
     }
 }
 
@@ -1605,8 +1616,8 @@ async fn toss_stand_in() -> (TossStandIn, String) {
             "mId": "tvivarepublica",
             "customerKey": body["customerKey"],
             "billingKey": "bk_never_shown",
-            "cardCompany": "현대",
-            "cardNumber": "43301234****123*",
+            // API version 2024-06-01's shape: an issuer code, not a name.
+            "card": {"issuerCode": "61", "number": "43301234****123*"},
         }))
     };
     let charge = |State(toss): State<TossStandIn>,
@@ -1680,9 +1691,40 @@ async fn toss_stand_in() -> (TossStandIn, String) {
             ),
         }
     };
+    let cancel = |State(toss): State<TossStandIn>, Path(payment_key): Path<String>| async move {
+        if toss
+            .refuse_cancel
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(
+                    serde_json::json!({"code":"NOT_CANCELABLE_PAYMENT","message":"취소 할 수 없는 결제 입니다."}),
+                ),
+            );
+        }
+        let mut orders = toss.orders.lock().unwrap();
+        let Some(order) = orders
+            .values_mut()
+            .find(|order| order["paymentKey"] == payment_key.as_str())
+        else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"code":"NOT_FOUND_PAYMENT","message":"없음"})),
+            );
+        };
+        order["status"] = "CANCELED".into();
+        order["balanceAmount"] = 0.into();
+        (StatusCode::OK, Json(order.clone()))
+    };
+    let delete_key = |State(toss): State<TossStandIn>, Path(billing_key): Path<String>| async move {
+        toss.deleted_keys.lock().unwrap().push(billing_key);
+        StatusCode::OK
+    };
     let app = Router::new()
         .route("/v1/billing/authorizations/issue", post(issue))
-        .route("/v1/billing/{billing_key}", post(charge))
+        .route("/v1/billing/{billing_key}", post(charge).delete(delete_key))
+        .route("/v1/payments/{payment_key}/cancel", post(cancel))
         .route("/v1/payments/orders/{order_id}", get(lookup))
         .with_state(toss.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1798,6 +1840,7 @@ async fn a_charge_with_no_answer_is_asked_again_under_the_same_key(pool: PgPool)
     assert_eq!(view["subscription"]["status"], "incomplete");
     assert_eq!(view["payments"][0]["status"], "pending");
     assert_eq!(view["subscription"]["card_number"], "43301234****123*");
+    assert_eq!(view["subscription"]["card_company"], "현대");
     assert!(!view.to_string().contains("bk_never_shown"));
     let first_order = toss.charges()[0].1.clone();
     assert_eq!(toss.charges()[0].0, first_order);
@@ -2104,4 +2147,229 @@ async fn a_bad_secret_key_never_counts_against_the_card(pool: PgPool) {
             .unwrap(),
         "ready"
     );
+}
+
+async fn ready_instance(pool: &PgPool, user_id: Uuid) -> Uuid {
+    let (runtime, _) = fixture(pool).await;
+    let id = tenant(pool, runtime).await;
+    sqlx::query("UPDATE tenants SET user_id=$2,lifecycle_state='ready' WHERE id=$1")
+        .bind(id)
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+async fn refund(
+    state: &Shared,
+    headers: &HeaderMap,
+    order_id: &str,
+) -> Result<serde_json::Value, StatusCode> {
+    billing_sync::request_refund(
+        State(state.clone()),
+        headers.clone(),
+        Path(order_id.to_owned()),
+    )
+    .await
+    .map(|Json(view)| serde_json::to_value(view).unwrap())
+    .map_err(|error| error.0)
+}
+
+async fn lifecycle(pool: &PgPool, id: Uuid) -> (String, bool) {
+    sqlx::query_as("SELECT lifecycle_state,purge_scheduled_for IS NULL FROM tenants WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_refund_gives_the_period_back_and_its_key_is_deleted(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    let view = subscribe(&state, &headers).await;
+    let id = ready_instance(&pool, user_id).await;
+    assert_eq!(view["payments"][0]["refundable"], true);
+    let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+
+    let view = refund(&state, &headers, &order_id).await.unwrap();
+    assert_eq!(view["payments"][0]["status"], "refunded");
+    assert_eq!(view["payments"][0]["refunded_amount"], 9900);
+    assert_eq!(view["subscription"]["status"], "canceled");
+    assert_eq!(view["subscription"]["has_card"], false);
+    // Offline with its data, and nothing scheduled to destroy it.
+    assert_eq!(lifecycle(&pool, id).await, ("deprovisioning".into(), true));
+    // Asking twice gives nothing back twice.
+    assert_eq!(
+        refund(&state, &headers, &order_id).await.unwrap_err(),
+        StatusCode::CONFLICT
+    );
+
+    // The key nothing uses any more is deleted at TossPayments, then erased.
+    assert!(billing_sync::delete_retired_key(&state).await.unwrap());
+    assert_eq!(*toss.deleted_keys.lock().unwrap(), vec!["bk_never_shown"]);
+    assert_eq!(
+        sqlx::query_as::<_, (bool, bool)>(
+            "SELECT billing_key IS NULL,deleted_at IS NOT NULL FROM retired_billing_keys WHERE user_id=$1"
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        (true, true)
+    );
+    assert!(!billing_sync::delete_retired_key(&state).await.unwrap());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_refund_tosspayments_refuses_is_withdrawn_and_renewals_resume(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    let view = subscribe(&state, &headers).await;
+    let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+    toss.refuse_cancel
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let view = refund(&state, &headers, &order_id).await.unwrap();
+    assert_eq!(view["payments"][0]["status"], "paid");
+    assert_eq!(view["payments"][0]["refund_pending"], false);
+    assert_eq!(
+        view["payments"][0]["refund_error"],
+        "취소 할 수 없는 결제 입니다."
+    );
+    assert_eq!(view["payments"][0]["refundable"], true);
+    assert_eq!(view["subscription"]["status"], "active");
+
+    // Nothing holds the subscription back: it renews when due.
+    make_due(&pool, user_id).await;
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(toss.charges().len(), 2);
+
+    // And it can be asked for again.
+    let view = refund(&state, &headers, &order_id).await.unwrap();
+    assert_eq!(
+        view["payments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|payment| payment["order_id"] == order_id.as_str())
+            .unwrap()["status"],
+        "refunded"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_payment_is_refundable_for_seven_days(pool: PgPool) {
+    let (_toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (_, headers) = billed_customer(&pool).await;
+    let view = subscribe(&state, &headers).await;
+    let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+    sqlx::query(
+        "UPDATE subscription_payments SET settled_at=now()-interval '8 days' WHERE order_id=$1",
+    )
+    .bind(&order_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        refund(&state, &headers, &order_id).await.unwrap_err(),
+        StatusCode::CONFLICT
+    );
+    // Nobody else's payment is refundable through this account.
+    let (_, other) = {
+        let user_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at) VALUES($1,'other@example.com','unused',now())")
+            .bind(user_id).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '1 hour')").bind(token_hash("other-session")).bind(user_id).execute(&pool).await.unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "eunha_space_customer_session=other-session"
+                .parse()
+                .unwrap(),
+        );
+        (user_id, headers)
+    };
+    assert_eq!(
+        refund(&state, &other, &order_id).await.unwrap_err(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_refund_made_in_the_dashboard_is_learned_from_the_webhook(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    let view = subscribe(&state, &headers).await;
+    let id = ready_instance(&pool, user_id).await;
+    let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+
+    // The event alone changes nothing: it is only a reason to look.
+    let event = |order_id: &str| {
+        axum::body::Bytes::from(
+            serde_json::json!({"eventType":"PAYMENT_STATUS_CHANGED","data":{"orderId":order_id,"status":"CANCELED"}})
+                .to_string(),
+        )
+    };
+    assert_eq!(
+        billing_sync::webhook(State(state.clone()), event(&order_id)).await,
+        StatusCode::OK
+    );
+    assert_eq!(subscription_status(&pool, user_id).await, "active");
+
+    toss.cancel_in_dashboard(&order_id);
+    assert_eq!(
+        billing_sync::webhook(State(state.clone()), event(&order_id)).await,
+        StatusCode::OK
+    );
+    assert_eq!(subscription_status(&pool, user_id).await, "canceled");
+    assert_eq!(lifecycle(&pool, id).await, ("deprovisioning".into(), true));
+    // Delivered again, it changes nothing more.
+    assert_eq!(
+        billing_sync::webhook(State(state.clone()), event(&order_id)).await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        billing_sync::webhook(State(state.clone()), event("eunha-unknown")).await,
+        StatusCode::OK
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_card_removed_at_tosspayments_ends_with_the_period_unless_replaced(pool: PgPool) {
+    let (_toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    subscribe(&state, &headers).await;
+    let deleted = axum::body::Bytes::from(
+        serde_json::json!({"eventType":"BILLING_DELETED","createdAt":"2026-11-04T00:00:00","data":{"billingKey":"bk_never_shown","reason":"x"}})
+            .to_string(),
+    );
+    assert_eq!(
+        billing_sync::webhook(State(state.clone()), deleted).await,
+        StatusCode::OK
+    );
+    let (status, has_key, ending): (String, bool, bool) = sqlx::query_as(
+        "SELECT status,billing_key IS NOT NULL,cancel_at_period_end FROM subscriptions WHERE user_id=$1",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((status.as_str(), has_key, ending), ("active", false, true));
+
+    // A new card keeps it going.
+    let view = subscribe(&state, &headers).await;
+    assert_eq!(view["subscription"]["cancel_at_period_end"], false);
+    assert_eq!(view["subscription"]["has_card"], true);
 }

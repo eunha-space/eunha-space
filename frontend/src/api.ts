@@ -145,12 +145,18 @@ export type Billing = {
   payments: {
     order_id: string;
     amount: number;
-    status: "pending" | "paid" | "failed";
+    status: "pending" | "paid" | "failed" | "refunded";
     period_start: string;
     period_end: string;
     receipt_url: string | null;
     failure_message: string | null;
     requested_at: string;
+    /** Within seven days of paying, with nothing refunded or asked yet. */
+    refundable: boolean;
+    refund_pending: boolean;
+    refunded_amount: number;
+    /** TossPayments' reason for refusing the last refund asked for. */
+    refund_error: string | null;
   }[];
 };
 
