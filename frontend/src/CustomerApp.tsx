@@ -68,7 +68,8 @@ export function CustomerApp() {
       if (signup) {
         await api("/customer/register", {
           method: "POST",
-          body: JSON.stringify({ email }),
+          // The language the sign-up page is in becomes the account's.
+          body: JSON.stringify({ email, locale: i18n.locale }),
         });
         setSent(true);
       } else {

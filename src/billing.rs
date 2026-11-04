@@ -33,7 +33,7 @@ use uuid::Uuid;
 
 use crate::{
     ApiError, Shared, begin_deprovisioning, customer, customer_instance_count,
-    customer_instance_limit, jobs, queue_restore,
+    customer_instance_limit, jobs, locale::Locale, queue_restore,
 };
 
 /// How long after each declined renewal to try the card again. One more decline
@@ -143,7 +143,7 @@ impl Config {
                 .unwrap_or_else(|_| "https://api.tosspayments.com".into()),
             amount,
             std::env::var("EUNHA_SPACE_SUBSCRIPTION_NAME")
-                .unwrap_or_else(|_| "eunha space 월간 구독".into()),
+                .unwrap_or_else(|_| "은하공간 월간 구독".into()),
             mid,
         )?))
     }
@@ -1011,13 +1011,7 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
         let tenants = end_subscription(&mut tx, due.user_id, "canceled").await?;
         tx.commit().await?;
         wake(s, &tenants).await;
-        notify(
-            s,
-            due.email.as_deref(),
-            "Your eunha space subscription has ended",
-            "Your subscription was cancelled and its paid period is over, so your instances are offline. Their data is kept: subscribe again from your account page to serve them again.",
-        )
-        .await;
+        notify(s, due.user_id, Notice::Canceled).await;
         return Ok(true);
     }
     let Some(billing_key) = due.billing_key.clone() else {
@@ -1211,27 +1205,13 @@ async fn settle(s: &Shared, due: &Due, pending: &PendingPayment, outcome: Charge
                         .execute(&mut *tx)
                         .await?;
                     tx.commit().await?;
-                    notify(
-                        s,
-                        due.email.as_deref(),
-                        "Your eunha space payment was declined",
-                        &format!(
-                            "We could not renew your subscription: {message}\n\nWe will try again, and your instances keep running meanwhile. To use another card, open your account page."
-                        ),
-                    )
-                    .await;
+                    notify(s, due.user_id, Notice::Declined(&message)).await;
                 }
                 None => {
                     let tenants = end_subscription(&mut tx, due.user_id, "lapsed").await?;
                     tx.commit().await?;
                     wake(s, &tenants).await;
-                    notify(
-                        s,
-                        due.email.as_deref(),
-                        "Your eunha space subscription has ended",
-                        "We could not renew your subscription after several attempts, so your instances are offline. Their data is kept: subscribe again from your account page to serve them again.",
-                    )
-                    .await;
+                    notify(s, due.user_id, Notice::Lapsed).await;
                 }
             }
         }
@@ -1332,18 +1312,81 @@ pub(crate) async fn wake(s: &Shared, tenants: &[Uuid]) {
     }
 }
 
-/// Tell the customer about their subscription, if mail is configured. Best
-/// effort: the account page says the same.
-pub(crate) async fn notify(s: &Shared, email: Option<&str>, subject: &str, body: &str) {
-    let (Some(mail), Some(email)) = (s.customer_email.as_ref(), email) else {
+/// Something about a subscription the customer is told at once.
+pub(crate) enum Notice<'a> {
+    Canceled,
+    Lapsed,
+    /// The card company's or TossPayments' reason.
+    Declined(&'a str),
+    CardRemoved,
+}
+
+impl Notice<'_> {
+    fn text(&self, language: Locale) -> (String, String) {
+        let (subject, body) = match (self, language) {
+            (Notice::Canceled, Locale::En) => (
+                "Your eunha space subscription has ended".into(),
+                "Your subscription was cancelled and its paid period is over, so your instances are offline. Their data is kept: subscribe again from your account page to serve them again.".into(),
+            ),
+            (Notice::Canceled, Locale::Ko) => (
+                "은하공간 구독이 종료되었습니다".into(),
+                "구독이 해지되었고 결제한 기간이 끝나 인스턴스가 오프라인으로 전환되었습니다. 데이터는 보관되며, 계정 페이지에서 다시 구독하면 다시 서비스됩니다.".into(),
+            ),
+            (Notice::Lapsed, Locale::En) => (
+                "Your eunha space subscription has ended".into(),
+                "We could not renew your subscription after several attempts, so your instances are offline. Their data is kept: subscribe again from your account page to serve them again.".into(),
+            ),
+            (Notice::Lapsed, Locale::Ko) => (
+                "은하공간 구독이 종료되었습니다".into(),
+                "여러 번 시도했지만 구독을 갱신하지 못해 인스턴스가 오프라인으로 전환되었습니다. 데이터는 보관되며, 계정 페이지에서 다시 구독하면 다시 서비스됩니다.".into(),
+            ),
+            (Notice::Declined(reason), Locale::En) => (
+                "Your eunha space payment was declined".into(),
+                format!("We could not renew your subscription: {reason}\n\nWe will try again, and your instances keep running meanwhile. To use another card, open your account page."),
+            ),
+            (Notice::Declined(reason), Locale::Ko) => (
+                "은하공간 결제가 거절되었습니다".into(),
+                format!("구독을 갱신하지 못했습니다: {reason}\n\n다시 결제를 시도하며, 그동안 인스턴스는 계속 운영됩니다. 다른 카드를 쓰려면 계정 페이지에서 변경하세요."),
+            ),
+            (Notice::CardRemoved, Locale::En) => (
+                "Your eunha space card was removed".into(),
+                "The card for your subscription was removed at TossPayments, so it will not renew. Your instances keep running until the paid period ends. To keep them running after that, register a card on your account page.".into(),
+            ),
+            (Notice::CardRemoved, Locale::Ko) => (
+                "은하공간 결제 카드가 삭제되었습니다".into(),
+                "구독에 등록된 카드가 토스페이먼츠에서 삭제되어 구독이 갱신되지 않습니다. 결제한 기간이 끝날 때까지 인스턴스는 계속 운영됩니다. 그 뒤에도 계속 이용하려면 계정 페이지에서 카드를 등록하세요.".into(),
+            ),
+        };
+        (subject, body)
+    }
+}
+
+/// Tell the customer about their subscription in their language, if mail is
+/// configured. Best effort: the account page says the same.
+pub(crate) async fn notify(s: &Shared, user_id: Uuid, notice: Notice<'_>) {
+    let Some(mail) = s.customer_email.as_ref() else {
         return;
     };
-    let Ok(to) = email.parse() else {
+    let Ok(Some((email, code))) = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT email,locale FROM users WHERE id=$1",
+    )
+    .bind(user_id)
+    .fetch_optional(&s.db)
+    .await
+    else {
         return;
     };
+    let Some(Ok(to)) = email.map(|email| email.parse()) else {
+        return;
+    };
+    let language = code
+        .as_deref()
+        .and_then(Locale::parse)
+        .unwrap_or(Locale::En);
+    let (subject, body) = notice.text(language);
     use lettre::AsyncTransport;
     let Ok(message) = lettre::Message::builder()
-        .from(mail.from.clone())
+        .from(crate::locale::sender(mail, language))
         .to(to)
         .subject(subject)
         .body(format!(

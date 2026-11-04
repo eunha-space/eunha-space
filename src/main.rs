@@ -47,6 +47,7 @@ mod health;
 #[cfg(test)]
 mod integration_tests;
 mod jobs;
+mod locale;
 mod service_usage;
 mod smtp;
 mod usage;
@@ -261,6 +262,9 @@ struct OperationEvent {
 struct CustomerCredentials {
     email: String,
     password: Option<String>,
+    /// The language the sign-up page was showing.
+    #[serde(default)]
+    locale: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -877,6 +881,7 @@ async fn main() -> Result<()> {
             post(customer_login).delete(customer_logout),
         )
         .route("/customer/session/me", get(customer_me))
+        .route("/customer/locale", get(locale::get).post(locale::set))
         .route("/customer/password", post(customer_set_password))
         .route(
             "/customer/tenants",
@@ -1109,6 +1114,7 @@ async fn customer_email_link_session(headers: &HeaderMap, db: &PgPool) -> Result
 
 async fn customer_register(
     State(s): State<Shared>,
+    headers: HeaderMap,
     Json(mut body): Json<CustomerCredentials>,
 ) -> Result<StatusCode, ApiError> {
     body.email = body.email.trim().to_ascii_lowercase();
@@ -1120,9 +1126,15 @@ async fn customer_register(
         ));
     }
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO users(id,email,password_hash) VALUES($1,$2,NULL)")
+    let language = body
+        .locale
+        .as_deref()
+        .and_then(locale::Locale::parse)
+        .unwrap_or_else(|| locale::Locale::from_accept_language(&headers));
+    sqlx::query("INSERT INTO users(id,email,password_hash,locale) VALUES($1,$2,NULL,$3)")
         .bind(id)
         .bind(&body.email)
+        .bind(language.code())
         .execute(&s.db)
         .await
         .map_err(|error| {
@@ -1135,8 +1147,7 @@ async fn customer_register(
                 ApiError::from(error)
             }
         })?;
-    if let Err(error) =
-        send_customer_link(&s, id, &body.email, "Verify your eunha space email").await
+    if let Err(error) = send_customer_link(&s, id, &body.email, language, LinkPurpose::Verify).await
     {
         sqlx::query("DELETE FROM users WHERE id=$1")
             .bind(id)
@@ -1147,11 +1158,19 @@ async fn customer_register(
     Ok(StatusCode::ACCEPTED)
 }
 
+/// Why an account is being sent a link.
+#[derive(Clone, Copy)]
+enum LinkPurpose {
+    Verify,
+    SignIn,
+}
+
 async fn send_customer_link(
     s: &Shared,
     user_id: Uuid,
     email: &str,
-    subject: &str,
+    language: locale::Locale,
+    purpose: LinkPurpose,
 ) -> Result<(), ApiError> {
     let mail = s.customer_email.as_ref().ok_or_else(|| {
         ApiError(
@@ -1172,13 +1191,46 @@ async fn send_customer_link(
         mail.public_url.trim_end_matches('/'),
         token
     );
+    let (subject, body) = match (language, purpose) {
+        (locale::Locale::En, LinkPurpose::Verify) => (
+            "Verify your eunha space email",
+            format!(
+                "Use this secure link to continue to eunha space:\n\n{url}\n\nThis link expires in 30 minutes."
+            ),
+        ),
+        (locale::Locale::En, LinkPurpose::SignIn) => (
+            "Your eunha space sign-in link",
+            format!(
+                "Use this secure link to continue to eunha space:\n\n{url}\n\nThis link expires in 30 minutes."
+            ),
+        ),
+        (locale::Locale::Ko, LinkPurpose::Verify) => (
+            "은하공간 이메일 인증",
+            format!(
+                "아래 보안 링크로 은하공간에 계속 접속하세요.\n\n{url}\n\n이 링크는 30분 뒤 만료됩니다."
+            ),
+        ),
+        (locale::Locale::Ko, LinkPurpose::SignIn) => (
+            "은하공간 로그인 링크",
+            format!(
+                "아래 보안 링크로 은하공간에 계속 접속하세요.\n\n{url}\n\n이 링크는 30분 뒤 만료됩니다."
+            ),
+        ),
+    };
     use lettre::AsyncTransport;
     let message = lettre::Message::builder()
-        .from(mail.from.clone())
-        .to(email.parse().map_err(|_| ApiError(StatusCode::BAD_REQUEST, "Invalid email address.".into()))?)
+        .from(locale::sender(mail, language))
+        .to(email
+            .parse()
+            .map_err(|_| ApiError(StatusCode::BAD_REQUEST, "Invalid email address.".into()))?)
         .subject(subject)
-        .body(format!("Use this secure link to continue to eunha space:\n\n{url}\n\nThis link expires in 30 minutes."))
-        .map_err(|_| ApiError(StatusCode::BAD_GATEWAY, "Could not build the email link.".into()))?;
+        .body(body)
+        .map_err(|_| {
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                "Could not build the email link.".into(),
+            )
+        })?;
     mail.transport.send(message).await.map_err(|_| {
         ApiError(
             StatusCode::BAD_GATEWAY,
@@ -1212,6 +1264,7 @@ async fn customer_verify(
 
 async fn customer_login(
     State(s): State<Shared>,
+    headers: HeaderMap,
     Json(mut body): Json<CustomerCredentials>,
 ) -> Result<Response, ApiError> {
     body.email = body.email.trim().to_ascii_lowercase();
@@ -1229,7 +1282,15 @@ async fn customer_login(
         ));
     };
     if body.password.is_none() {
-        send_customer_link(&s, id, &body.email, "Your eunha space sign-in link").await?;
+        // In the account's language, or the browser's for one that has none.
+        let language =
+            sqlx::query_scalar::<_, Option<String>>("SELECT locale FROM users WHERE id=$1")
+                .bind(id)
+                .fetch_one(&s.db)
+                .await?
+                .and_then(|code| locale::Locale::parse(&code))
+                .unwrap_or_else(|| locale::Locale::from_accept_language(&headers));
+        send_customer_link(&s, id, &body.email, language, LinkPurpose::SignIn).await?;
         return Ok(StatusCode::ACCEPTED.into_response());
     }
     let hash = hash.ok_or_else(|| {
@@ -1334,9 +1395,17 @@ async fn customer_me(
     .await?;
     let requires_current_password =
         has_password && !customer_email_link_session(&headers, &s.db).await?;
+    // An account from before languages were kept takes its browser's.
+    let language = sqlx::query_scalar::<_, String>(
+        "UPDATE users SET locale=coalesce(locale,$2) WHERE id=$1 RETURNING locale",
+    )
+    .bind(id)
+    .bind(locale::Locale::from_accept_language(&headers).code())
+    .fetch_one(&s.db)
+    .await?;
     let subscription_required = billing::subscription_required(&s, id).await?;
     Ok(Json(
-        serde_json::json!({"email":email,"is_admin":is_admin,"instance_limit":instance_limit,"has_password":has_password,"requires_current_password":requires_current_password,"subscription_required":subscription_required}),
+        serde_json::json!({"email":email,"is_admin":is_admin,"instance_limit":instance_limit,"has_password":has_password,"requires_current_password":requires_current_password,"subscription_required":subscription_required,"locale":language}),
     ))
 }
 async fn customer_tenants(

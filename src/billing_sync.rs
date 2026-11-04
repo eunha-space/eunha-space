@@ -517,14 +517,8 @@ async fn billing_key_deleted(s: &Shared, billing_key: &str) -> anyhow::Result<()
         .await?;
     }
     tx.commit().await?;
-    if let Some((_, email)) = holder {
-        notify(
-            s,
-            email.as_deref(),
-            "Your eunha space card was removed",
-            "The card for your subscription was removed at TossPayments, so it will not renew. Your instances keep running until the paid period ends. To keep them running after that, register a card on your account page.",
-        )
-        .await;
+    if let Some((user_id, _)) = holder {
+        notify(s, user_id, billing::Notice::CardRemoved).await;
     }
     Ok(())
 }

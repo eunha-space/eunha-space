@@ -275,14 +275,76 @@ const ko: Record<string, string> = {
     "이전 결제 설정으로 이루어진 결제라 여기서 환불할 수 없습니다. 문의해 주세요.",
   "This payment cannot be refunded here. Please contact us.":
     "이 결제는 여기서 환불할 수 없습니다. 문의해 주세요.",
+  "Language":
+    "언어",
+  "Choose the language for this site and the emails we send you.":
+    "이 사이트와 보내 드리는 이메일의 언어를 선택하세요.",
+  "Choose English or Korean.":
+    "영어나 한국어를 선택하세요.",
 };
 i18n.load("en", en);
 i18n.load("ko", ko);
+export type Locale = "en" | "ko";
 const adminPage = location.pathname === "/admin" || location.pathname.startsWith("/admin/");
-const initial = adminPage ? "en" : localStorage.getItem("locale") ||
-  (navigator.language.startsWith("ko") ? "ko" : "en");
-i18n.activate(initial);
-document.documentElement.lang = initial;
+
+function apply(locale: Locale) {
+  i18n.activate(locale);
+  document.documentElement.lang = locale;
+  if (!adminPage) document.title = i18n._("eunha space");
+}
+
+// A first guess from the browser so nothing renders in the wrong language
+// while the server is asked.
+apply(
+  adminPage ? "en" : navigator.language.toLowerCase().startsWith("ko") ? "ko" : "en",
+);
+
+/**
+ * The language to start in: a signed-in account's saved one, or what the
+ * browser's Accept-Language asks for. A signed-out visitor's own pick on this
+ * device wins over the browser's. The console is English only.
+ */
+export async function initLocale(): Promise<void> {
+  if (adminPage) return;
+  try {
+    const response = await fetch("/api/customer/locale", {
+      signal: AbortSignal.timeout(2000),
+    });
+    const { locale, saved } = (await response.json()) as { locale: Locale; saved: boolean };
+    const picked = readPicked();
+    apply(!saved && picked ? picked : locale);
+  } catch {
+    const picked = readPicked();
+    if (picked) apply(picked);
+  }
+}
+
+function readPicked(): Locale | null {
+  try {
+    const value = localStorage.getItem("locale");
+    return value === "ko" || value === "en" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Switch language, and keep it: as the account's setting when signed in,
+ * and on this device either way.
+ */
+export async function setLocale(locale: Locale): Promise<void> {
+  apply(locale);
+  try {
+    localStorage.setItem("locale", locale);
+  } catch {
+    // Private windows may refuse storage; the account's setting still holds.
+  }
+  await fetch("/api/customer/locale", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ locale }),
+  }).catch(() => undefined);
+}
 
 export function LocalizationProvider(
   { children }: { children: React.ReactNode },
@@ -296,12 +358,7 @@ export function LanguageToggle() {
     <Button
       variant="outline"
       size="icon"
-      onClick={() => {
-        const next = korean ? "en" : "ko";
-        localStorage.setItem("locale", next);
-        document.documentElement.lang = next;
-        i18n.activate(next);
-      }}
+      onClick={() => void setLocale(korean ? "en" : "ko")}
       aria-label={korean ? "Switch to English" : "한국어로 전환"}
       title={korean ? "English" : "한국어"}
     >

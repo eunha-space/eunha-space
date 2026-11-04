@@ -116,6 +116,8 @@ export type Customer = {
   requires_current_password: boolean;
   /** Billing is on and this account has no active subscription. */
   subscription_required: boolean;
+  /** The language the account reads the site and its email in. */
+  locale: "en" | "ko";
 };
 
 export type SubscriptionStatus =

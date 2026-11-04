@@ -9,7 +9,7 @@
 use anyhow::Result;
 use uuid::Uuid;
 
-use crate::Shared;
+use crate::{Shared, locale::Locale};
 
 /// How long before a renewal its reminder goes out.
 pub(crate) const RENEWAL_NOTICE: &str = "7 days";
@@ -33,33 +33,60 @@ pub(crate) fn won(amount: i64) -> String {
     format!("{}₩{grouped}", if amount < 0 { "-" } else { "" })
 }
 
-/// "the 현대 card ending 123*", or "your card" when nothing is known of it.
-fn card(company: Option<&str>, number: Option<&str>) -> String {
+/// The card a charge goes to, by what is known of it: "your 현대 card ending
+/// 123*", "현대 카드(끝자리 123*)".
+fn card(language: Locale, company: Option<&str>, number: Option<&str>) -> String {
     let ending = number
         .map(|number| number.chars().rev().take(4).collect::<Vec<_>>())
         .map(|last| last.into_iter().rev().collect::<String>());
-    match (company, ending) {
-        (Some(company), Some(ending)) => format!("your {company} card ending {ending}"),
-        (Some(company), None) => format!("your {company} card"),
-        (None, Some(ending)) => format!("your card ending {ending}"),
-        (None, None) => "your card".into(),
+    match (language, company, ending) {
+        (Locale::En, Some(company), Some(ending)) => format!("your {company} card ending {ending}"),
+        (Locale::En, Some(company), None) => format!("your {company} card"),
+        (Locale::En, None, Some(ending)) => format!("your card ending {ending}"),
+        (Locale::En, None, None) => "your card".into(),
+        (Locale::Ko, Some(company), Some(ending)) => format!("{company} 카드(끝자리 {ending})"),
+        (Locale::Ko, Some(company), None) => format!("{company} 카드"),
+        (Locale::Ko, None, Some(ending)) => format!("카드(끝자리 {ending})"),
+        (Locale::Ko, None, None) => "등록된 카드".into(),
     }
+}
+
+/// An account's language, read in the transaction that writes its email.
+async fn language(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+) -> Result<Locale, sqlx::Error> {
+    Ok(
+        sqlx::query_scalar::<_, Option<String>>("SELECT locale FROM users WHERE id=$1")
+            .bind(user_id)
+            .fetch_one(&mut **tx)
+            .await?
+            .as_deref()
+            .and_then(Locale::parse)
+            .unwrap_or(Locale::En),
+    )
+}
+
+struct Email {
+    kind: &'static str,
+    dedupe_key: String,
+    language: Locale,
+    subject: String,
+    body: String,
 }
 
 async fn enqueue(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: Uuid,
-    kind: &str,
-    dedupe_key: &str,
-    subject: &str,
-    body: &str,
+    email: Email,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO billing_emails(user_id,kind,dedupe_key,subject,body) VALUES($1,$2,$3,$4,$5) ON CONFLICT (dedupe_key) DO NOTHING")
+    sqlx::query("INSERT INTO billing_emails(user_id,kind,dedupe_key,locale,subject,body) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (dedupe_key) DO NOTHING")
         .bind(user_id)
-        .bind(kind)
-        .bind(dedupe_key)
-        .bind(subject)
-        .bind(body)
+        .bind(email.kind)
+        .bind(email.dedupe_key)
+        .bind(email.language.code())
+        .bind(email.subject)
+        .bind(email.body)
         .execute(&mut **tx)
         .await?;
     Ok(())
@@ -80,24 +107,45 @@ pub(crate) async fn receipt(
     else {
         return Ok(());
     };
-    let mut body = format!(
-        "Thank you for using eunha space.\n\nWe charged {} to {} for {start} to {end}.\n\nOrder: {order_id}",
-        won(amount),
-        card(company.as_deref(), number.as_deref()),
-    );
+    let language = language(tx, user_id).await?;
+    let amount = won(amount);
+    let card = card(language, company.as_deref(), number.as_deref());
+    let (subject, mut body) = match language {
+        Locale::En => (
+            format!("Your eunha space receipt: {amount}"),
+            format!(
+                "Thank you for using eunha space.\n\nWe charged {amount} to {card} for {start} to {end}.\n\nOrder: {order_id}"
+            ),
+        ),
+        Locale::Ko => (
+            format!("은하공간 결제 영수증: {amount}"),
+            format!(
+                "은하공간을 이용해 주셔서 감사합니다.\n\n{start}부터 {end}까지의 이용 요금 {amount}을 {card}로 결제했습니다.\n\n주문 번호: {order_id}"
+            ),
+        ),
+    };
     if let Some(url) = receipt_url {
-        body.push_str(&format!("\nReceipt: {url}"));
+        body.push_str(&match language {
+            Locale::En => format!("\nReceipt: {url}"),
+            Locale::Ko => format!("\n영수증: {url}"),
+        });
     }
-    body.push_str(
-        "\n\nWithin seven days of a payment you can ask for it back on your account page.",
-    );
+    body.push_str(match language {
+        Locale::En => {
+            "\n\nWithin seven days of a payment you can ask for it back on your account page."
+        }
+        Locale::Ko => "\n\n결제일로부터 7일 안에는 계정 페이지에서 환불을 요청할 수 있습니다.",
+    });
     enqueue(
         tx,
         user_id,
-        "receipt",
-        &format!("receipt:{order_id}"),
-        &format!("Your eunha space receipt: {}", won(amount)),
-        &body,
+        Email {
+            kind: "receipt",
+            dedupe_key: format!("receipt:{order_id}"),
+            language,
+            subject,
+            body,
+        },
     )
     .await
 }
@@ -110,24 +158,44 @@ pub(crate) async fn refund(
     refunded: i64,
     ended: bool,
 ) -> Result<(), sqlx::Error> {
-    let body = if ended {
-        format!(
-            "We refunded {} for order {order_id} to your card, and your subscription has ended, so your instances are offline. Their data is kept: subscribe again from your account page to serve them again.\n\nCard companies usually return the money within three to seven business days.",
-            won(refunded)
-        )
-    } else {
-        format!(
-            "We refunded {} for order {order_id} to your card.\n\nCard companies usually return the money within three to seven business days.",
-            won(refunded)
-        )
+    let language = language(tx, user_id).await?;
+    let amount = won(refunded);
+    let (subject, body) = match (language, ended) {
+        (Locale::En, true) => (
+            format!("Your eunha space refund: {amount}"),
+            format!(
+                "We refunded {amount} for order {order_id} to your card, and your subscription has ended, so your instances are offline. Their data is kept: subscribe again from your account page to serve them again.\n\nCard companies usually return the money within three to seven business days."
+            ),
+        ),
+        (Locale::En, false) => (
+            format!("Your eunha space refund: {amount}"),
+            format!(
+                "We refunded {amount} for order {order_id} to your card.\n\nCard companies usually return the money within three to seven business days."
+            ),
+        ),
+        (Locale::Ko, true) => (
+            format!("은하공간 환불 안내: {amount}"),
+            format!(
+                "주문 {order_id}의 {amount}을 카드로 환불했습니다. 구독이 종료되어 인스턴스가 오프라인으로 전환되었습니다. 데이터는 보관되며, 계정 페이지에서 다시 구독하면 다시 서비스됩니다.\n\n카드사에 따라 영업일 기준 3~7일 안에 환불됩니다."
+            ),
+        ),
+        (Locale::Ko, false) => (
+            format!("은하공간 환불 안내: {amount}"),
+            format!(
+                "주문 {order_id}의 {amount}을 카드로 환불했습니다.\n\n카드사에 따라 영업일 기준 3~7일 안에 환불됩니다."
+            ),
+        ),
     };
     enqueue(
         tx,
         user_id,
-        "refund",
-        &format!("refund:{order_id}:{refunded}"),
-        &format!("Your eunha space refund: {}", won(refunded)),
-        &body,
+        Email {
+            kind: "refund",
+            dedupe_key: format!("refund:{order_id}:{refunded}"),
+            language,
+            subject,
+            body,
+        },
     )
     .await
 }
@@ -149,17 +217,33 @@ pub(crate) async fn schedule_renewal_notices(s: &Shared) -> Result<u64> {
     let mut written = 0;
     for (user_id, amount, renews_on, period_key, company, number) in due {
         let mut tx = s.db.begin().await?;
+        let language = language(&mut tx, user_id).await?;
+        let amount = won(amount);
+        let card = card(language, company.as_deref(), number.as_deref());
+        let (subject, body) = match language {
+            Locale::En => (
+                format!("Your eunha space subscription renews on {renews_on}"),
+                format!(
+                    "On {renews_on} we will charge {amount} to {card} for another month of eunha space.\n\nNothing needs doing to keep it. To stop it, cancel before then on your account page; your instances keep running until the paid period ends. To use another card, change it there too."
+                ),
+            ),
+            Locale::Ko => (
+                format!("은하공간 구독이 {renews_on}에 갱신됩니다"),
+                format!(
+                    "{renews_on}에 은하공간 한 달 이용 요금 {amount}을 {card}로 결제할 예정입니다.\n\n계속 이용하려면 따로 하실 일은 없습니다. 갱신을 원하지 않으면 그 전에 계정 페이지에서 구독을 해지하세요. 결제한 기간이 끝날 때까지 인스턴스는 계속 운영됩니다. 다른 카드를 쓰려면 같은 곳에서 카드를 변경할 수 있습니다."
+                ),
+            ),
+        };
         enqueue(
             &mut tx,
             user_id,
-            "renewal_notice",
-            &format!("renewal:{user_id}:{period_key}"),
-            &format!("Your eunha space subscription renews on {renews_on}"),
-            &format!(
-                "On {renews_on} we will charge {} to {} for another month of eunha space.\n\nNothing needs doing to keep it. To stop it, cancel before then on your account page; your instances keep running until the paid period ends. To use another card, change it there too.",
-                won(amount),
-                card(company.as_deref(), number.as_deref()),
-            ),
+            Email {
+                kind: "renewal_notice",
+                dedupe_key: format!("renewal:{user_id}:{period_key}"),
+                language,
+                subject,
+                body,
+            },
         )
         .await?;
         tx.commit().await?;
@@ -171,6 +255,7 @@ pub(crate) async fn schedule_renewal_notices(s: &Shared) -> Result<u64> {
 #[derive(sqlx::FromRow)]
 struct Outgoing {
     id: Uuid,
+    locale: String,
     subject: String,
     body: String,
     email: Option<String>,
@@ -189,7 +274,7 @@ pub(crate) async fn send_due(s: &Shared) -> Result<bool> {
         .execute(&mut *tx)
         .await?;
     let Some(outgoing) = sqlx::query_as::<_, Outgoing>(
-        "SELECT e.id,e.subject,e.body,u.email FROM billing_emails e JOIN users u ON u.id=e.user_id WHERE e.sent_at IS NULL AND e.abandoned_at IS NULL AND e.next_attempt_at<=now() ORDER BY e.next_attempt_at LIMIT 1 FOR UPDATE OF e SKIP LOCKED",
+        "SELECT e.id,e.locale,e.subject,e.body,u.email FROM billing_emails e JOIN users u ON u.id=e.user_id WHERE e.sent_at IS NULL AND e.abandoned_at IS NULL AND e.next_attempt_at<=now() ORDER BY e.next_attempt_at LIMIT 1 FOR UPDATE OF e SKIP LOCKED",
     )
     .fetch_optional(&mut *tx)
     .await?
@@ -219,7 +304,10 @@ pub(crate) async fn send_due(s: &Shared) -> Result<bool> {
     };
     use lettre::AsyncTransport;
     let message = lettre::Message::builder()
-        .from(mail.from.clone())
+        .from(crate::locale::sender(
+            mail,
+            Locale::parse(&outgoing.locale).unwrap_or(Locale::En),
+        ))
         .to(to)
         .subject(&outgoing.subject)
         .body(format!(
@@ -262,13 +350,18 @@ mod tests {
     #[test]
     fn a_card_is_named_by_what_is_known_of_it() {
         assert_eq!(
-            card(Some("현대"), Some("43301234****123*")),
+            card(Locale::En, Some("현대"), Some("43301234****123*")),
             "your 현대 card ending 123*"
         );
         assert_eq!(
-            card(None, Some("43301234****1234")),
+            card(Locale::En, None, Some("43301234****1234")),
             "your card ending 1234"
         );
-        assert_eq!(card(None, None), "your card");
+        assert_eq!(card(Locale::En, None, None), "your card");
+        assert_eq!(
+            card(Locale::Ko, Some("현대"), Some("43301234****123*")),
+            "현대 카드(끝자리 123*)"
+        );
+        assert_eq!(card(Locale::Ko, None, None), "등록된 카드");
     }
 }

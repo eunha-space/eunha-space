@@ -14,6 +14,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SubscriptionCard } from "@/CustomerSubscription";
+import { setLocale, type Locale } from "@/i18n";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 export function CustomerAccount(
   { customer, onChanged }: { customer: Customer; onChanged: () => Promise<void> },
@@ -33,7 +35,38 @@ export function CustomerAccount(
         <SubscriptionCard customer={customer} onChanged={onChanged} />
       )}
       <PasswordCard customer={customer} onChanged={onChanged} />
+      <LanguageCard />
     </div>
+  );
+}
+
+function LanguageCard() {
+  const { i18n } = useLingui();
+  const t = (message: string) => i18n._(message);
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t("Language")}</CardTitle>
+        <CardDescription>
+          {t("Choose the language for this site and the emails we send you.")}
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <ToggleGroup
+          variant="outline"
+          value={[i18n.locale]}
+          onValueChange={(value) => {
+            const next = value[0] as Locale | undefined;
+            if (next && next !== i18n.locale) void setLocale(next);
+          }}
+          aria-label={t("Language")}
+        >
+          {/* Each language is named in itself, so either reader finds theirs. */}
+          <ToggleGroupItem value="ko" lang="ko">한국어</ToggleGroupItem>
+          <ToggleGroupItem value="en" lang="en">English</ToggleGroupItem>
+        </ToggleGroup>
+      </CardContent>
+    </Card>
   );
 }
 

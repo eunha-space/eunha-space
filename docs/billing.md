@@ -14,7 +14,7 @@ TOSSPAYMENTS_CLIENT_KEY=live_ck_...        # public; handed to the billing windo
 TOSSPAYMENTS_SECRET_KEY=live_sk_...        # process-only
 TOSSPAYMENTS_MID=...                       # the secret key's merchant ID; required with a live key
 EUNHA_SPACE_SUBSCRIPTION_AMOUNT=9900       # won per month, required with the keys
-EUNHA_SPACE_SUBSCRIPTION_NAME='eunha space 월간 구독'   # optional order name
+EUNHA_SPACE_SUBSCRIPTION_NAME='은하공간 월간 구독'   # optional order name
 TOSSPAYMENTS_API_BASE=https://api.tosspayments.com    # optional; a stand-in for tests
 ```
 
@@ -202,6 +202,10 @@ configured, nothing is sent.
   subscription set to end, or one renewing within a day.
 - **Refund confirmation**, for every refund recorded, saying whether the
   subscription ended with it.
+
+Every billing email is written in the account's language and sent under the
+service's name in it: 은하공간 for Korean, eunha space for English, from the
+address in `EUNHA_SPACE_EMAIL_FROM`.
 
 Declines, a subscription ending, and a card removed at TossPayments are still
 emailed directly, best effort; the account page says the same.

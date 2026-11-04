@@ -2682,3 +2682,117 @@ async fn a_refund_is_confirmed_by_email(pool: PgPool) {
     assert_eq!(refund.1, "Your eunha space refund: ₩9,900");
     assert!(refund.2.contains("your subscription has ended"));
 }
+
+fn with_language(mut headers: HeaderMap, accept: &str) -> HeaderMap {
+    headers.insert(header::ACCEPT_LANGUAGE, accept.parse().unwrap());
+    headers
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn the_language_follows_the_browser_until_the_customer_picks_one(pool: PgPool) {
+    let state = state(pool.clone());
+    let (user_id, headers) = billed_customer(&pool).await;
+    let language = |headers: HeaderMap| {
+        let state = state.clone();
+        async move {
+            let Json(view) = locale::get(State(state), headers).await.unwrap();
+            serde_json::to_value(view).unwrap()
+        }
+    };
+    // Signed out: what the browser asks for.
+    assert_eq!(
+        language(with_language(HeaderMap::new(), "ko-KR,ko;q=0.9,en;q=0.8")).await,
+        serde_json::json!({"locale": "ko", "saved": false})
+    );
+    assert_eq!(
+        language(HeaderMap::new()).await,
+        serde_json::json!({"locale": "en", "saved": false})
+    );
+    // An account from before languages were kept takes its browser's.
+    let Json(me) = customer_me(
+        State(state.clone()),
+        with_language(headers.clone(), "ko;q=0.9, en;q=0.5"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(me["locale"], "ko");
+    assert_eq!(
+        language(with_language(headers.clone(), "en")).await,
+        serde_json::json!({"locale": "ko", "saved": true})
+    );
+    // The customer's choice wins over the browser from then on.
+    assert_eq!(
+        locale::set(
+            State(state.clone()),
+            headers.clone(),
+            Json(serde_json::from_value(serde_json::json!({"locale": "en"})).unwrap()),
+        )
+        .await
+        .unwrap(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        language(with_language(headers.clone(), "ko")).await,
+        serde_json::json!({"locale": "en", "saved": true})
+    );
+    assert_eq!(
+        locale::set(
+            State(state.clone()),
+            headers.clone(),
+            Json(serde_json::from_value(serde_json::json!({"locale": "fr"})).unwrap()),
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        locale::set(
+            State(state.clone()),
+            HeaderMap::new(),
+            Json(serde_json::from_value(serde_json::json!({"locale": "ko"})).unwrap()),
+        )
+        .await
+        .unwrap_err()
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let _ = user_id;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_korean_customer_gets_billing_email_in_korean(pool: PgPool) {
+    let (_toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    sqlx::query("UPDATE users SET locale='ko' WHERE id=$1")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let view = subscribe(&state, &headers).await;
+    let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+    let (language, subject, body): (String, String, String) = sqlx::query_as(
+        "SELECT locale,subject,body FROM billing_emails WHERE user_id=$1 AND kind='receipt'",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(language, "ko");
+    assert_eq!(subject, "은하공간 결제 영수증: ₩9,900");
+    assert!(body.starts_with("은하공간을 이용해 주셔서 감사합니다."));
+    assert!(body.contains("₩9,900을 현대 카드(끝자리 123*)로 결제했습니다."));
+    assert!(body.contains(&format!("주문 번호: {order_id}")));
+
+    refund(&state, &headers, &order_id).await.unwrap();
+    let subject: String =
+        sqlx::query_scalar("SELECT subject FROM billing_emails WHERE user_id=$1 AND kind='refund'")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(subject, "은하공간 환불 안내: ₩9,900");
+}

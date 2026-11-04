@@ -100,6 +100,14 @@ Restoring such an instance tries the same domain again for another seven days,
 and is refused if another instance has claimed the domain meanwhile. Runtime
 placement is automatic and favors the least-loaded eligible runtime.
 
+The portal and every email to a customer are in English or Korean. The service
+is called eunha space in English and 은하공간 in Korean, in the page title, the
+portal and as the emails' sender name. An account's language (`users.locale`)
+starts as what the browser asks for (`Accept-Language`), or the language the
+sign-up page was showing, and the customer can change it on their account page
+or with the header toggle. Before signing in, the portal follows the browser,
+or the visitor's last pick on that device. The operator console is English only.
+
 Signup requires only an email address. The verification link signs the customer
 in and requires password setup; later sessions can use either that password or
 a fresh email sign-in link.
