@@ -40,6 +40,9 @@ guarantees, and what the code relies on:
   executable), so every runtime release gets the one the control plane shipped
   with.
 
+This is the control plane's own deploy. How it releases eunha to the runtimes,
+channel by channel, is in [releases](releases.md).
+
 ## Verification
 
 `mise exec -- cargo test` runs unit checks, `mise run test-ops` the ops

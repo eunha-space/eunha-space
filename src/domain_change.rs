@@ -186,6 +186,14 @@ async fn start(
             "Only a running instance can change its domain.".into(),
         ));
     }
+    // A moving tenant is rendered onto two runtimes; a new domain would reach
+    // one of them only.
+    if crate::tenant_move::is_moving(&mut tx, tenant_id).await? {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "The instance is moving between servers; change its domain once that finishes.".into(),
+        ));
+    }
     if hostnames.contains(&from_domain) {
         return Err(ApiError(
             StatusCode::CONFLICT,

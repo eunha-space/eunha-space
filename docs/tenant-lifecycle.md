@@ -163,6 +163,55 @@ no-op the second time, and the Moves are not resent once their batch is
 recorded), so **Retry** in the console's domains dialog continues from the step
 that failed.
 
+## Moving a tenant to another runtime
+
+A tenant's runtime decides which eunha release serves it, and so its release
+channel ([releases](releases.md)). An operator moves a ready tenant to another
+runtime from the tenant inventory's move dialog. The move is a `runtime_move`
+lifecycle job, recorded in `tenant_moves`. It makes before it breaks: the new
+runtime serves the tenant before the old one lets it go, so the tenant stays up
+throughout. For the minutes in between both processes serve it. Eunha allows
+that, because its job queue and scheduler lease what they run in PostgreSQL.
+
+A move is refused unless:
+
+- the tenant is ready, has no other lifecycle work in progress, and is not
+  already moving;
+- both runtimes are on the instance this control plane manages;
+- the new runtime runs the tenant's release or a newer one. Its release migrates
+  the database, and an older one would serve a schema it does not know;
+- the tenant has no existing (`legacy`) domain. Infrastructure routes one of
+  those to the runtime it was set up on, so it has to be managed with Cloudflare
+  first;
+- the old runtime keeps at least one other tenant. Eunha refuses a tenants
+  directory with none, and would go on serving the last one;
+- the new runtime's tenants and this one fit within PostgreSQL's connections.
+
+The steps:
+
+1. **migrate**: the tenant's database is migrated with the new runtime's
+   release.
+2. **start**: its file is rendered into the new runtime's directory, the new
+   runtime is reloaded, and the tenant is health-checked there.
+3. **switch**: it is rendered again, in case its configuration changed, and
+   `tenants.runtime_id` becomes the new runtime. From here the domain reconciler
+   points every hostname at the new runtime's origin.
+4. **route**: waits until every hostname is routed there, then two minutes more
+   for Cloudflare's edge to follow.
+5. **stop**: its file is removed from the old runtime, which is reloaded and
+   checked no longer to serve it.
+
+`migrate`, `start` and `switch` wait while either runtime is being released.
+While a move is open, neither runtime can be released, and the tenant's domain
+cannot change.
+
+A step that keeps failing is given three runs. Until `switch` has happened, a
+failure or a **Cancel** undoes the move: the tenant's file is removed from the
+new runtime, and it stays where it was. Its database stays migrated by the newer
+release, which its own runtime gets next. After `switch`, a failure leaves the
+move `failed` but open, still holding both runtimes, and **Retry** in the move
+dialog continues from the step that failed.
+
 ## Watching a job
 
 The tenant inventory in `/admin` shows the kind of the tenant's latest job and the

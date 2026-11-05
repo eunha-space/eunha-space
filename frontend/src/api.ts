@@ -31,7 +31,7 @@ export type Tenant = {
    */
   imported: boolean;
   /** The tenant's latest lifecycle job. */
-  job_kind: "provision" | "deprovision" | "purge" | "domain_change" | null;
+  job_kind: "provision" | "deprovision" | "purge" | "domain_change" | "runtime_move" | null;
   /** How many times in a row it has failed, and the fixed text of the last failure. */
   job_failures: number | null;
   job_error: string | null;
@@ -277,9 +277,70 @@ export type Runtime = {
   tenant_count: number;
   auto_deploy_enabled: boolean;
   deployed_ref: string | null;
+  /** The release channel it takes rollouts in; none means it is released by hand only. */
+  channel_id: string | null;
   release_operation_id: string | null;
   release_status: string | null;
   release_message: string | null;
+};
+
+/** A group of runtimes a rollout reaches together, in `position` order. */
+export type ReleaseChannel = {
+  id: string;
+  name: string;
+  position: number;
+  /** How long it runs a release, healthy, before the next channel starts. */
+  soak_minutes: number;
+  runtime_count: number;
+};
+
+export type RolloutStatus = "rolling" | "paused" | "halted" | "completed" | "superseded";
+
+/** One build making its way through the channels. */
+export type Rollout = {
+  id: string;
+  git_sha: string;
+  status: RolloutStatus;
+  /** What it is waiting for, or why it halted. */
+  reason: string | null;
+  created_at: string;
+  finished_at: string | null;
+  stages: {
+    channel_id: string;
+    started_at: string;
+    completed_at: string | null;
+    promoted_at: string | null;
+  }[];
+  /** The latest release of this build on each runtime it reached. */
+  deployments: {
+    runtime_id: string;
+    status: string;
+    tenants_checked: number | null;
+    tenants_unhealthy: number | null;
+    finished_at: string | null;
+  }[];
+  /** Runtimes an operator deployed a newer build to by hand; the rollout counts them as done. */
+  ahead: string[];
+};
+
+export function isActiveRollout(rollout: Pick<Rollout, "status">): boolean {
+  return rollout.status === "rolling" || rollout.status === "paused" || rollout.status === "halted";
+}
+
+/** A tenant's move to another runtime. */
+export type TenantMove = {
+  id: string;
+  operation_id: string;
+  from_runtime_id: string;
+  from_runtime: string;
+  to_runtime_id: string;
+  to_runtime: string;
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  step: "migrate" | "start" | "switch" | "route" | "stop" | "done";
+  cancel_requested: boolean;
+  error: string | null;
+  created_at: string;
+  finished_at: string | null;
 };
 
 export type OperationEvent = {

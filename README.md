@@ -53,6 +53,11 @@ work remains retained and can be retried from the tenant inventory; it is never
 implicitly deprovisioned or purged. `CONTROL_JOBS_DISABLED` keeps a process out
 of that work, for a local one pointed at a shared database.
 
+Eunha is released to the runtimes incrementally, through release channels that
+a build reaches in order, each soaking before the next; tenants change channel
+by moving to another runtime. [docs/releases.md](docs/releases.md) has the
+rules, and *docs/tenant-lifecycle.md* the moves.
+
 Connection scaling — what makes a tenant hold a PostgreSQL connection, and the
 three layers that keep a fleet's cost tied to work rather than tenant count — is
 described in [docs/connection-scaling.md](docs/connection-scaling.md).

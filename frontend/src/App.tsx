@@ -17,6 +17,8 @@ import {
   errorMessage,
   type Customer,
   type Operation,
+  type ReleaseChannel,
+  type Rollout,
   type Runtime,
   type Tenant,
 } from "@/api";
@@ -50,6 +52,8 @@ export function App() {
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
   const [operations, setOperations] = useState<Operation[]>([]);
+  const [channels, setChannels] = useState<ReleaseChannel[]>([]);
+  const [rollouts, setRollouts] = useState<Rollout[]>([]);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [serviceReady, setServiceReady] = useState(true);
@@ -65,15 +69,19 @@ export function App() {
     try {
       const me = await api<Customer>("/customer/session/me");
       if (!me.is_admin) { location.replace("/instances"); return; }
-      const [nextTenants, nextRuntimes, nextOperations] = await Promise.all([
+      const [nextTenants, nextRuntimes, nextOperations, nextChannels, nextRollouts] = await Promise.all([
         api<Tenant[]>("/tenants"),
         api<Runtime[]>("/runtimes"),
         api<Operation[]>("/operations"),
+        api<ReleaseChannel[]>("/release-channels"),
+        api<Rollout[]>("/rollouts"),
       ]);
       setSession({ state: "signed-in", username: me.email });
       setTenants(nextTenants);
       setRuntimes(nextRuntimes);
       setOperations(nextOperations);
+      setChannels(nextChannels);
+      setRollouts(nextRollouts);
       setUpdatedAt(new Date().toISOString());
       setNow(Date.now());
     } catch (failure) {
@@ -136,12 +144,12 @@ export function App() {
   }, []);
 
   const act = useCallback(
-    async (path: string, key: string, body?: object) => {
+    async (path: string, key: string, body?: object, method = "POST") => {
       setBusy(key);
       setError("");
       try {
         await api(path, {
-          method: "POST",
+          method,
           body: body ? JSON.stringify(body) : undefined,
         });
         await load({ manual: true });
@@ -338,6 +346,7 @@ export function App() {
             <Tenants
               tenants={tenants}
               runtimes={runtimes}
+              channels={channels}
               busy={busy}
               act={act}
             />
@@ -347,7 +356,13 @@ export function App() {
             <Instances runtimes={runtimes} tenants={tenants} />
           )}
           {view === "releases" && (
-            <Releases runtimes={runtimes} busy={busy} act={act} />
+            <Releases
+              runtimes={runtimes}
+              channels={channels}
+              rollouts={rollouts}
+              busy={busy}
+              act={act}
+            />
           )}
           {view === "users" && <Users />}
           {view === "billing" && <Billing />}

@@ -1,7 +1,8 @@
 import { useMemo, useState, type ReactNode } from "react";
-import { Download, FileCog, Globe, HardDrive, HeartPulse, Inbox, Plus, PowerOff, RefreshCw, RotateCcw, RotateCw, Trash2 } from "lucide-react";
-import { api, type DomainChange, instanceAddress, isOffline, pendingRender, type Runtime, type Tenant, type TenantDomain } from "@/api";
-import { absoluteTime, relativeTime } from "@/format";
+import { ArrowRightLeft, Download, FileCog, Globe, HardDrive, HeartPulse, Inbox, Plus, PowerOff, RefreshCw, RotateCcw, RotateCw, Trash2 } from "lucide-react";
+import { api, type DomainChange, instanceAddress, isOffline, pendingRender, type ReleaseChannel, type Runtime, type Tenant, type TenantDomain, type TenantMove } from "@/api";
+import { absoluteTime, relativeTime, shortRef } from "@/format";
+import { NativeSelect } from "@/components/ui/native-select";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
@@ -20,6 +21,7 @@ import { cn } from "cn";
 type Props = {
   tenants: Tenant[];
   runtimes: Runtime[];
+  channels: ReleaseChannel[];
   busy: string;
   act: (path: string, key: string, body?: object) => Promise<boolean>;
 };
@@ -70,7 +72,7 @@ function matches(tenant: Tenant, filter: string): boolean {
   return true;
 }
 
-export function Tenants({ tenants, runtimes, busy, act }: Props) {
+export function Tenants({ tenants, runtimes, channels, busy, act }: Props) {
   const [filter, setFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [showInactive, setShowInactive] = useState(false);
@@ -363,6 +365,9 @@ export function Tenants({ tenants, runtimes, busy, act }: Props) {
                     {tenant.lifecycle_state !== "purging" && tenant.lifecycle_state !== "purged" && (
                       <>
                         <DomainsDialog tenant={tenant} busy={busy} act={act} />
+                        {(tenant.lifecycle_state === "ready" || tenant.job_kind === "runtime_move") && (
+                          <MoveDialog tenant={tenant} runtimes={runtimes} channels={channels} busy={busy} act={act} />
+                        )}
                         <TenantConfigDialog tenantId={tenant.id} domain={tenant.domain} />
                       </>
                     )}
@@ -693,4 +698,157 @@ function DomainsDialog({ tenant, busy, act }: { tenant: Tenant; busy: string; ac
       </div>)}</div>
     </DialogContent>
   </Dialog>;
+}
+
+const MOVE_STEPS: Record<TenantMove["step"], string> = {
+  migrate: "Migrating its database with the new runtime's release",
+  start: "Starting it on the new runtime",
+  switch: "Handing it to the new runtime",
+  route: "Routing its hostnames to the new runtime",
+  stop: "Stopping it on the old runtime",
+  done: "Done",
+};
+
+/**
+ * Move a tenant to another runtime, which is how it changes release channel.
+ * The new runtime serves it before the old one lets it go.
+ */
+function MoveDialog({
+  tenant,
+  runtimes,
+  channels,
+  busy,
+  act,
+}: {
+  tenant: Tenant;
+  runtimes: Runtime[];
+  channels: ReleaseChannel[];
+  busy: string;
+  act: Props["act"];
+}) {
+  const [open, setOpen] = useState(false);
+  const [move, setMove] = useState<TenantMove | null>(null);
+  const [target, setTarget] = useState("");
+  const current = runtimes.find((runtime) => runtime.name === tenant.runtime_name);
+  const channelName = (id: string | null) => channels.find((channel) => channel.id === id)?.name ?? "no channel";
+  // Moves are between runtimes on one instance; the control plane manages one.
+  const targets = runtimes.filter(
+    (runtime) => runtime.id !== current?.id && runtime.instance_id === current?.instance_id,
+  );
+  const selected = target || targets[0]?.id || "";
+  const open_ = move !== null && move.finished_at === null;
+
+  async function refresh() {
+    setMove(await api<TenantMove | null>(`/tenants/${tenant.id}/move`));
+  }
+  async function moveAct(path: string, key: string, body?: object) {
+    if (await act(`/tenants/${tenant.id}/move${path}`, key, body)) await refresh();
+  }
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) void refresh();
+      }}
+    >
+      <Tooltip>
+        <TooltipTrigger render={<span className="inline-flex" />}>
+          <DialogTrigger render={<Button variant="outline" size="icon-sm" aria-label="Move to another runtime" />}>
+            <ArrowRightLeft />
+          </DialogTrigger>
+        </TooltipTrigger>
+        <TooltipContent>Move to another runtime</TooltipContent>
+      </Tooltip>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Move {instanceAddress(tenant)}</DialogTitle>
+          <DialogDescription>
+            It is on {tenant.runtime_name}, in {channelName(current?.channel_id ?? null)}. Moving it to another runtime
+            puts it in that runtime&rsquo;s channel. The new runtime migrates and serves it before the old one lets it
+            go, so it stays up throughout.
+          </DialogDescription>
+        </DialogHeader>
+        {move && (
+          <div className="bg-muted/50 grid gap-2 rounded-md p-3 text-sm">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-medium">{move.from_runtime} → {move.to_runtime}</span>
+              <Badge variant={move.status === "succeeded" ? "secondary" : "outline"}>{move.status}</Badge>
+            </div>
+            <p className="text-muted-foreground text-xs">
+              {move.status === "running"
+                ? `${MOVE_STEPS[move.step]}${move.cancel_requested ? " · cancelling" : ""}`
+                : `Started ${absoluteTime(move.created_at)}`}
+            </p>
+            {move.error && <p className="text-destructive text-xs">{move.error}</p>}
+            <div className="flex flex-wrap gap-2">
+              {move.status === "running" && !move.cancel_requested &&
+                ["migrate", "start", "switch"].includes(move.step) && (
+                <ActionButton
+                  variant="outline"
+                  busy={busy === `cancel-move-${tenant.id}`}
+                  onClick={() => moveAct("/cancel", `cancel-move-${tenant.id}`)}
+                >
+                  Cancel move
+                </ActionButton>
+              )}
+              {move.status === "failed" && move.finished_at === null && (
+                <ActionButton
+                  variant="outline"
+                  busy={busy === `retry-move-${tenant.id}`}
+                  onClick={() => moveAct("/retry", `retry-move-${tenant.id}`)}
+                >
+                  Retry from {move.step}
+                </ActionButton>
+              )}
+            </div>
+          </div>
+        )}
+        {!open_ && tenant.lifecycle_state === "ready" && (
+          targets.length === 0 ? (
+            <p className="text-muted-foreground text-sm">There is no other runtime on this instance to move it to.</p>
+          ) : (
+            <div className="grid gap-3">
+              <div className="grid gap-2">
+                <Label htmlFor={`move-${tenant.id}`}>Move to</Label>
+                <NativeSelect
+                  id={`move-${tenant.id}`}
+                  className="w-full"
+                  value={selected}
+                  onChange={(event) => setTarget(event.target.value)}
+                >
+                  {targets.map((runtime) => (
+                    <option key={runtime.id} value={runtime.id}>
+                      {runtime.name} · {channelName(runtime.channel_id)} · {shortRef(runtime.deployed_ref)}
+                    </option>
+                  ))}
+                </NativeSelect>
+                <p className="text-muted-foreground text-xs">
+                  Only to a runtime on the same release or a newer one: its release migrates the database.
+                </p>
+              </div>
+              <DialogFooter>
+                <ActionButton
+                  variant="default"
+                  icon={<ArrowRightLeft />}
+                  disabled={!selected}
+                  busy={busy === `move-${tenant.id}`}
+                  confirm={{
+                    title: `Move ${instanceAddress(tenant)} to ${targets.find((r) => r.id === selected)?.name ?? "the runtime"}?`,
+                    description:
+                      "Its database is migrated with the new runtime's release, the new runtime starts serving it, its hostnames are routed there, and the old runtime then stops. Neither runtime can be released until the move finishes.",
+                    action: "Move",
+                  }}
+                  onClick={() => moveAct("", `move-${tenant.id}`, { runtime_id: selected })}
+                >
+                  Move
+                </ActionButton>
+              </DialogFooter>
+            </div>
+          )
+        )}
+      </DialogContent>
+    </Dialog>
+  );
 }

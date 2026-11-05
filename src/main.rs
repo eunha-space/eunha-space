@@ -50,8 +50,10 @@ mod integration_tests;
 mod jobs;
 mod locale;
 mod masquerade;
+mod rollout;
 mod service_usage;
 mod smtp;
+mod tenant_move;
 mod usage;
 mod usage_range;
 mod users;
@@ -248,6 +250,7 @@ struct RuntimeSummary {
     tenant_count: i64,
     auto_deploy_enabled: bool,
     deployed_ref: Option<String>,
+    channel_id: Option<Uuid>,
     release_operation_id: Option<Uuid>,
     release_status: Option<String>,
     release_message: Option<String>,
@@ -833,11 +836,7 @@ async fn main() -> Result<()> {
         "release_recovery_reconciler",
         release_recovery_reconciler,
     );
-    health::supervise(
-        state.clone(),
-        "automatic_release_reconciler",
-        automatic_release_reconciler,
-    );
+    health::supervise(state.clone(), "rollout::reconciler", rollout::reconciler);
     // A local process pointed at a shared database must be able to stay out of
     // its lifecycle work.
     if std::env::var_os("CONTROL_JOBS_DISABLED").is_none() {
@@ -970,6 +969,29 @@ async fn main() -> Result<()> {
         .route("/tenants/{id}/render", post(render_tenant))
         .route("/runtimes", get(runtimes))
         .route("/runtimes/{id}/release", post(release_runtime))
+        .route("/runtimes/{id}/channel", post(rollout::assign_runtime))
+        .route(
+            "/release-channels",
+            get(rollout::list_channels).post(rollout::create_channel),
+        )
+        .route(
+            "/release-channels/{id}",
+            axum::routing::put(rollout::update_channel).delete(rollout::delete_channel),
+        )
+        .route(
+            "/release-channels/{id}/reorder",
+            post(rollout::reorder_channel),
+        )
+        .route("/rollouts", get(rollout::list_rollouts))
+        .route("/rollouts/{id}/pause", post(rollout::pause))
+        .route("/rollouts/{id}/resume", post(rollout::resume))
+        .route("/rollouts/{id}/promote", post(rollout::promote))
+        .route(
+            "/tenants/{id}/move",
+            get(tenant_move::latest).post(tenant_move::start),
+        )
+        .route("/tenants/{id}/move/cancel", post(tenant_move::cancel))
+        .route("/tenants/{id}/move/retry", post(tenant_move::retry))
         .route(
             "/runtimes/{id}/automatic-release",
             post(set_automatic_release),
@@ -1489,7 +1511,7 @@ async fn tenants(
     headers: HeaderMap,
 ) -> Result<Json<Vec<TenantSummary>>, ApiError> {
     admin_user(&headers, &s.db).await?;
-    let tenants: Vec<TenantSummary> = sqlx::query_as("SELECT t.id,t.domain,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain,EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=t.id) imported,d.kind job_kind,d.failures job_failures,d.last_error job_error,CASE WHEN t.lifecycle_state='provisioning' THEN (SELECT step FROM provisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,array_position(ARRAY['database','migrate','import','render','media','reload','health','routing','owner'],step) LIMIT 1) WHEN t.lifecycle_state IN ('deprovisioning','retained','purging') THEN (SELECT step FROM deprovisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,step LIMIT 1) END lifecycle_step FROM tenants t JOIN runtimes r ON r.id=t.runtime_id LEFT JOIN LATERAL (SELECT kind,failures,last_error FROM lifecycle_jobs WHERE tenant_id=t.id ORDER BY created_at DESC LIMIT 1) d ON true ORDER BY t.domain")
+    let tenants: Vec<TenantSummary> = sqlx::query_as("SELECT t.id,t.domain,t.lifecycle_state,t.desired_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.config_revision,t.rendered_revision,r.name runtime_name,r.bind_address,t.updated_at,t.purge_scheduled_for,t.abandoned_custom_domain,EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=t.id) imported,d.kind job_kind,d.failures job_failures,d.last_error job_error,CASE WHEN d.kind='runtime_move' THEN (SELECT m.status||' · '||m.step FROM tenant_moves m WHERE m.tenant_id=t.id AND m.finished_at IS NULL) WHEN t.lifecycle_state='provisioning' THEN (SELECT step FROM provisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,array_position(ARRAY['database','migrate','import','render','media','reload','health','routing','owner'],step) LIMIT 1) WHEN t.lifecycle_state IN ('deprovisioning','retained','purging') THEN (SELECT step FROM deprovisioning_steps WHERE tenant_id=t.id AND status IN ('running','pending') ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,step LIMIT 1) END lifecycle_step FROM tenants t JOIN runtimes r ON r.id=t.runtime_id LEFT JOIN LATERAL (SELECT kind,failures,last_error,finished_at FROM lifecycle_jobs WHERE tenant_id=t.id ORDER BY created_at DESC LIMIT 1) d ON true ORDER BY t.domain")
         .fetch_all(&s.db)
         .await?;
     Ok(Json(tenants))
@@ -3542,10 +3564,20 @@ async fn purge_tenant_configuration(state: &Shared, tenant_id: Uuid) -> Result<O
 /// Remove the tenant's runtime configuration so the runtime stops serving it on
 /// its next reload. The configuration itself stays in PostgreSQL.
 async fn unrender_tenant(state: &Shared, tenant_id: Uuid) -> Result<()> {
+    unrender_tenant_from(state, tenant_id, None).await
+}
+
+/// [`unrender_tenant`], from `runtime_id` rather than the tenant's own runtime.
+async fn unrender_tenant_from(
+    state: &Shared,
+    tenant_id: Uuid,
+    runtime_id: Option<Uuid>,
+) -> Result<()> {
     let (directory, runtime_host) = sqlx::query_as::<_, (String, String)>(
-        "SELECT r.tenant_directory,i.address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id WHERE t.id=$1",
+        "SELECT r.tenant_directory,i.address FROM tenants t JOIN runtimes r ON r.id=COALESCE($2,t.runtime_id) JOIN instances i ON i.id=r.instance_id WHERE t.id=$1",
     )
     .bind(tenant_id)
+    .bind(runtime_id)
     .fetch_one(&state.db)
     .await?;
     let configured_host = std::env::var("CONTROL_RUNTIME_HOST").unwrap_or_default();
@@ -3600,17 +3632,22 @@ async fn rename_legacy_tenant_files(state: &Shared) -> Result<()> {
 async fn verify_tenant_offline(state: &Shared, tenant_id: Uuid) -> Result<()> {
     let (domain, bind_address) = sqlx::query_as::<_, (String, String)>("SELECT t.domain,r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1")
         .bind(tenant_id).fetch_one(&state.db).await?;
+    verify_offline_at(state, &bind_address, &domain).await
+}
+
+/// Confirm the runtime at `bind_address` no longer answers for `domain`.
+async fn verify_offline_at(state: &Shared, bind_address: &str, domain: &str) -> Result<()> {
     let url = format!("http://{bind_address}/api/v2/instance");
     for _ in 0..30 {
         // A runtime left with a single tenant answers every host with that
         // tenant, so only a response naming this domain means it is served.
-        let serving = match state.client.get(&url).header("Host", &domain).send().await {
+        let serving = match state.client.get(&url).header("Host", domain).send().await {
             Ok(response) if response.status().is_success() => response
                 .json::<serde_json::Value>()
                 .await
                 .ok()
                 .and_then(|body| body.get("domain")?.as_str().map(str::to_owned))
-                .is_none_or(|served| served.eq_ignore_ascii_case(&domain)),
+                .is_none_or(|served| served.eq_ignore_ascii_case(domain)),
             Ok(_) => false,
             // An unreachable runtime is not serving it either, but that is not
             // evidence the reload took; ask again.
@@ -4049,8 +4086,18 @@ async fn create_tenant_database(state: &Shared, tenant_id: Uuid) -> Result<()> {
 }
 
 async fn migrate_tenant_database(state: &Shared, tenant_id: Uuid) -> Result<()> {
-    let (database_url, tenant_directory) = sqlx::query_as::<_, (String, String)>("SELECT c.database_url,r.tenant_directory FROM tenant_configuration c JOIN tenants t ON t.id=c.tenant_id JOIN runtimes r ON r.id=t.runtime_id WHERE c.tenant_id=$1")
-        .bind(tenant_id).fetch_one(&state.db).await?;
+    migrate_tenant_database_on(state, tenant_id, None).await
+}
+
+/// Migrate the tenant's database with `runtime_id`'s release, or its own
+/// runtime's.
+async fn migrate_tenant_database_on(
+    state: &Shared,
+    tenant_id: Uuid,
+    runtime_id: Option<Uuid>,
+) -> Result<()> {
+    let (database_url, tenant_directory) = sqlx::query_as::<_, (String, String)>("SELECT c.database_url,r.tenant_directory FROM tenant_configuration c JOIN tenants t ON t.id=c.tenant_id JOIN runtimes r ON r.id=COALESCE($2,t.runtime_id) WHERE c.tenant_id=$1")
+        .bind(tenant_id).bind(runtime_id).fetch_one(&state.db).await?;
     let runtime_root = PathBuf::from(tenant_directory)
         .parent()
         .context("runtime directory has no parent")?
@@ -4293,9 +4340,16 @@ fn import_failure(stderr: &str) -> String {
 }
 
 async fn render_provisioned_tenant(state: &Shared, tenant_id: Uuid) -> Result<()> {
+    render_tenant_on(state, tenant_id, None).await
+}
+
+/// Render the tenant's file into `runtime_id`'s directory, or its own
+/// runtime's: a moving tenant is rendered onto its new runtime before it
+/// belongs to it.
+async fn render_tenant_on(state: &Shared, tenant_id: Uuid, runtime_id: Option<Uuid>) -> Result<()> {
     let row = sqlx::query_as::<_, (SqlJson<StoredTenant>, SqlJson<StoredConfig>, String, String, String, String, i64)>(
-        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,i.address,r.tenant_directory,r.bind_address,t.config_revision FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
-    ).bind(tenant_id).fetch_one(&state.db).await?;
+        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,i.address,r.tenant_directory,r.bind_address,t.config_revision FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=COALESCE($2,t.runtime_id) JOIN instances i ON i.id=r.instance_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
+    ).bind(tenant_id).bind(runtime_id).fetch_one(&state.db).await?;
     let (SqlJson(tenant), SqlJson(config), bucket, runtime_host, directory, bind_address, revision) =
         row;
     let configured_host = std::env::var("CONTROL_RUNTIME_HOST").unwrap_or_default();
@@ -4395,10 +4449,21 @@ async fn reload_provisioned_runtime(state: &Shared, tenant_id: Uuid) -> Result<(
 /// runtime is not served afterwards by design, and whether it is gone is the
 /// `offline` step's to check.
 async fn reload_runtime(state: &Shared, tenant_id: Uuid, serves: bool) -> Result<()> {
+    reload_runtime_on(state, tenant_id, None, serves).await
+}
+
+/// [`reload_runtime`], of `runtime_id` rather than the tenant's own runtime.
+async fn reload_runtime_on(
+    state: &Shared,
+    tenant_id: Uuid,
+    runtime_id: Option<Uuid>,
+    serves: bool,
+) -> Result<()> {
     let (runtime_id, service_label, router_enabled, tenant_directory, bind_address, domain) = sqlx::query_as::<_, (Uuid, String, bool, String, String, String)>(
-        "SELECT r.id,r.service_label,r.router_enabled,r.tenant_directory,r.bind_address,t.domain FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
+        "SELECT r.id,r.service_label,r.router_enabled,r.tenant_directory,r.bind_address,t.domain FROM tenants t JOIN runtimes r ON r.id=COALESCE($2,t.runtime_id) WHERE t.id=$1",
     )
     .bind(tenant_id)
+    .bind(runtime_id)
     .fetch_one(&state.db)
     .await?;
     let service_label =
@@ -4624,7 +4689,7 @@ async fn runtimes(
     headers: HeaderMap,
 ) -> Result<Json<Vec<RuntimeSummary>>, ApiError> {
     admin_user(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT r.id,r.instance_id,r.name,i.name instance_name,i.address instance_address,r.bind_address,r.service_label,r.tenant_directory,r.origin_hostname,r.router_enabled,r.blue_bind_address,r.green_bind_address,(SELECT count(*) FROM tenants WHERE runtime_id=r.id) tenant_count,r.auto_deploy_enabled,r.deployed_ref,o.id release_operation_id,o.status release_status,e.message release_message FROM runtimes r JOIN instances i ON i.id=r.instance_id LEFT JOIN LATERAL (SELECT id,status FROM operations WHERE runtime_id=r.id AND kind='runtime_release' ORDER BY created_at DESC LIMIT 1) o ON true LEFT JOIN LATERAL (SELECT string_agg(message,E'\\n' ORDER BY id) message FROM operation_events WHERE operation_id=o.id) e ON true ORDER BY i.name,r.name").fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT r.id,r.instance_id,r.name,i.name instance_name,i.address instance_address,r.bind_address,r.service_label,r.tenant_directory,r.origin_hostname,r.router_enabled,r.blue_bind_address,r.green_bind_address,(SELECT count(*) FROM tenants WHERE runtime_id=r.id) tenant_count,r.auto_deploy_enabled,r.deployed_ref,r.channel_id,o.id release_operation_id,o.status release_status,e.message release_message FROM runtimes r JOIN instances i ON i.id=r.instance_id LEFT JOIN LATERAL (SELECT id,status FROM operations WHERE runtime_id=r.id AND kind='runtime_release' ORDER BY created_at DESC LIMIT 1) o ON true LEFT JOIN LATERAL (SELECT string_agg(message,E'\\n' ORDER BY id) message FROM operation_events WHERE operation_id=o.id) e ON true ORDER BY i.name,r.name").fetch_all(&s.db).await?))
 }
 
 async fn set_automatic_release(
@@ -4656,26 +4721,38 @@ async fn release_runtime(
     Path(id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
-    let operation_id = queue_runtime_release(s, id, Some(admin_user_id), "manual").await?;
+    let operation_id =
+        queue_runtime_release(s, id, Some(admin_user_id), "manual", None, None).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(serde_json::json!({"operation_id": operation_id})),
     ))
 }
 
-async fn queue_runtime_release(
+/// Start releasing a runtime: `target` names the commit a rollout deploys, and
+/// is the newest build when absent.
+pub(crate) async fn queue_runtime_release(
     state: Shared,
     runtime_id: Uuid,
     requested_by: Option<Uuid>,
     trigger: &str,
+    target: Option<String>,
+    rollout_id: Option<Uuid>,
 ) -> Result<Uuid, ApiError> {
     let row = sqlx::query_as::<_, (String, String, String, String, String, bool, String, String, String)>(
-        "SELECT r.name,i.address,r.tenant_directory,r.service_label,r.bind_address,r.router_enabled,r.blue_bind_address,r.green_bind_address,(SELECT domain FROM tenants WHERE runtime_id=r.id AND lifecycle_state='ready' ORDER BY created_at LIMIT 1) FROM runtimes r JOIN instances i ON i.id=r.instance_id WHERE r.id=$1",
+        "SELECT r.name,i.address,r.tenant_directory,r.service_label,r.bind_address,r.router_enabled,r.blue_bind_address,r.green_bind_address,COALESCE((SELECT domain FROM tenants WHERE runtime_id=r.id AND lifecycle_state='ready' ORDER BY created_at LIMIT 1),'') FROM runtimes r JOIN instances i ON i.id=r.instance_id WHERE r.id=$1",
     )
     .bind(runtime_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Runtime not found.".into()))?;
+    // A release is checked against a tenant the runtime serves.
+    if row.8.is_empty() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "The runtime serves no tenant to check a release against.".into(),
+        ));
+    }
     if !is_safe_runtime_name(&row.0)
         || !is_safe_remote_host(&row.1)
         || !is_safe_absolute_path(FsPath::new(&row.2))
@@ -4698,6 +4775,15 @@ async fn queue_runtime_release(
     if sqlx::query_scalar::<_, bool>("SELECT COALESCE(deploy_until > now(),false) FROM control_plane_maintenance WHERE singleton").fetch_one(&mut *tx).await? {
         return Err(ApiError(StatusCode::SERVICE_UNAVAILABLE, "Control plane deployment is in progress. Try again shortly.".into()));
     }
+    // A moving tenant is migrated by its new runtime's binary and served by
+    // both for a while; a release of either in the middle of that would migrate
+    // or serve it with a binary the move did not check.
+    if tenant_move::holds_runtime(&mut tx, runtime_id).await? {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "A tenant is moving on or off this runtime; release it once the move finishes.".into(),
+        ));
+    }
     let operation_id = Uuid::new_v4();
     let inserted: Option<Uuid> = sqlx::query_scalar("INSERT INTO operations(id,runtime_id,kind,status,requested_by,detail,started_at) VALUES($1,$2,'runtime_release','running',$3,jsonb_build_object('trigger',$4),now()) ON CONFLICT DO NOTHING RETURNING id")
         .bind(operation_id).bind(runtime_id).bind(requested_by).bind(trigger).fetch_optional(&mut *tx).await?;
@@ -4708,8 +4794,8 @@ async fn queue_runtime_release(
         ));
     };
     let deployment_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO runtime_deployments(id,runtime_id,operation_id,trigger,status,started_at) VALUES($1,$2,$3,$4,'queued',now())")
-        .bind(deployment_id).bind(runtime_id).bind(operation_id).bind(trigger).execute(&mut *tx).await?;
+    sqlx::query("INSERT INTO runtime_deployments(id,runtime_id,operation_id,trigger,status,started_at,rollout_id) VALUES($1,$2,$3,$4,'queued',now(),$5)")
+        .bind(deployment_id).bind(runtime_id).bind(operation_id).bind(trigger).bind(rollout_id).execute(&mut *tx).await?;
     tx.commit().await?;
     tokio::spawn(run_runtime_release(
         state,
@@ -4717,6 +4803,7 @@ async fn queue_runtime_release(
         deployment_id,
         runtime_id,
         row,
+        target,
     ));
     Ok(operation_id)
 }
@@ -4737,6 +4824,7 @@ async fn run_runtime_release(
         String,
         String,
     ),
+    target: Option<String>,
 ) {
     let (
         _,
@@ -4760,7 +4848,7 @@ async fn run_runtime_release(
         .bind(deployment_id)
         .execute(&state.db)
         .await;
-    let result = match build_release(&state.db, operation_id).await {
+    let result = match build_release(&state.db, operation_id, target.as_deref()).await {
         Ok(release) => {
             let release_id = Uuid::new_v4();
             let artifact_path = release.1.to_string_lossy().to_string();
@@ -4816,6 +4904,7 @@ async fn run_runtime_release(
             if let Ok(root) = control_root() {
                 prune_central_releases(&root, &reference).await;
             }
+            check_released_tenants(&state, operation_id, deployment_id, runtime_id).await;
             release_event(&state.db, operation_id, "Release completed successfully.").await;
         }
         Err(message) => {
@@ -4933,9 +5022,15 @@ fn central_paths() -> Result<(PathBuf, PathBuf), String> {
     Ok((root, source))
 }
 
-async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathBuf), String> {
+/// Build or fetch the release to deploy: `target`, a commit on `main` that a
+/// rollout names, or the newest one when an operator deploys by hand.
+async fn build_release(
+    db: &PgPool,
+    operation_id: Uuid,
+    target: Option<&str>,
+) -> Result<(String, PathBuf), String> {
     if let Some(ci) = ci_release::Source::from_env()? {
-        return fetch_ci_release(db, operation_id, &ci).await;
+        return fetch_ci_release(db, operation_id, &ci, target).await;
     }
     let (root, source) = central_paths()?;
     let source_text = source.to_string_lossy().to_string();
@@ -4969,8 +5064,33 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
         None,
     )
     .await?;
+    // A named commit must be on main: a rollout never deploys a branch.
+    let revision = match target {
+        Some(target) => {
+            if !is_git_sha(target) {
+                return Err("The release to deploy is not a commit.".into());
+            }
+            command_status(
+                "Release ancestry check",
+                "git",
+                &[
+                    "-C",
+                    &source_text,
+                    "merge-base",
+                    "--is-ancestor",
+                    target,
+                    "origin/main",
+                ],
+                None,
+            )
+            .await
+            .map_err(|_| "The release to deploy is not on origin/main.".to_string())?;
+            target.to_owned()
+        }
+        None => "origin/main".to_owned(),
+    };
     let output = tokio::process::Command::new("git")
-        .args(["-C", &source_text, "rev-parse", "origin/main"])
+        .args(["-C", &source_text, "rev-parse", &revision])
         .stdin(Stdio::null())
         .output()
         .await
@@ -4988,7 +5108,10 @@ async fn build_release(db: &PgPool, operation_id: Uuid) -> Result<(String, PathB
     release_event(
         db,
         operation_id,
-        &format!("Resolved origin/main to release {}.", &reference[..12]),
+        &match target {
+            Some(_) => format!("Building the rollout's release {}.", &reference[..12]),
+            None => format!("Resolved origin/main to release {}.", &reference[..12]),
+        },
     )
     .await;
     let artifact = root.join("releases").join(&reference);
@@ -5188,26 +5311,42 @@ async fn fetch_ci_release(
     db: &PgPool,
     operation_id: Uuid,
     ci: &ci_release::Source,
+    target: Option<&str>,
 ) -> Result<(String, PathBuf), String> {
     let root = control_root()?;
-    release_event(
-        db,
-        operation_id,
-        &format!("Finding the newest CI build of {} main.", ci.repository()),
-    )
-    .await;
-    let built = ci
-        .latest_build()
-        .await?
-        .ok_or_else(|| "CI has not built main successfully yet.".to_string())?;
+    let built = match target {
+        Some(target) => {
+            release_event(
+                db,
+                operation_id,
+                &format!(
+                    "Finding CI's build of {} for release {}.",
+                    ci.repository(),
+                    &target[..12]
+                ),
+            )
+            .await;
+            ci.build_for(target)
+                .await?
+                .ok_or_else(|| "CI has no successful build of this release.".to_string())?
+        }
+        None => {
+            release_event(
+                db,
+                operation_id,
+                &format!("Finding the newest CI build of {} main.", ci.repository()),
+            )
+            .await;
+            ci.latest_build()
+                .await?
+                .ok_or_else(|| "CI has not built main successfully yet.".to_string())?
+        }
+    };
     let reference = built.reference.clone();
     release_event(
         db,
         operation_id,
-        &format!(
-            "Resolved CI's newest build to release {}.",
-            &reference[..12]
-        ),
+        &format!("Resolved CI's build to release {}.", &reference[..12]),
     )
     .await;
     let artifact = root.join("releases").join(&reference);
@@ -5493,28 +5632,7 @@ async fn release_recovery_reconciler(state: Shared) {
     }
 }
 
-/// How many times automatic deployment tries one commit on a runtime. A commit
-/// that keeps failing waits for a newer one or for an operator's manual
-/// release, rather than being tried every few minutes forever.
-const AUTOMATIC_RELEASE_ATTEMPTS: i64 = 3;
-
-async fn automatic_release_reconciler(state: Shared) {
-    let interval = 300;
-    loop {
-        if let Some(reference) = latest_remote_ref().await {
-            let rows = sqlx::query_scalar::<_, Uuid>("SELECT r.id FROM runtimes r WHERE r.auto_deploy_enabled AND r.deployed_ref IS DISTINCT FROM $1 AND (SELECT count(*) FROM runtime_deployments d JOIN eunha_releases e ON e.id=d.release_id WHERE d.runtime_id=r.id AND d.trigger='automatic' AND d.status IN ('failed','rolled_back') AND e.git_sha=$1) < $2 ORDER BY r.name LIMIT 1")
-                .bind(&reference).bind(AUTOMATIC_RELEASE_ATTEMPTS).fetch_all(&state.db).await;
-            if let Ok(rows) = rows
-                && let Some(runtime_id) = rows.into_iter().next()
-            {
-                let _ = queue_runtime_release(state.clone(), runtime_id, None, "automatic").await;
-            }
-        }
-        tokio::time::sleep(Duration::from_secs(interval)).await;
-    }
-}
-
-async fn latest_remote_ref() -> Option<String> {
+pub(crate) async fn latest_remote_ref() -> Option<String> {
     // With CI builds, the newest built commit rather than the head of main,
     // so automatic deployment queues a release only once there is one to
     // download.
@@ -5609,30 +5727,7 @@ async fn health_reconciler(state: Shared) {
         .await;
         if let Ok(rows) = rows {
             for (id, domain, bind_address) in rows {
-                let result = state
-                    .client
-                    // The cheap endpoint: one trivial query, where
-                    // `/api/v2/instance` counts distinct domains and posting
-                    // accounts and takes a pool connection per statistic. This
-                    // runs against every tenant forever, so it has to be the
-                    // cheapest thing that still proves the database answers.
-                    .get(format!("http://{bind_address}/api/eunha/v1/health"))
-                    .header("Host", domain)
-                    .send()
-                    .await;
-                let (observed, error) = match result {
-                    Ok(response) if response.status().is_success() => ("healthy", None),
-                    Ok(response) => (
-                        "unhealthy",
-                        Some(format!("Health endpoint returned {}", response.status())),
-                    ),
-                    Err(_) => (
-                        "unhealthy",
-                        Some("Health endpoint was unreachable.".to_string()),
-                    ),
-                };
-                let _ = sqlx::query("UPDATE tenants SET observed_state=$1,observed_at=now(),observation_error=$2 WHERE id=$3")
-                    .bind(observed).bind(error).bind(id).execute(&state.db).await;
+                observe_tenant(&state, id, &domain, &bind_address).await;
             }
         }
         // A tenant's pool releases a connection once it has been unused for
@@ -5641,6 +5736,115 @@ async fn health_reconciler(state: Shared) {
         // above that timeout, and `TENANT_HEALTH_STALE_AFTER` above this.
         tokio::time::sleep(HEALTH_SWEEP_INTERVAL).await;
     }
+}
+
+/// Ask a tenant whether it is well, and record the answer as its observed
+/// state. Returns whether it was.
+async fn observe_tenant(state: &Shared, id: Uuid, domain: &str, bind_address: &str) -> bool {
+    let result = state
+        .client
+        // The cheap endpoint: one trivial query, where `/api/v2/instance`
+        // counts distinct domains and posting accounts and takes a pool
+        // connection per statistic. This runs against every tenant forever,
+        // so it has to be the cheapest thing that still proves the database
+        // answers.
+        .get(format!("http://{bind_address}/api/eunha/v1/health"))
+        .header("Host", domain)
+        .send()
+        .await;
+    let (observed, error) = match result {
+        Ok(response) if response.status().is_success() => ("healthy", None),
+        Ok(response) => (
+            "unhealthy",
+            Some(format!("Health endpoint returned {}", response.status())),
+        ),
+        Err(_) => (
+            "unhealthy",
+            Some("Health endpoint was unreachable.".to_string()),
+        ),
+    };
+    let _ = sqlx::query(
+        "UPDATE tenants SET observed_state=$1,observed_at=now(),observation_error=$2 WHERE id=$3",
+    )
+    .bind(observed)
+    .bind(error)
+    .bind(id)
+    .execute(&state.db)
+    .await;
+    observed == "healthy"
+}
+
+/// After a release, ask every tenant on the runtime, not only the one the
+/// switch was checked against. A tenant that came back unwell holds the
+/// rollout, so the next runtime does not get the release that broke it.
+async fn check_released_tenants(
+    state: &Shared,
+    operation_id: Uuid,
+    deployment_id: Uuid,
+    runtime_id: Uuid,
+) {
+    let Ok(tenants) = sqlx::query_as::<_, (Uuid, String, String)>(
+        "SELECT t.id,t.domain,r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.runtime_id=$1 AND t.desired_state='running' AND t.lifecycle_state='ready' ORDER BY t.domain",
+    )
+    .bind(runtime_id)
+    .fetch_all(&state.db)
+    .await
+    else {
+        release_event(
+            &state.db,
+            operation_id,
+            "The runtime's tenants could not be listed to check them.",
+        )
+        .await;
+        return;
+    };
+    let mut unhealthy = Vec::new();
+    for (id, domain, bind_address) in &tenants {
+        // A tenant that has just been restarted can take a moment to answer.
+        let mut healthy = false;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            if observe_tenant(state, *id, domain, bind_address).await {
+                healthy = true;
+                break;
+            }
+        }
+        if !healthy {
+            unhealthy.push(domain.clone());
+        }
+    }
+    let _ = sqlx::query(
+        "UPDATE runtime_deployments SET tenants_checked=$1,tenants_unhealthy=$2 WHERE id=$3",
+    )
+    .bind(i32::try_from(tenants.len()).unwrap_or(i32::MAX))
+    .bind(i32::try_from(unhealthy.len()).unwrap_or(i32::MAX))
+    .bind(deployment_id)
+    .execute(&state.db)
+    .await;
+    let message = if unhealthy.is_empty() {
+        format!(
+            "All {} tenants on the runtime answered healthy.",
+            tenants.len()
+        )
+    } else {
+        let mut names = unhealthy
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        if unhealthy.len() > 5 {
+            names.push_str(", …");
+        }
+        format!(
+            "{} of {} tenants on the runtime did not answer healthy: {names}.",
+            unhealthy.len(),
+            tenants.len()
+        )
+    };
+    release_event(&state.db, operation_id, &message).await;
 }
 
 /// How long between health sweeps over every running tenant.

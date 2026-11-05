@@ -252,6 +252,7 @@ async fn execute(state: &Shared, job: &Job) -> Next {
         "deprovision" => lifecycle(state, job.tenant_id, &DEPROVISION).await,
         "purge" => lifecycle(state, job.tenant_id, &PURGE).await,
         "domain_change" => domain_change(state, job.tenant_id).await,
+        "runtime_move" => crate::tenant_move::run(state, job.tenant_id, job.failures).await,
         kind => {
             tracing::error!(kind, "unknown lifecycle job");
             Next::Done

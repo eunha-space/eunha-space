@@ -125,6 +125,27 @@ impl Source {
         newest(runs.workflow_runs)
     }
 
+    /// The successful build of one commit on `main`, which is what a rollout
+    /// deploys: every runtime it reaches gets the same build, however many
+    /// commits land while it soaks.
+    pub async fn build_for(&self, reference: &str) -> Result<Option<Built>, String> {
+        if !crate::is_git_sha(reference) {
+            return Err("The release to deploy is not a commit.".into());
+        }
+        let runs: Runs = self
+            .json(&format!(
+                "actions/workflows/{WORKFLOW}/runs?branch=main&event=push&status=success&head_sha={reference}&per_page=1"
+            ))
+            .await?;
+        let built = newest(runs.workflow_runs)?;
+        match built {
+            Some(built) if built.reference != reference => {
+                Err("GitHub named a build of another commit.".into())
+            }
+            built => Ok(built),
+        }
+    }
+
     pub async fn artifact(&self, built: &Built) -> Result<Artifact, String> {
         let artifacts: Artifacts = self
             .json(&format!(

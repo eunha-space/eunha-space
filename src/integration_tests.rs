@@ -364,7 +364,7 @@ async fn deployment_lease_prevents_runtime_release_admission(pool: PgPool) {
     let (runtime, _) = fixture(&pool).await;
     tenant(&pool, runtime).await;
     sqlx::query("UPDATE control_plane_maintenance SET deploy_until=now()+interval '30 minutes' WHERE singleton").execute(&pool).await.unwrap();
-    let error = queue_runtime_release(state(pool.clone()), runtime, None, "test")
+    let error = queue_runtime_release(state(pool.clone()), runtime, None, "test", None, None)
         .await
         .unwrap_err();
     assert_eq!(error.0, StatusCode::SERVICE_UNAVAILABLE);
@@ -407,7 +407,7 @@ async fn failed_release_admission_leaves_no_orphan_operation(pool: PgPool) {
     tenant(&pool, runtime).await;
     sqlx::raw_sql("CREATE FUNCTION fail_deployment() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'simulated write failure'; END $$; CREATE TRIGGER fail_deployment BEFORE INSERT ON runtime_deployments FOR EACH ROW EXECUTE FUNCTION fail_deployment();")
         .execute(&pool).await.unwrap();
-    let error = queue_runtime_release(state(pool.clone()), runtime, None, "test")
+    let error = queue_runtime_release(state(pool.clone()), runtime, None, "test", None, None)
         .await
         .unwrap_err();
     assert_eq!(error.0, StatusCode::INTERNAL_SERVER_ERROR);
@@ -3819,4 +3819,307 @@ async fn an_administrator_signs_in_as_a_customer_and_comes_back(pool: PgPool) {
         customer(&masked, &pool).await.unwrap_err().0,
         StatusCode::UNAUTHORIZED
     );
+}
+
+/// A second runtime on the fixture's instance, in `channel`.
+async fn second_runtime(pool: &PgPool, first: Uuid, name: &str) -> Uuid {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO runtimes(id,name,instance_id,tenant_directory,service_label,binary_path,bind_address,blue_bind_address,green_bind_address,origin_hostname,channel_id) SELECT $1,$2,instance_id,'/tmp/'||$2,$2||'.runtime','/tmp/eunha','127.0.0.1:'||(60100+(SELECT count(*) FROM runtimes)),'127.0.0.1:'||(61100+2*(SELECT count(*) FROM runtimes)),'127.0.0.1:'||(61101+2*(SELECT count(*) FROM runtimes)),$2||'.origin.example',channel_id FROM runtimes WHERE id=$3")
+        .bind(id).bind(name).bind(first).execute(pool).await.unwrap();
+    id
+}
+
+async fn channel_id(pool: &PgPool, name: &str) -> Uuid {
+    sqlx::query_scalar("SELECT id FROM release_channels WHERE name=$1")
+        .bind(name)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn ready_tenant(pool: &PgPool, runtime: Uuid) -> Uuid {
+    let id = tenant(pool, runtime).await;
+    sqlx::query("UPDATE tenants SET lifecycle_state='ready' WHERE id=$1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+async fn deployed(pool: &PgPool, runtime: Uuid, sha: &str) {
+    sqlx::query("INSERT INTO eunha_releases(id,git_sha,artifact_path,build_status) VALUES($1,$2,'/tmp','ready') ON CONFLICT DO NOTHING")
+        .bind(Uuid::new_v4()).bind(sha).execute(pool).await.unwrap();
+    sqlx::query("UPDATE runtimes SET deployed_ref=$2 WHERE id=$1")
+        .bind(runtime)
+        .bind(sha)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn existing_runtimes_land_in_stable_and_a_rollout_starts_with_canary(pool: PgPool) {
+    let (stable, _) = fixture(&pool).await;
+    // The fixture inserts after the migration; put it where the migration
+    // puts every runtime it finds.
+    sqlx::query(
+        "UPDATE runtimes SET channel_id=(SELECT id FROM release_channels WHERE name='stable')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let canary = second_runtime(&pool, stable, "canary-a").await;
+    sqlx::query("UPDATE runtimes SET auto_deploy_enabled=true")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE runtimes SET channel_id=$2 WHERE id=$1")
+        .bind(canary)
+        .bind(channel_id(&pool, "canary").await)
+        .execute(&pool)
+        .await
+        .unwrap();
+    ready_tenant(&pool, stable).await;
+    ready_tenant(&pool, canary).await;
+
+    let first = "a".repeat(40);
+    assert!(rollout::begin(&pool, &first).await.unwrap());
+    assert!(!rollout::begin(&pool, &first).await.unwrap());
+    let active = rollout::active(&pool).await.unwrap().unwrap();
+    let channels = rollout::channels(&pool, &active).await.unwrap();
+    assert_eq!(
+        channels.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        ["canary", "stable"]
+    );
+    assert_eq!(
+        rollout::plan(&channels, false, OffsetDateTime::now_utc()),
+        rollout::Action::Release {
+            channel_id: channels[0].id,
+            runtime_id: canary
+        }
+    );
+
+    // A pause is a freeze: the next build waits paused too.
+    sqlx::query("UPDATE release_rollouts SET status='paused' WHERE id=$1")
+        .bind(active.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let second = "b".repeat(40);
+    assert!(rollout::begin(&pool, &second).await.unwrap());
+    let statuses: Vec<(String, String)> =
+        sqlx::query_as("SELECT git_sha,status FROM release_rollouts ORDER BY created_at")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        statuses,
+        [(first, "superseded".into()), (second, "paused".into())]
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_move_is_admitted_only_where_it_is_safe_and_holds_its_runtimes(pool: PgPool) {
+    let (from, _) = fixture(&pool).await;
+    let to = second_runtime(&pool, from, "next").await;
+    let shared = state(pool.clone());
+    let moving = ready_tenant(&pool, from).await;
+
+    // The last tenant cannot leave: eunha refuses an empty tenants directory.
+    deployed(&pool, from, &"a".repeat(40)).await;
+    deployed(&pool, to, &"a".repeat(40)).await;
+    let refused = tenant_move::begin(&shared, moving, to, None, "127.0.0.1")
+        .await
+        .unwrap_err();
+    assert_eq!(refused.0, StatusCode::CONFLICT);
+    assert!(refused.1.contains("last tenant"), "{}", refused.1);
+    ready_tenant(&pool, from).await;
+
+    // Only runtimes this control plane manages.
+    let refused = tenant_move::begin(&shared, moving, to, None, "")
+        .await
+        .unwrap_err();
+    assert!(
+        refused.1.contains("instance this control plane manages"),
+        "{}",
+        refused.1
+    );
+
+    // Not to an older release than the one that migrated its database.
+    deployed(&pool, to, &"0".repeat(40)).await;
+    sqlx::query("UPDATE eunha_releases SET created_at=now()-interval '1 day' WHERE git_sha=$1")
+        .bind("0".repeat(40))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let refused = tenant_move::begin(&shared, moving, to, None, "127.0.0.1")
+        .await
+        .unwrap_err();
+    assert!(refused.1.contains("older release"), "{}", refused.1);
+    deployed(&pool, to, &"a".repeat(40)).await;
+
+    // An existing domain is routed by infrastructure, which a move cannot change.
+    sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary,cname_target) VALUES($1,$2,$3,'legacy','active',true,'x')")
+        .bind(Uuid::new_v4()).bind(moving).bind(format!("legacy-{}.example", moving.simple())).execute(&pool).await.unwrap();
+    let refused = tenant_move::begin(&shared, moving, to, None, "127.0.0.1")
+        .await
+        .unwrap_err();
+    assert!(refused.1.contains("existing domain"), "{}", refused.1);
+    sqlx::query("DELETE FROM tenant_domains WHERE tenant_id=$1")
+        .bind(moving)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (move_id, _) = tenant_move::begin(&shared, moving, to, None, "127.0.0.1")
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT kind FROM lifecycle_jobs WHERE tenant_id=$1 AND finished_at IS NULL"
+        )
+        .bind(moving)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        "runtime_move"
+    );
+    // Once at a time.
+    let refused = tenant_move::begin(&shared, moving, to, None, "127.0.0.1")
+        .await
+        .unwrap_err();
+    assert_eq!(refused.0, StatusCode::CONFLICT);
+    // Neither runtime is released while it is open.
+    ready_tenant(&pool, to).await;
+    for runtime in [from, to] {
+        let refused = queue_runtime_release(shared.clone(), runtime, None, "manual", None, None)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, StatusCode::CONFLICT);
+        assert!(refused.1.contains("moving"), "{}", refused.1);
+    }
+    // A move that failed after the switch stays open; one finished does not.
+    sqlx::query("UPDATE tenant_moves SET status='failed' WHERE id=$1")
+        .bind(move_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    assert!(tenant_move::holds_runtime(&mut tx, from).await.unwrap());
+    tx.rollback().await.unwrap();
+    sqlx::query("UPDATE tenant_moves SET finished_at=now() WHERE id=$1")
+        .bind(move_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    assert!(!tenant_move::holds_runtime(&mut tx, from).await.unwrap());
+    tx.rollback().await.unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn channels_keep_their_order_and_only_empty_ones_go(pool: PgPool) {
+    let (runtime, headers) = fixture(&pool).await;
+    let shared = state(pool.clone());
+    let (status, Json(created)) = rollout::create_channel(
+        State(shared.clone()),
+        headers.clone(),
+        Json(
+            serde_json::from_value(serde_json::json!({"name": "Early", "soak_minutes": 30}))
+                .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(status, StatusCode::CREATED);
+    let early: Uuid = serde_json::from_value(created["id"].clone()).unwrap();
+    let order = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, String>("SELECT name FROM release_channels ORDER BY position")
+            .fetch_all(&pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(order(pool.clone()).await, ["canary", "stable", "early"]);
+    rollout::reorder_channel(
+        State(shared.clone()),
+        headers.clone(),
+        Path(early),
+        Json(serde_json::from_value(serde_json::json!({"direction": "earlier"})).unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(order(pool.clone()).await, ["canary", "early", "stable"]);
+
+    rollout::assign_runtime(
+        State(shared.clone()),
+        headers.clone(),
+        Path(runtime),
+        Json(serde_json::from_value(serde_json::json!({"channel_id": early})).unwrap()),
+    )
+    .await
+    .unwrap();
+    let refused = rollout::delete_channel(State(shared.clone()), headers.clone(), Path(early))
+        .await
+        .unwrap_err();
+    assert_eq!(refused.0, StatusCode::CONFLICT);
+    let duplicate = rollout::create_channel(
+        State(shared.clone()),
+        headers.clone(),
+        Json(
+            serde_json::from_value(serde_json::json!({"name": "early", "soak_minutes": 0}))
+                .unwrap(),
+        ),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(duplicate.0, StatusCode::CONFLICT);
+    rollout::assign_runtime(
+        State(shared.clone()),
+        headers.clone(),
+        Path(runtime),
+        Json(serde_json::from_value(serde_json::json!({"channel_id": null})).unwrap()),
+    )
+    .await
+    .unwrap();
+    rollout::delete_channel(State(shared), headers, Path(early))
+        .await
+        .unwrap();
+    assert_eq!(order(pool).await, ["canary", "stable"]);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_rollout_never_takes_a_runtime_back_to_an_older_build(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    sqlx::query("UPDATE runtimes SET channel_id=(SELECT id FROM release_channels WHERE name='stable'),auto_deploy_enabled=true")
+        .execute(&pool).await.unwrap();
+    ready_tenant(&pool, runtime).await;
+    let rolling = "a".repeat(40);
+    deployed(&pool, runtime, &rolling).await;
+    rollout::begin(&pool, &rolling).await.unwrap();
+    // An operator deploys a newer build by hand.
+    let newer = "c".repeat(40);
+    deployed(&pool, runtime, &newer).await;
+    sqlx::query("UPDATE eunha_releases SET created_at=now()+interval '1 minute' WHERE git_sha=$1")
+        .bind(&newer)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let active = rollout::active(&pool).await.unwrap().unwrap();
+    let channels = rollout::channels(&pool, &active).await.unwrap();
+    assert!(channels[1].runtimes[0].on_release);
+    // An older one is still taken forward.
+    let older = "0".repeat(40);
+    deployed(&pool, runtime, &older).await;
+    sqlx::query("UPDATE eunha_releases SET created_at=now()-interval '1 day' WHERE git_sha=$1")
+        .bind(&older)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let channels = rollout::channels(&pool, &active).await.unwrap();
+    assert!(!channels[1].runtimes[0].on_release);
 }
