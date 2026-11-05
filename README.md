@@ -59,8 +59,10 @@ described in [docs/connection-scaling.md](docs/connection-scaling.md).
 
 ## Customer self-service
 
-The public portal at `/` lets customers register, verify their email, and
-provision up to two instances. `/admin` remains operator-only. Verification
+`/` explains the service to signed-out visitors and is the customer's instance
+list once signed in. The portal lets customers register at `/signup`, sign in at
+`/signin`, verify their email, and provision up to two instances. `/admin`
+remains operator-only and sends anyone signed out to `/signin`. Verification
 mail uses SMTP and requires process-only configuration:
 
 ```sh

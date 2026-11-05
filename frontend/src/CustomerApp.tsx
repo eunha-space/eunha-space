@@ -28,6 +28,7 @@ import { LanguageToggle } from "@/i18n";
 import { CustomerInstanceDetail } from "@/CustomerInstanceDetail";
 import { CustomerAccount } from "@/CustomerAccount";
 import { CustomerCreateInstance } from "@/CustomerCreateInstance";
+import { Landing } from "@/Landing";
 
 export function CustomerApp() {
   const { i18n } = useLingui();
@@ -36,7 +37,7 @@ export function CustomerApp() {
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [tenants, setTenants] = useState<Tenant[]>([]);
-  const [signup, setSignup] = useState(false);
+  const [signup, setSignup] = useState(location.pathname === "/signup");
   const [sent, setSent] = useState(false);
   const [verified] = useState(
     () => new URLSearchParams(location.search).get("verified") === "1",
@@ -50,6 +51,10 @@ export function CustomerApp() {
     const nextTenants = await api<Tenant[]>("/customer/tenants");
     setCustomer(me);
     setTenants(nextTenants);
+    // Signed in, these paths have nothing to show; `/` is the instance list.
+    if (location.pathname === "/signin" || location.pathname === "/signup") {
+      history.replaceState(null, "", "/");
+    }
   }
   useEffect(() => {
     const token = new URLSearchParams(location.search).get("token");
@@ -119,6 +124,7 @@ export function CustomerApp() {
     );
   }
   if (!customer) {
+    if (location.pathname === "/" && !verified) return <Landing />;
     return (
       <main className="grid flex-1 place-items-center p-4">
         <div className="fixed top-5 right-5">
@@ -129,7 +135,9 @@ export function CustomerApp() {
         </div>
         <Card className="w-full max-w-md">
           <CardHeader>
-            <Mark className="mb-4" />
+            <a href="/" aria-label={t("eunha space")} className="mb-4 w-fit">
+              <Mark />
+            </a>
             <CardTitle>
               {t(signup ? "Create your account" : "Your eunha space instances")}
             </CardTitle>
@@ -208,7 +216,10 @@ export function CustomerApp() {
                 <Button
                   type="button"
                   variant="ghost"
-                  onClick={() => setSignup(!signup)}
+                  onClick={() => {
+                    history.replaceState(null, "", signup ? "/signin" : "/signup");
+                    setSignup(!signup);
+                  }}
                 >
                   {signup
                     ? t("Already have an account? Sign in")

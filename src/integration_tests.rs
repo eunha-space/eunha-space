@@ -930,7 +930,7 @@ async fn admin_middleware_uses_user_sessions_and_checks_current_role(pool: PgPoo
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    assert_eq!(response.headers()[header::LOCATION], "/");
+    assert_eq!(response.headers()[header::LOCATION], "/signin");
     assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
     let cookie = headers[header::COOKIE].to_str().unwrap();
     for path in ["/api/admin", "/admin", "/admin/tenants"] {

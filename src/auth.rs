@@ -192,7 +192,7 @@ pub(crate) async fn require_admin_page(
     let mut response = match admin_user(request.headers(), &s.db).await {
         Ok(_) => next.run(request).await,
         Err(ApiError(StatusCode::UNAUTHORIZED, _)) => {
-            axum::response::Redirect::to("/").into_response()
+            axum::response::Redirect::to("/signin").into_response()
         }
         Err(error) => error.into_response(),
     };

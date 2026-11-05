@@ -16,6 +16,64 @@ const ko: Record<string, string> = {
   "Saved. Your instance will apply these settings shortly.": "저장되었습니다. 곧 인스턴스에 설정이 적용됩니다.",
   "Use your SMTP provider for instance emails. Port 465 uses TLS; port 587 requires STARTTLS. Enter both credentials whenever you save; saved credentials are never displayed.": "인스턴스 이메일을 내 SMTP 서비스로 발송합니다. 포트 465는 TLS를, 포트 587은 STARTTLS를 사용합니다. 저장할 때마다 사용자 이름과 비밀번호를 입력하세요. 저장된 인증 정보는 표시되지 않습니다.",
   "eunha space": "은하공간",
+  "Your own Mastodon-compatible server, run for you.":
+    "마스토돈과 호환되는 나만의 서버, 운영은 저희가 맡습니다.",
+  "eunha space hosts Eunha, a Mastodon-compatible fediverse server. Choose an address and you have a server of your own, where you can follow and be followed by people on Mastodon and across the fediverse.":
+    "은하공간은 마스토돈과 호환되는 연합우주(페디버스) 서버 은하를 호스팅하는 서비스입니다. 주소만 정하면 나만의 서버가 생기고, 마스토돈을 비롯한 연합우주 곳곳의 사람들과 서로 팔로우할 수 있습니다.",
+  "How it works": "이용 방법",
+  "Your server": "나의 서버",
+  "What is this?": "무엇인가요?",
+  "The fediverse": "연합우주(페디버스)",
+  "A network of independently run social servers that talk to each other over an open protocol, ActivityPub. Mastodon is the best known of them. It works like email: whichever server your account is on, you can reach people on the others.":
+    "각자 독립적으로 운영되는 소셜 서버들이 ActivityPub이라는 공개 프로토콜로 서로 소통하는 네트워크입니다. 그중 가장 잘 알려진 것이 마스토돈입니다. 이메일처럼 계정이 어느 서버에 있든 다른 서버의 사람들과 소통할 수 있습니다.",
+  Eunha: "은하",
+  "Free, open-source server software that reimplements Mastodon in Rust. It tracks each Mastodon release and works with Mastodon's apps.":
+    "마스토돈을 Rust로 다시 구현한 자유 오픈소스 서버 소프트웨어입니다. 마스토돈의 새 릴리스를 계속 따라가며, 마스토돈 앱을 그대로 쓸 수 있습니다.",
+  "Hosting for Eunha. We run the server and keep it up to date, so you can spend your time on your community instead.":
+    "은하 호스팅 서비스입니다. 서버 운영과 업데이트는 저희가 맡으니, 커뮤니티에만 집중하세요.",
+  "What you get": "제공 내용",
+  "An address of your own": "나만의 주소",
+  "Start with a name under eunha.space, or use a domain you own by pointing a CNAME at us. You can move to another domain later, and your followers are told where you went.":
+    "eunha.space의 하위 주소로 시작하거나, CNAME을 연결해 내 도메인을 쓸 수 있습니다. 나중에 다른 도메인으로 옮겨도 팔로워에게 새 주소가 전달됩니다.",
+  "Your server, your rules": "내 서버, 내 규칙",
+  "You are the server's owner, with its tools for members, moderation and settings. Registrations start closed, so you decide who joins.":
+    "서버의 소유자로서 회원 관리, 운영, 설정 도구를 모두 쓸 수 있습니다. 처음에는 가입이 닫혀 있어 누구를 받을지 직접 정할 수 있습니다.",
+  "The Mastodon apps you know": "익숙한 마스토돈 앱 그대로",
+  "Eunha speaks Mastodon's API, so you can keep using the Mastodon apps and clients you like.":
+    "은하는 마스토돈 API를 제공하므로, 좋아하는 마스토돈 앱과 클라이언트를 계속 쓸 수 있습니다.",
+  "Nothing to install": "설치할 것 없음",
+  "New Eunha releases and their database migrations are rolled out for you. Media storage is ready from the start.":
+    "은하의 새 릴리스와 데이터베이스 마이그레이션은 저희가 적용합니다. 미디어 저장소도 처음부터 준비되어 있습니다.",
+  "Email that works": "바로 쓰는 이메일",
+  "On an eunha.space address, your server's email is already set up. On your own domain, add your SMTP provider on the instance page.":
+    "eunha.space 주소에서는 서버 이메일이 이미 설정되어 있습니다. 내 도메인을 쓴다면 인스턴스 페이지에서 SMTP 서비스를 추가하세요.",
+  "Free to leave": "언제든 떠날 자유",
+  "Members can export their data and move their accounts, followers included, to another server. Eunha itself is open source under the AGPL.":
+    "회원은 데이터를 내보내고, 팔로워와 함께 계정을 다른 서버로 옮길 수 있습니다. 은하는 AGPL 라이선스의 오픈소스입니다.",
+  "Create an account": "계정 만들기",
+  "All you need is an email address. Follow the link we send you.":
+    "이메일 주소만 있으면 됩니다. 보내 드리는 링크를 따라가세요.",
+  "Choose a monthly plan and pay by card.": "월간 요금제를 고르고 카드로 결제하세요.",
+  "Create your instance": "인스턴스 만들기",
+  "Pick an address and an admin username. Setup runs by itself, and with your own domain it starts once the domain validates.":
+    "주소와 관리자 사용자 이름을 정하세요. 설정은 자동으로 진행되며, 내 도메인을 쓰는 경우 도메인이 확인된 뒤 시작됩니다.",
+  "Sign in to your server": "내 서버에 로그인",
+  "Create your admin password on the instance page, then sign in at your new address.":
+    "인스턴스 페이지에서 관리자 비밀번호를 만든 뒤, 새 주소에서 로그인하세요.",
+  "Paying and stopping": "결제와 해지",
+  "Plans are monthly, and you see them before you subscribe.":
+    "요금제는 월 단위이며, 구독하기 전에 확인할 수 있습니다.",
+  "Get a full refund within 7 days of a payment, with no reason needed.":
+    "결제일로부터 7일 이내에는 이유를 묻지 않고 전액 환불해 드립니다.",
+  "Cancel any time and keep the period you already paid for.":
+    "언제든지 해지할 수 있으며, 이미 결제한 기간은 그대로 이용할 수 있습니다.",
+  "If a subscription ends, your instances go offline and their data is kept. Subscribing again brings them back.":
+    "구독이 끝나면 인스턴스는 오프라인이 되지만 데이터는 보관됩니다. 다시 구독하면 되살아납니다.",
+  "A deleted instance can be restored for seven days.":
+    "삭제한 인스턴스는 7일 동안 복원할 수 있습니다.",
+  "Start your own server.": "나만의 서버를 시작하세요.",
+  "About Eunha": "은하 소개",
+  "Source code": "소스 코드",
   "Your eunha space instances": "나의 은하공간 인스턴스",
   "Create your account": "계정 만들기",
   "Sign in to create and manage your instances.":

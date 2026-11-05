@@ -1015,6 +1015,7 @@ async fn main() -> Result<()> {
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
         .route_service("/", index.clone())
+        .route_service("/signin", index.clone())
         .route_service("/signup", index.clone())
         .route_service("/verify", index.clone())
         .route_service("/account", index.clone())

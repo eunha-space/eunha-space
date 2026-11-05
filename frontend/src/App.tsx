@@ -189,7 +189,7 @@ export function App() {
   }
 
   if (session.state === "signed-out") {
-    location.replace("/");
+    location.replace("/signin");
     return null;
   }
 
