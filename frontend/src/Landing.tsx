@@ -1,11 +1,6 @@
-import { useEffect, useState } from "react";
 import { useLingui } from "@lingui/react";
-import { api, type PublicPlan } from "@/api";
 import { Button } from "@/components/ui/button";
-import { Mark, ThemeToggle } from "@/components/console/brand";
-import { won } from "@/format";
-import { LanguageToggle } from "@/i18n";
-import { CONTACT_EMAIL, planLimits } from "@/planLimits";
+import { SiteHeader } from "@/SiteHeader";
 
 const EXPLANATIONS = [
   {
@@ -79,39 +74,13 @@ const STEPS = [
   },
 ];
 
-const TERMS = [
-  "Every plan is charged monthly.",
-  "A payment can be refunded in full for 7 days after it is made, and not after that.",
-  "Cancel any time and keep the period you already paid for.",
-  "If a subscription ends, your instances go offline and their data is kept. Subscribing again brings them back.",
-  "A deleted instance can be restored for seven days.",
-];
-
 /** What a signed-out visitor sees at `/`. */
 export function Landing() {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
-  const [plans, setPlans] = useState<PublicPlan[]>([]);
-  useEffect(() => {
-    // Without prices the rest of the page still explains the service.
-    api<PublicPlan[]>("/customer/plans").then(setPlans).catch(() => {});
-  }, []);
-  const korean = i18n.locale === "ko";
   return (
     <main data-landing className="mx-auto w-full max-w-5xl flex-1 break-keep px-4 md:px-8">
-      <header className="flex items-center justify-between gap-3 py-5">
-        <a href="/" className="flex min-w-0 items-center gap-2 font-semibold">
-          <Mark className="size-9 shrink-0" />
-          {t("eunha space")}
-        </a>
-        <div className="flex shrink-0 gap-2">
-          <LanguageToggle />
-          <ThemeToggle />
-          <Button variant="outline" render={<a href="/signin" />}>
-            {t("Sign in")}
-          </Button>
-        </div>
-      </header>
+      <SiteHeader />
 
       <section className="grid items-center gap-10 py-12 md:grid-cols-[3fr_2fr] md:py-20">
         <div>
@@ -173,51 +142,6 @@ export function Landing() {
         </ol>
       </Section>
 
-      <Section title={t("Pricing")}>
-        {plans.length > 0 && (
-          <ul className="mb-6 divide-y border-y">
-            {plans.map((plan) => (
-              <li
-                key={plan.name_en}
-                className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 py-3"
-              >
-                <div>
-                  <h3 className="font-medium">
-                    {korean ? plan.name_ko : plan.name_en}
-                  </h3>
-                  {planLimits(plan, korean).length > 0 && (
-                    <p className="text-muted-foreground text-sm">
-                      {planLimits(plan, korean).join(" · ")}
-                    </p>
-                  )}
-                </div>
-                <p>
-                  <span className="font-medium">{won(plan.amount)}</span>{" "}
-                  <span className="text-muted-foreground text-sm">{t("/ month")}</span>
-                </p>
-              </li>
-            ))}
-            <li className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 py-3">
-              <div>
-                <h3 className="font-medium">{t("Custom")}</h3>
-                <p className="text-muted-foreground text-sm">
-                  {t("For bigger instances, we'll work out a plan with you.")}
-                </p>
-              </div>
-              <a
-                href={`mailto:${CONTACT_EMAIL}`}
-                className="font-medium underline underline-offset-4"
-              >
-                {t("Contact us")}
-              </a>
-            </li>
-          </ul>
-        )}
-        <ul className="text-muted-foreground grid list-disc gap-2 pl-5">
-          {TERMS.map((term) => <li key={term}>{t(term)}</li>)}
-        </ul>
-      </Section>
-
       <section className="border-t py-12 md:py-16">
         <h2 className="text-2xl font-semibold tracking-tight text-balance md:text-3xl">
           {t("Start your own server.")}
@@ -226,6 +150,12 @@ export function Landing() {
           <Button size="lg" render={<a href="/signup" />}>
             {t("Create account")}
           </Button>
+          <a
+            href="/pricing"
+            className="text-muted-foreground hover:text-foreground text-sm underline underline-offset-4"
+          >
+            {t("Pricing")}
+          </a>
           <a
             href="https://eunha.social"
             className="text-muted-foreground hover:text-foreground text-sm underline underline-offset-4"

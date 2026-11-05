@@ -29,6 +29,7 @@ import { CustomerInstanceDetail } from "@/CustomerInstanceDetail";
 import { CustomerAccount } from "@/CustomerAccount";
 import { CustomerCreateInstance } from "@/CustomerCreateInstance";
 import { Landing } from "@/Landing";
+import { Pricing } from "@/Pricing";
 
 export function CustomerApp() {
   const { i18n } = useLingui();
@@ -52,7 +53,8 @@ export function CustomerApp() {
     setCustomer(me);
     setTenants(nextTenants);
     // Signed in, these paths have nothing to show; `/` is the instance list.
-    if (location.pathname === "/signin" || location.pathname === "/signup") {
+    // A customer sees and changes plans on `/account`.
+    if (["/signin", "/signup", "/pricing"].includes(location.pathname)) {
       history.replaceState(null, "", "/");
     }
   }
@@ -125,6 +127,7 @@ export function CustomerApp() {
   }
   if (!customer) {
     if (location.pathname === "/" && !verified) return <Landing />;
+    if (location.pathname === "/pricing") return <Pricing />;
     return (
       <main className="grid flex-1 place-items-center p-4">
         <div className="fixed top-5 right-5">

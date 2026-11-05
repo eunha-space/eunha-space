@@ -62,6 +62,8 @@ const ko: Record<string, string> = {
     "인스턴스 페이지에서 관리자 비밀번호를 만든 뒤, 새 주소에서 로그인하세요.",
   Pricing: "요금",
   "/ month": "/ 월",
+  "Every plan includes hosting, automatic updates and an address of your own.":
+    "모든 요금제에 호스팅, 자동 업데이트, 나만의 주소가 포함됩니다.",
   Custom: "맞춤",
   "For bigger instances, we'll work out a plan with you.":
     "더 큰 인스턴스를 위한 요금제를 함께 정해 드립니다.",
