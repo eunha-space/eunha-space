@@ -127,13 +127,30 @@ export type SubscriptionStatus =
   | "canceled"
   | "lapsed";
 
+export type Plan = {
+  id: string;
+  name_en: string;
+  name_ko: string;
+  /** Won per month. */
+  amount: number;
+  /** Null leaves the account's own limit in force. */
+  instance_limit: number | null;
+  /** False for a retired plan, listed only for those on it. */
+  active: boolean;
+  /** What moving to this plan charges now, for an upgrade. */
+  switch_charge: number | null;
+};
+
 export type Billing = {
   enabled: boolean;
-  /** What subscribing costs each month, in won. */
-  amount: number | null;
+  /** Cheapest first. */
+  plans: Plan[];
   subscription: {
     status: SubscriptionStatus;
     amount: number;
+    plan_id: string | null;
+    /** The plan the next renewal moves to. */
+    pending_plan_id: string | null;
     card_company: string | null;
     /** Masked by TossPayments. */
     card_number: string | null;
@@ -149,6 +166,7 @@ export type Billing = {
   payments: {
     order_id: string;
     amount: number;
+    kind: "renewal" | "upgrade";
     status: "pending" | "paid" | "failed" | "refunded";
     period_start: string;
     period_end: string;

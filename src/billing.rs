@@ -96,8 +96,9 @@ pub(crate) struct Config {
     /// `https://api.tosspayments.com` unless `TOSSPAYMENTS_API_BASE` points at
     /// a stand-in, which is how charging is tested.
     pub(crate) api_base: String,
-    /// What a new subscription is charged each month, in won.
-    pub amount: i64,
+    /// The price of the plan created when there are none yet, in won, so that
+    /// an instance configured before plans keeps working.
+    pub initial_amount: Option<i64>,
     order_name: String,
     /// The merchant ID (MID) the secret key belongs to. A billing key can only
     /// be charged through the MID that issued it, so a subscription whose key
@@ -121,17 +122,21 @@ impl Config {
             !client_key.trim().is_empty() && !secret_key.trim().is_empty(),
             "TossPayments keys must not be empty"
         );
-        let amount = std::env::var("EUNHA_SPACE_SUBSCRIPTION_AMOUNT")
-            .map_err(|_| {
-                anyhow::anyhow!("EUNHA_SPACE_SUBSCRIPTION_AMOUNT is required with TossPayments")
-            })?
-            .trim()
-            .parse::<i64>()
+        let initial_amount = std::env::var("EUNHA_SPACE_SUBSCRIPTION_AMOUNT")
             .ok()
-            .filter(|amount| *amount > 0)
-            .ok_or_else(|| {
-                anyhow::anyhow!("EUNHA_SPACE_SUBSCRIPTION_AMOUNT must be a positive number of won")
-            })?;
+            .map(|amount| {
+                amount
+                    .trim()
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|amount| *amount > 0)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "EUNHA_SPACE_SUBSCRIPTION_AMOUNT must be a positive number of won"
+                        )
+                    })
+            })
+            .transpose()?;
         let mid = std::env::var("TOSSPAYMENTS_MID")
             .ok()
             .map(|mid| mid.trim().to_owned())
@@ -145,7 +150,7 @@ impl Config {
             secret_key.trim().into(),
             std::env::var("TOSSPAYMENTS_API_BASE")
                 .unwrap_or_else(|_| "https://api.tosspayments.com".into()),
-            amount,
+            initial_amount,
             std::env::var("EUNHA_SPACE_SUBSCRIPTION_NAME")
                 .unwrap_or_else(|_| "은하공간 월간 구독".into()),
             mid,
@@ -156,7 +161,7 @@ impl Config {
         client_key: String,
         secret_key: String,
         api_base: String,
-        amount: i64,
+        initial_amount: Option<i64>,
         order_name: String,
         mid: Option<String>,
     ) -> Result<Self> {
@@ -164,7 +169,7 @@ impl Config {
             client_key,
             secret_key,
             api_base: api_base.trim_end_matches('/').into(),
-            amount,
+            initial_amount,
             order_name: order_name.chars().take(100).collect(),
             mid,
             client: reqwest::Client::builder()
@@ -566,6 +571,9 @@ fn billing_config(s: &Shared) -> Result<&Config, ApiError> {
 pub(crate) struct SubscriptionView {
     status: String,
     amount: i64,
+    plan_id: Option<Uuid>,
+    /// The plan the next renewal moves to.
+    pending_plan_id: Option<Uuid>,
     card_company: Option<String>,
     card_number: Option<String>,
     has_card: bool,
@@ -577,12 +585,29 @@ pub(crate) struct SubscriptionView {
     last_error: Option<String>,
     #[serde(with = "time::serde::rfc3339::option")]
     refund_grace_until: Option<OffsetDateTime>,
+    #[serde(skip)]
+    period_start: Option<OffsetDateTime>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct PlanView {
+    id: Uuid,
+    name_en: String,
+    name_ko: String,
+    amount: i64,
+    instance_limit: Option<i64>,
+    /// Whether it can be chosen. A retired plan is listed only for those on it.
+    active: bool,
+    /// What moving to this plan charges now, for an upgrade.
+    #[sqlx(skip)]
+    switch_charge: Option<i64>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
 pub(crate) struct PaymentView {
     order_id: String,
     amount: i64,
+    kind: String,
     status: String,
     #[serde(with = "time::serde::rfc3339")]
     period_start: OffsetDateTime,
@@ -603,29 +628,46 @@ pub(crate) struct PaymentView {
 #[derive(Serialize)]
 pub(crate) struct BillingView {
     enabled: bool,
-    /// What subscribing costs now, in won. An existing subscription keeps the
-    /// amount it was started at.
-    amount: Option<i64>,
+    /// What can be subscribed to, cheapest first. An existing subscription
+    /// keeps the amount it was started at.
+    plans: Vec<PlanView>,
     subscription: Option<SubscriptionView>,
     payments: Vec<PaymentView>,
 }
 
 pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiError> {
+    ensure_initial_plan(s).await?;
     let subscription = sqlx::query_as::<_, SubscriptionView>(
-        "SELECT status,amount,card_company,card_number,billing_key IS NOT NULL has_card,current_period_end,cancel_at_period_end,next_attempt_at,last_error,refund_grace_until FROM subscriptions WHERE user_id=$1",
+        "SELECT status,amount,plan_id,pending_plan_id,card_company,card_number,billing_key IS NOT NULL has_card,current_period_end,cancel_at_period_end,next_attempt_at,last_error,refund_grace_until,anchor_at+make_interval(months => GREATEST(periods_paid-1,0)) period_start FROM subscriptions WHERE user_id=$1",
     )
     .bind(user_id)
     .fetch_optional(&s.db)
     .await?;
     let payments = sqlx::query_as::<_, PaymentView>(
-        &format!("SELECT order_id,amount,status,period_start,period_end,receipt_url,failure_message,requested_at,(status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND settled_at>now()-interval '{}' AND payment_key IS NOT NULL) refundable,(refund_requested_at IS NOT NULL AND refunded_at IS NULL) refund_pending,refunded_amount,refund_error FROM subscription_payments WHERE user_id=$1 AND status<>'expired' ORDER BY requested_at DESC LIMIT 24", crate::billing_sync::REFUND_WINDOW),
+        &format!("SELECT order_id,amount,kind,status,period_start,period_end,receipt_url,failure_message,requested_at,(status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND settled_at>now()-interval '{}' AND payment_key IS NOT NULL) refundable,(refund_requested_at IS NOT NULL AND refunded_at IS NULL) refund_pending,refunded_amount,refund_error FROM subscription_payments WHERE user_id=$1 AND status<>'expired' ORDER BY requested_at DESC LIMIT 24", crate::billing_sync::REFUND_WINDOW),
     )
     .bind(user_id)
     .fetch_all(&s.db)
     .await?;
+    let mut plans = sqlx::query_as::<_, PlanView>(
+        "SELECT id,name_en,name_ko,amount,instance_limit,active FROM plans WHERE active OR id IN (SELECT plan_id FROM subscriptions WHERE user_id=$1 UNION SELECT pending_plan_id FROM subscriptions WHERE user_id=$1) ORDER BY amount,created_at",
+    )
+    .bind(user_id)
+    .fetch_all(&s.db)
+    .await?;
+    if let Some(running) = subscription
+        .as_ref()
+        .filter(|running| running.status == "active")
+        && let (Some(start), Some(end)) = (running.period_start, running.current_period_end)
+    {
+        let now = OffsetDateTime::now_utc();
+        for plan in plans.iter_mut().filter(|plan| plan.amount > running.amount) {
+            plan.switch_charge = Some(upgrade_charge(plan.amount, running.amount, start, end, now));
+        }
+    }
     Ok(BillingView {
         enabled: s.billing.is_some(),
-        amount: s.billing.as_ref().map(|billing| billing.amount),
+        plans,
         subscription,
         payments,
     })
@@ -639,26 +681,109 @@ pub(crate) async fn get(
     Ok(Json(view(&s, user_id).await?))
 }
 
+/// The id of the plan made for an instance configured with one price. It is
+/// fixed so that two control planes starting together make only one.
+const INITIAL_PLAN: Uuid = Uuid::from_u128(1);
+
+/// Below this TossPayments will not charge a card, and it is not worth doing:
+/// an upgrade this close to renewal costs nothing.
+const SMALLEST_CHARGE: i64 = 100;
+
+/// An instance that has a price but no plans yet gets one plan at that price,
+/// and any subscription from before plans is put on it.
+pub(crate) async fn ensure_initial_plan(s: &Shared) -> Result<(), sqlx::Error> {
+    let Some(amount) = s
+        .billing
+        .as_ref()
+        .and_then(|billing| billing.initial_amount)
+    else {
+        return Ok(());
+    };
+    let created = sqlx::query("INSERT INTO plans(id,name_en,name_ko,amount) SELECT $1,'Standard','기본',$2 WHERE NOT EXISTS(SELECT 1 FROM plans) ON CONFLICT (id) DO NOTHING")
+        .bind(INITIAL_PLAN)
+        .bind(amount)
+        .execute(&s.db)
+        .await?;
+    if created.rows_affected() > 0 {
+        sqlx::query("UPDATE subscriptions SET plan_id=$1 WHERE plan_id IS NULL")
+            .bind(INITIAL_PLAN)
+            .execute(&s.db)
+            .await?;
+    }
+    Ok(())
+}
+
+/// The difference between two monthly prices for what is left of a period,
+/// rounded up to the won, or nothing when that is too little to charge.
+pub(crate) fn upgrade_charge(
+    new_amount: i64,
+    old_amount: i64,
+    start: OffsetDateTime,
+    end: OffsetDateTime,
+    now: OffsetDateTime,
+) -> i64 {
+    let total = (end - start).whole_seconds().max(1) as i128;
+    let left = ((end - now).whole_seconds() as i128).clamp(0, total);
+    let difference = (new_amount - old_amount).max(0) as i128;
+    let charge = ((difference * left + total - 1) / total) as i64;
+    if charge < SMALLEST_CHARGE { 0 } else { charge }
+}
+
 #[derive(Serialize)]
 pub(crate) struct Checkout {
     client_key: String,
     customer_key: Uuid,
 }
 
+#[derive(Deserialize, Default)]
+pub(crate) struct CheckoutChoice {
+    plan_id: Option<Uuid>,
+}
+
 /// What the billing window needs to open: the public client key and the key
-/// the card will be filed under.
+/// the card will be filed under. A subscription that is not running remembers
+/// the plan chosen, for when the card comes back; changing the card of a
+/// running one touches no plan.
 pub(crate) async fn checkout(
     State(s): State<Shared>,
     headers: HeaderMap,
+    choice: Option<Json<CheckoutChoice>>,
 ) -> Result<Json<Checkout>, ApiError> {
     let (user_id, _) = customer(&headers, &s.db).await?;
     let billing = billing_config(&s)?;
+    ensure_initial_plan(&s).await?;
+    let running = sqlx::query_as::<_, (Uuid, bool)>(
+        "SELECT customer_key,(status IN ('active','past_due') AND refund_grace_until IS NULL) OR EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=s.user_id AND p.status='pending') FROM subscriptions s WHERE user_id=$1",
+    )
+    .bind(user_id)
+    .fetch_optional(&s.db)
+    .await?;
+    if let Some((customer_key, true)) = running {
+        return Ok(Json(Checkout {
+            client_key: billing.client_key.clone(),
+            customer_key,
+        }));
+    }
+    let chosen = choice.and_then(|Json(choice)| choice.plan_id);
+    let plan = sqlx::query_as::<_, (Uuid, i64)>(
+        "SELECT id,amount FROM plans WHERE active AND ($1::uuid IS NULL OR id=$1) ORDER BY amount,created_at LIMIT 1",
+    )
+    .bind(chosen)
+    .fetch_optional(&s.db)
+    .await?
+    .ok_or_else(|| {
+        ApiError(
+            StatusCode::CONFLICT,
+            "This plan is not available.".into(),
+        )
+    })?;
     let customer_key = sqlx::query_scalar::<_, Uuid>(
-        "INSERT INTO subscriptions(user_id,customer_key,amount) VALUES($1,$2,$3) ON CONFLICT (user_id) DO UPDATE SET user_id=excluded.user_id RETURNING customer_key",
+        "INSERT INTO subscriptions(user_id,customer_key,amount,pending_plan_id) VALUES($1,$2,$3,$4) ON CONFLICT (user_id) DO UPDATE SET pending_plan_id=excluded.pending_plan_id RETURNING customer_key",
     )
     .bind(user_id)
     .bind(Uuid::new_v4())
-    .bind(billing.amount)
+    .bind(plan.1)
+    .bind(plan.0)
     .fetch_one(&s.db)
     .await?;
     Ok(Json(Checkout {
@@ -766,9 +891,8 @@ pub(crate) async fn authorize(
         // are still running, and a declined card must not keep them so.
         "active" if in_grace => {
             if !pending {
-                sqlx::query("UPDATE subscriptions SET amount=$2,anchor_at=now(),periods_paid=0,failed_attempts=0,cancel_at_period_end=false,next_attempt_at=now() WHERE user_id=$1")
+                sqlx::query("UPDATE subscriptions s SET plan_id=p.id,amount=p.amount,pending_plan_id=NULL,anchor_at=now(),periods_paid=0,failed_attempts=0,cancel_at_period_end=false,next_attempt_at=now() FROM plans p WHERE s.user_id=$1 AND p.id=COALESCE(s.pending_plan_id,s.plan_id)")
                     .bind(user_id)
-                    .bind(billing.amount)
                     .execute(&mut *tx)
                     .await?;
             }
@@ -781,10 +905,9 @@ pub(crate) async fn authorize(
             sqlx::query(if pending {
                 "UPDATE subscriptions SET status='incomplete',failed_attempts=0,cancel_at_period_end=false,next_attempt_at=now() WHERE user_id=$1"
             } else {
-                "UPDATE subscriptions SET status='incomplete',amount=$2,anchor_at=now(),periods_paid=0,current_period_end=NULL,failed_attempts=0,cancel_at_period_end=false,next_attempt_at=now() WHERE user_id=$1"
+                "UPDATE subscriptions s SET status='incomplete',plan_id=p.id,amount=p.amount,pending_plan_id=NULL,anchor_at=now(),periods_paid=0,current_period_end=NULL,failed_attempts=0,cancel_at_period_end=false,next_attempt_at=now() FROM plans p WHERE s.user_id=$1 AND p.id=COALESCE(s.pending_plan_id,s.plan_id)"
             })
             .bind(user_id)
-            .bind(billing.amount)
             .execute(&mut *tx)
             .await?;
             "subscribe"
@@ -888,6 +1011,172 @@ pub(crate) async fn resume(
     Ok(Json(view(&s, user_id).await?))
 }
 
+#[derive(Deserialize)]
+pub(crate) struct PlanChoice {
+    plan_id: Uuid,
+}
+
+/// Move a running subscription to another plan. A dearer one applies now, for
+/// the difference over what is left of the period; if that is declined, nothing
+/// changes. Any other applies at the next renewal, and choosing the current
+/// plan takes that back.
+pub(crate) async fn change_plan(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<PlanChoice>,
+) -> Result<Json<BillingView>, ApiError> {
+    let (user_id, _) = customer(&headers, &s.db).await?;
+    billing_config(&s)?;
+    ensure_initial_plan(&s).await?;
+    let mut tx = s.db.begin().await?;
+    let current = sqlx::query_as::<_, (String, i64, Option<Uuid>, bool, bool, Option<OffsetDateTime>, Option<OffsetDateTime>)>(
+        "SELECT status,amount,plan_id,cancel_at_period_end,billing_key IS NOT NULL,anchor_at+make_interval(months => GREATEST(periods_paid-1,0)),current_period_end FROM subscriptions WHERE user_id=$1 FOR UPDATE",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((status, amount, plan_id, canceling, has_card, Some(start), Some(end))) = current
+    else {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Only an active subscription can change plans.".into(),
+        ));
+    };
+    if status != "active" {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Only an active subscription can change plans.".into(),
+        ));
+    }
+    if canceling {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Keep your subscription before changing plans.".into(),
+        ));
+    }
+    let busy = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM subscription_payments WHERE user_id=$1 AND (status='pending' OR (refund_requested_at IS NOT NULL AND refunded_at IS NULL)))",
+    )
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if busy {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "A payment is being confirmed. Try again shortly.".into(),
+        ));
+    }
+    if plan_id == Some(body.plan_id) {
+        sqlx::query(
+            "UPDATE subscriptions SET pending_plan_id=NULL,updated_at=now() WHERE user_id=$1",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        record(
+            &mut tx,
+            user_id,
+            "subscription_plan",
+            "succeeded",
+            serde_json::json!({ "change": "keep", "plan_id": body.plan_id }),
+            None,
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(Json(view(&s, user_id).await?));
+    }
+    let (new_amount, limit) = sqlx::query_as::<_, (i64, Option<i64>)>(
+        "SELECT amount,instance_limit FROM plans WHERE id=$1 AND active",
+    )
+    .bind(body.plan_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| ApiError(StatusCode::CONFLICT, "This plan is not available.".into()))?;
+    if new_amount <= amount {
+        let count = customer_instance_count(&mut tx, user_id).await?;
+        if limit.is_some_and(|limit| count > limit) {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "Delete instances until you are within this plan's limit first.".into(),
+            ));
+        }
+        sqlx::query(
+            "UPDATE subscriptions SET pending_plan_id=$2,updated_at=now() WHERE user_id=$1",
+        )
+        .bind(user_id)
+        .bind(body.plan_id)
+        .execute(&mut *tx)
+        .await?;
+        record(
+            &mut tx,
+            user_id,
+            "subscription_plan",
+            "succeeded",
+            serde_json::json!({ "change": "at_renewal", "plan_id": body.plan_id }),
+            None,
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(Json(view(&s, user_id).await?));
+    }
+    let charge = upgrade_charge(new_amount, amount, start, end, OffsetDateTime::now_utc());
+    if charge == 0 {
+        sqlx::query("UPDATE subscriptions SET plan_id=$2,amount=$3,pending_plan_id=NULL,updated_at=now() WHERE user_id=$1")
+            .bind(user_id)
+            .bind(body.plan_id)
+            .bind(new_amount)
+            .execute(&mut *tx)
+            .await?;
+        record(
+            &mut tx,
+            user_id,
+            "subscription_plan",
+            "succeeded",
+            serde_json::json!({ "change": "now", "plan_id": body.plan_id, "charge": 0 }),
+            None,
+        )
+        .await?;
+        tx.commit().await?;
+        return Ok(Json(view(&s, user_id).await?));
+    }
+    if !has_card {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Add a card before upgrading.".into(),
+        ));
+    }
+    let order_id = format!("eunha-{}", Uuid::new_v4().simple());
+    sqlx::query("INSERT INTO subscription_payments(order_id,user_id,amount,period,period_start,period_end,kind,plan_id,from_plan_id,from_amount,toss_mid) SELECT $1,user_id,$2,GREATEST(periods_paid-1,0),now(),current_period_end,'upgrade',$3,plan_id,amount,toss_mid FROM subscriptions WHERE user_id=$4")
+        .bind(&order_id)
+        .bind(charge)
+        .bind(body.plan_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE subscriptions SET next_attempt_at=now(),updated_at=now() WHERE user_id=$1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    record(&mut tx, user_id, "subscription_plan", "succeeded", serde_json::json!({ "change": "now", "plan_id": body.plan_id, "charge": charge, "order_id": order_id }), None).await?;
+    tx.commit().await?;
+    if charge_due(&s, Some(user_id)).await.is_err() {
+        tracing::warn!(%user_id, "could not charge an upgrade at once");
+    }
+    let declined = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT failure_message FROM subscription_payments WHERE order_id=$1 AND status='failed'",
+    )
+    .bind(&order_id)
+    .fetch_optional(&s.db)
+    .await?;
+    if let Some(message) = declined {
+        return Err(ApiError(
+            StatusCode::PAYMENT_REQUIRED,
+            message.unwrap_or_else(|| "The card was declined.".into()),
+        ));
+    }
+    Ok(Json(view(&s, user_id).await?))
+}
+
 /// An audit record of a billing change. Billing belongs to an account, not an
 /// instance, so it names no tenant. `detail` must never carry a key.
 pub(crate) async fn record(
@@ -980,6 +1269,8 @@ struct Due {
 struct PendingPayment {
     order_id: String,
     amount: i64,
+    kind: String,
+    plan_id: Option<Uuid>,
     period: i32,
     period_end: OffsetDateTime,
     /// When a charge for this order last went out; null if none ever did.
@@ -1057,20 +1348,27 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
         return Ok(true);
     }
     let pending = match sqlx::query_as::<_, PendingPayment>(
-        &format!("SELECT order_id,amount,period,period_end,charge_attempted_at,coalesce(charge_attempted_at<now()-interval '{ABANDON_UNRECORDED_ORDER}',false) abandonable FROM subscription_payments WHERE user_id=$1 AND status='pending'"),
+        &format!("SELECT order_id,amount,kind,plan_id,period,period_end,charge_attempted_at,coalesce(charge_attempted_at<now()-interval '{ABANDON_UNRECORDED_ORDER}',false) abandonable FROM subscription_payments WHERE user_id=$1 AND status='pending'"),
     )
     .bind(due.user_id)
     .fetch_optional(&mut *tx)
     .await?
     {
         Some(pending) => pending,
-        None => sqlx::query_as::<_, PendingPayment>(
-            "INSERT INTO subscription_payments(order_id,user_id,amount,period,period_start,period_end) SELECT $1,user_id,amount,periods_paid,anchor_at+make_interval(months => periods_paid),anchor_at+make_interval(months => periods_paid+1) FROM subscriptions WHERE user_id=$2 RETURNING order_id,amount,period,period_end,charge_attempted_at,false abandonable",
-        )
-        .bind(format!("eunha-{}", Uuid::new_v4().simple()))
-        .bind(due.user_id)
-        .fetch_one(&mut *tx)
-        .await?,
+        None => {
+            // A move to another plan waited for this renewal.
+            sqlx::query("UPDATE subscriptions s SET plan_id=p.id,amount=p.amount,pending_plan_id=NULL FROM plans p WHERE s.user_id=$1 AND p.id=s.pending_plan_id")
+                .bind(due.user_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query_as::<_, PendingPayment>(
+                "INSERT INTO subscription_payments(order_id,user_id,amount,period,period_start,period_end,plan_id,toss_mid) SELECT $1,user_id,amount,periods_paid,anchor_at+make_interval(months => periods_paid),anchor_at+make_interval(months => periods_paid+1),plan_id,toss_mid FROM subscriptions WHERE user_id=$2 RETURNING order_id,amount,kind,plan_id,period,period_end,charge_attempted_at,false abandonable",
+            )
+            .bind(format!("eunha-{}", Uuid::new_v4().simple()))
+            .bind(due.user_id)
+            .fetch_one(&mut *tx)
+            .await?
+        }
     };
     sqlx::query(&format!(
         "UPDATE subscriptions SET lease_until=now()+interval '{LEASE}' WHERE user_id=$1"
@@ -1130,7 +1428,7 @@ async fn replace_unrecorded_order(
         .execute(&mut *tx)
         .await?;
     let pending = sqlx::query_as::<_, PendingPayment>(
-        "INSERT INTO subscription_payments(order_id,user_id,amount,period,period_start,period_end) SELECT $1,user_id,amount,period,period_start,period_end FROM subscription_payments WHERE order_id=$2 RETURNING order_id,amount,period,period_end,charge_attempted_at,false abandonable",
+        "INSERT INTO subscription_payments(order_id,user_id,amount,period,period_start,period_end,kind,plan_id,from_plan_id,from_amount,toss_mid) SELECT $1,user_id,amount,period,period_start,period_end,kind,plan_id,from_plan_id,from_amount,toss_mid FROM subscription_payments WHERE order_id=$2 RETURNING order_id,amount,kind,plan_id,period,period_end,charge_attempted_at,false abandonable",
     )
     .bind(format!("eunha-{}", Uuid::new_v4().simple()))
     .bind(order_id)
@@ -1162,6 +1460,27 @@ async fn settle(s: &Shared, due: &Due, pending: &PendingPayment, outcome: Charge
                 .bind(receipt_url)
                 .execute(&mut *tx)
                 .await?;
+            if pending.kind == "upgrade" {
+                // The new plan starts now. The period and its renewal date are
+                // the ones the customer already had.
+                sqlx::query("UPDATE subscriptions s SET plan_id=p.id,amount=p.amount,pending_plan_id=NULL,next_attempt_at=s.current_period_end,lease_until=NULL,updated_at=now() FROM plans p WHERE s.user_id=$1 AND p.id=$2")
+                    .bind(due.user_id)
+                    .bind(pending.plan_id)
+                    .execute(&mut *tx)
+                    .await?;
+                crate::billing_mail::receipt(&mut tx, &pending.order_id).await?;
+                record(
+                    &mut tx,
+                    due.user_id,
+                    "subscription_charge",
+                    "succeeded",
+                    serde_json::json!({ "order_id": pending.order_id, "amount": pending.amount, "kind": "upgrade", "plan_id": pending.plan_id }),
+                    None,
+                )
+                .await?;
+                tx.commit().await?;
+                return Ok(());
+            }
             // A subscription cancelled while this charge was in flight is not
             // renewed again, but the period it paid for is still served.
             sqlx::query("UPDATE subscriptions SET status='active',periods_paid=$2+1,current_period_end=$3,next_attempt_at=$3,failed_attempts=0,last_error=NULL,lease_until=NULL,refund_grace_until=NULL,updated_at=now() WHERE user_id=$1")
@@ -1199,6 +1518,16 @@ async fn settle(s: &Shared, due: &Due, pending: &PendingPayment, outcome: Charge
                 Some(&message),
             )
             .await?;
+            if pending.kind == "upgrade" {
+                // The plan they had is still paid for, so a declined upgrade
+                // changes nothing and is not retried or counted.
+                sqlx::query("UPDATE subscriptions SET next_attempt_at=current_period_end,lease_until=NULL,updated_at=now() WHERE user_id=$1")
+                    .bind(due.user_id)
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                return Ok(());
+            }
             // A card tried during a refund's grace does not earn retries: the
             // deadline stands, and the customer can try another card until then.
             let in_grace = sqlx::query_scalar::<_, bool>(
@@ -1302,7 +1631,7 @@ pub(crate) async fn end_subscription(
         .bind(user_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("UPDATE subscriptions SET status=$2,billing_key=NULL,toss_mid=NULL,next_attempt_at=NULL,cancel_at_period_end=false,lease_until=NULL,refund_grace_until=NULL,updated_at=now() WHERE user_id=$1")
+    sqlx::query("UPDATE subscriptions SET status=$2,billing_key=NULL,toss_mid=NULL,next_attempt_at=NULL,cancel_at_period_end=false,lease_until=NULL,refund_grace_until=NULL,pending_plan_id=NULL,updated_at=now() WHERE user_id=$1")
         .bind(user_id)
         .bind(status)
         .execute(&mut **tx)
@@ -1532,7 +1861,7 @@ mod tests {
             "ck".into(),
             "test_sk_secret".into(),
             "https://toss.example/".into(),
-            9900,
+            Some(9900),
             "plan".into(),
             None,
         )

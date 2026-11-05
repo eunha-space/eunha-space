@@ -1748,7 +1748,7 @@ fn billed_state(pool: PgPool, toss_base: &str) -> Shared {
             "test_ck".into(),
             "test_sk_secret".into(),
             toss_base.into(),
-            9900,
+            Some(9900),
             "eunha space".into(),
             Some("tvivarepublica".into()),
         )
@@ -1773,7 +1773,7 @@ async fn billed_customer(pool: &PgPool) -> (Uuid, HeaderMap) {
 }
 
 async fn subscribe(state: &Shared, headers: &HeaderMap) -> serde_json::Value {
-    let Json(checkout) = billing::checkout(State(state.clone()), headers.clone())
+    let Json(checkout) = billing::checkout(State(state.clone()), headers.clone(), None)
         .await
         .unwrap();
     let checkout = serde_json::to_value(checkout).unwrap();
@@ -1827,7 +1827,7 @@ async fn a_charge_with_no_answer_is_asked_again_under_the_same_key(pool: PgPool)
     tx.rollback().await.unwrap();
 
     // A redirect carrying somebody else's customer key registers nothing.
-    let _ = billing::checkout(State(state.clone()), headers.clone())
+    let _ = billing::checkout(State(state.clone()), headers.clone(), None)
         .await
         .unwrap();
     let foreign = billing::authorize(
@@ -3035,4 +3035,276 @@ async fn a_korean_customer_gets_billing_email_in_korean(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(subject, "은하공간 환불 안내: ₩9,900");
+}
+
+async fn plan(pool: &PgPool, amount: i64, instance_limit: Option<i64>) -> Uuid {
+    sqlx::query_scalar(
+        "INSERT INTO plans(name_en,name_ko,amount,instance_limit) VALUES($1,$1,$2,$3) RETURNING id",
+    )
+    .bind(format!("plan {amount}"))
+    .bind(amount)
+    .bind(instance_limit)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn change_plan(
+    state: &Shared,
+    headers: &HeaderMap,
+    plan_id: Uuid,
+) -> Result<serde_json::Value, StatusCode> {
+    billing::change_plan(
+        State(state.clone()),
+        headers.clone(),
+        Json(serde_json::from_value(serde_json::json!({ "plan_id": plan_id })).unwrap()),
+    )
+    .await
+    .map(|Json(view)| serde_json::to_value(view).unwrap())
+    .map_err(|error| error.0)
+}
+
+/// The subscription's plan, amount, and the plan its next renewal moves to.
+async fn on_plan(pool: &PgPool, user_id: Uuid) -> (Option<Uuid>, i64, Option<Uuid>) {
+    sqlx::query_as("SELECT plan_id,amount,pending_plan_id FROM subscriptions WHERE user_id=$1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[test]
+fn an_upgrade_costs_the_difference_for_what_is_left_of_the_period() {
+    let start = OffsetDateTime::from_unix_timestamp(1_000_000_000).unwrap();
+    let end = start + time::Duration::days(30);
+    let charge = |now| billing::upgrade_charge(19900, 9900, start, end, now);
+    assert_eq!(charge(start), 10000);
+    assert_eq!(charge(start + time::Duration::days(15)), 5000);
+    // Too little to put through a card, or nothing at all.
+    assert_eq!(charge(end - time::Duration::hours(1)), 0);
+    assert_eq!(charge(end + time::Duration::days(1)), 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn an_upgrade_is_charged_now_and_keeps_the_renewal_date(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    subscribe(&state, &headers).await;
+    let (first_plan, ..) = on_plan(&pool, user_id).await;
+    assert!(first_plan.is_some());
+    let big = plan(&pool, 19900, None).await;
+    let period_end = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, OffsetDateTime>(
+            "SELECT current_period_end FROM subscriptions WHERE user_id=$1",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let renews_on = period_end(pool.clone()).await;
+
+    let view = change_plan(&state, &headers, big).await.unwrap();
+    assert_eq!(on_plan(&pool, user_id).await, (Some(big), 19900, None));
+    assert_eq!(view["payments"][0]["kind"], "upgrade");
+    assert_eq!(view["payments"][0]["status"], "paid");
+    let charged = view["payments"][0]["amount"].as_i64().unwrap();
+    assert!((9990..=10000).contains(&charged), "charged {charged}");
+    assert_eq!(toss.charges().len(), 2);
+    assert_eq!(period_end(pool.clone()).await, renews_on);
+    assert_eq!(
+        view["subscription"]["next_attempt_at"],
+        view["subscription"]["current_period_end"]
+    );
+
+    // The next renewal is at the new price.
+    make_due(&pool, user_id).await;
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    let amount: i64 = sqlx::query_scalar("SELECT amount FROM subscription_payments WHERE user_id=$1 AND kind='renewal' ORDER BY requested_at DESC LIMIT 1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(amount, 19900);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_declined_upgrade_changes_nothing(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    subscribe(&state, &headers).await;
+    let before = on_plan(&pool, user_id).await;
+    let big = plan(&pool, 19900, None).await;
+
+    toss.answer(&[TossScript::Decline]);
+    assert_eq!(
+        change_plan(&state, &headers, big).await.unwrap_err(),
+        StatusCode::PAYMENT_REQUIRED
+    );
+    assert_eq!(on_plan(&pool, user_id).await, before);
+    assert_eq!(subscription_status(&pool, user_id).await, "active");
+    let (failed, waits): (i32, bool) = sqlx::query_as(
+        "SELECT failed_attempts,next_attempt_at=current_period_end FROM subscriptions WHERE user_id=$1",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((failed, waits), (0, true));
+    assert!(!billing::charge_due(&state, None).await.unwrap());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_downgrade_waits_for_the_renewal_and_can_be_taken_back(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    subscribe(&state, &headers).await;
+    let (first_plan, ..) = on_plan(&pool, user_id).await;
+    let small = plan(&pool, 4900, Some(1)).await;
+
+    change_plan(&state, &headers, small).await.unwrap();
+    assert_eq!(
+        on_plan(&pool, user_id).await,
+        (first_plan, 9900, Some(small))
+    );
+    assert_eq!(toss.charges().len(), 1);
+    change_plan(&state, &headers, first_plan.unwrap())
+        .await
+        .unwrap();
+    assert_eq!(on_plan(&pool, user_id).await, (first_plan, 9900, None));
+
+    change_plan(&state, &headers, small).await.unwrap();
+    make_due(&pool, user_id).await;
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(on_plan(&pool, user_id).await, (Some(small), 4900, None));
+    let amount: i64 = sqlx::query_scalar("SELECT amount FROM subscription_payments WHERE user_id=$1 ORDER BY requested_at DESC LIMIT 1")
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(amount, 4900);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_plan_limits_instances_and_a_downgrade_must_fit(pool: PgPool) {
+    let (_toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    subscribe(&state, &headers).await;
+    ready_instance(&pool, user_id).await;
+    let small = plan(&pool, 4900, Some(0)).await;
+    assert_eq!(
+        change_plan(&state, &headers, small).await.unwrap_err(),
+        StatusCode::CONFLICT
+    );
+
+    let limit = |pool: PgPool| async move {
+        let mut tx = pool.begin().await.unwrap();
+        customer_instance_limit(&mut tx, user_id).await.unwrap()
+    };
+    // The account's own limit, while the plan sets none.
+    assert_eq!(limit(pool.clone()).await, Some(2));
+    let big = plan(&pool, 19900, Some(10)).await;
+    change_plan(&state, &headers, big).await.unwrap();
+    assert_eq!(limit(pool.clone()).await, Some(10));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn refunding_an_upgrade_returns_to_the_plan_it_left(pool: PgPool) {
+    let (_toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    subscribe(&state, &headers).await;
+    let before = on_plan(&pool, user_id).await;
+    let big = plan(&pool, 19900, None).await;
+    let view = change_plan(&state, &headers, big).await.unwrap();
+    let upgrade = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+
+    let view = refund(&state, &headers, &upgrade).await.unwrap();
+    // Back on the plan still paid for, which now ends with its period.
+    assert_eq!(on_plan(&pool, user_id).await, before);
+    assert_eq!(view["subscription"]["status"], "active");
+    assert_eq!(view["subscription"]["cancel_at_period_end"], true);
+    assert_eq!(
+        view["subscription"]["refund_grace_until"],
+        serde_json::Value::Null
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn refunding_the_period_also_refunds_its_upgrade(pool: PgPool) {
+    let (_toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    let view = subscribe(&state, &headers).await;
+    let first = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+    let big = plan(&pool, 19900, None).await;
+    change_plan(&state, &headers, big).await.unwrap();
+
+    let view = refund(&state, &headers, &first).await.unwrap();
+    assert!(view["subscription"]["refund_grace_until"].is_string());
+    while billing_sync::refund_due(&state, None).await.unwrap() {}
+    let unrefunded: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM subscription_payments WHERE user_id=$1 AND status<>'refunded'",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(unrefunded, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn checkout_subscribes_to_the_plan_chosen_and_an_old_subscription_gets_the_initial_plan(
+    pool: PgPool,
+) {
+    let (_toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    sqlx::query("INSERT INTO subscriptions(user_id,customer_key,amount,status) VALUES($1,$2,5900,'canceled')")
+        .bind(user_id)
+        .bind(Uuid::new_v4())
+        .execute(&pool)
+        .await
+        .unwrap();
+    billing::ensure_initial_plan(&state).await.unwrap();
+    assert!(on_plan(&pool, user_id).await.0.is_some());
+    assert_eq!(on_plan(&pool, user_id).await.1, 5900);
+
+    let chosen = plan(&pool, 19900, None).await;
+    let Json(checkout) = billing::checkout(
+        State(state.clone()),
+        headers.clone(),
+        Some(Json(
+            serde_json::from_value(serde_json::json!({ "plan_id": chosen })).unwrap(),
+        )),
+    )
+    .await
+    .unwrap();
+    let checkout = serde_json::to_value(checkout).unwrap();
+    let Json(view) = billing::authorize(
+        State(state.clone()),
+        headers.clone(),
+        Json(
+            serde_json::from_value(
+                serde_json::json!({"auth_key":"auth","customer_key":checkout["customer_key"]}),
+            )
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    let view = serde_json::to_value(view).unwrap();
+    assert_eq!(view["payments"][0]["amount"], 19900);
+    assert_eq!(on_plan(&pool, user_id).await, (Some(chosen), 19900, None));
 }

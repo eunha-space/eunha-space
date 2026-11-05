@@ -919,6 +919,7 @@ async fn main() -> Result<()> {
         .route("/customer/billing/authorization", post(billing::authorize))
         .route("/customer/billing/cancel", post(billing::cancel))
         .route("/customer/billing/resume", post(billing::resume))
+        .route("/customer/billing/plan", post(billing::change_plan))
         .route(
             "/customer/billing/payments/{order_id}/refund",
             post(billing_sync::request_refund),
@@ -964,6 +965,11 @@ async fn main() -> Result<()> {
         .route("/operations/{id}/events", get(operation_events))
         .route("/operations", get(operations))
         .route("/billing", get(billing_admin::overview))
+        .route("/billing/plans", post(billing_admin::create_plan))
+        .route(
+            "/billing/plans/{id}",
+            axum::routing::patch(billing_admin::update_plan),
+        )
         .route("/billing/accounts/{user_id}", get(billing_admin::account))
         .route(
             "/billing/accounts/{user_id}/retry",
@@ -1387,12 +1393,16 @@ async fn customer_me(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (id, email) = customer(&headers, &s.db).await?;
-    let (has_password, instance_limit, is_admin) = sqlx::query_as::<_, (bool, Option<i64>, bool)>(
-        "SELECT password_hash IS NOT NULL,instance_limit,is_admin FROM users WHERE id=$1",
+    let (has_password, is_admin) = sqlx::query_as::<_, (bool, bool)>(
+        "SELECT password_hash IS NOT NULL,is_admin FROM users WHERE id=$1",
     )
     .bind(id)
     .fetch_one(&s.db)
     .await?;
+    let instance_limit = sqlx::query_scalar::<_, Option<i64>>(INSTANCE_LIMIT)
+        .bind(id)
+        .fetch_one(&s.db)
+        .await?;
     let requires_current_password =
         has_password && !customer_email_link_session(&headers, &s.db).await?;
     // An account from before languages were kept takes its browser's.
@@ -2700,11 +2710,17 @@ async fn customer_instance_count(
 }
 
 /// A null limit grants the customer unlimited instances.
+/// How many instances an account may run: its plan's limit, or its own when the
+/// plan sets none. An account that needs no subscription has only its own. A
+/// plan the next renewal moves to counts already, so nothing added now is over
+/// its limit then.
+const INSTANCE_LIMIT: &str = "SELECT CASE WHEN u.is_admin OR u.billing_exempt THEN u.instance_limit ELSE COALESCE(next.instance_limit,plan.instance_limit,u.instance_limit) END FROM users u LEFT JOIN subscriptions s ON s.user_id=u.id LEFT JOIN plans plan ON plan.id=s.plan_id LEFT JOIN plans next ON next.id=s.pending_plan_id AND s.status='active' WHERE u.id=$1";
+
 async fn customer_instance_limit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: Uuid,
 ) -> Result<Option<i64>, sqlx::Error> {
-    sqlx::query_scalar("SELECT instance_limit FROM users WHERE id=$1")
+    sqlx::query_scalar(INSTANCE_LIMIT)
         .bind(user_id)
         .fetch_one(&mut **tx)
         .await

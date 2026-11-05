@@ -13,7 +13,7 @@ creating an instance needs no subscription.
 TOSSPAYMENTS_CLIENT_KEY=live_ck_...        # public; handed to the billing window
 TOSSPAYMENTS_SECRET_KEY=live_sk_...        # process-only
 TOSSPAYMENTS_MID=...                       # the secret key's merchant ID; required with a live key
-EUNHA_SPACE_SUBSCRIPTION_AMOUNT=9900       # won per month, required with the keys
+EUNHA_SPACE_SUBSCRIPTION_AMOUNT=9900       # optional; the price of the first plan if there are none
 EUNHA_SPACE_SUBSCRIPTION_NAME='은하공간 월간 구독'   # optional order name
 TOSSPAYMENTS_API_BASE=https://api.tosspayments.com    # optional; a stand-in for tests
 ```
@@ -106,6 +106,39 @@ A customer needs an `active` or `past_due` subscription to create or restore an
 instance. Administrators are never billed. Customers whose instances predate
 billing keep them running, but cannot add instances without subscribing.
 
+## Plans
+
+Operators manage plans on `/admin/billing`. A plan has English and Korean names,
+a monthly price and an instance limit. With no limit, the account's own
+`instance_limit` applies. Administrators and exempt accounts always use their
+account's limit.
+
+A plan's price never changes, because subscriptions and upgrade charges are
+worked out from it. To change a price, add a plan and stop offering the old one.
+Those on a retired plan stay on it, at their price, until they move.
+Without any plans, `EUNHA_SPACE_SUBSCRIPTION_AMOUNT` creates a "Standard" plan
+at that price and puts existing subscriptions on it. Without that variable or a
+plan, customers cannot subscribe.
+
+Plans are monthly only: a period is always one month.
+
+## Changing plans
+
+An active subscription that is not set to end can move to any offered plan.
+Past-due subscriptions must pay first.
+
+- **A dearer plan applies now.** The customer pays the price difference for the
+  time left in the period, rounded up to the won, and the renewal date stays the
+  same. Under 100 won it applies free. The charge is a payment with `kind`
+  `upgrade`, taking the same order, idempotency and lookup path as a renewal, so
+  one interrupted mid-request is never charged twice. If the card declines it,
+  the plan does not change, nothing is retried and the decline does not count
+  against the subscription.
+- **Any other plan applies at the next renewal**, recorded in `pending_plan_id`
+  and charged at its price from then on. Choosing the current plan takes it
+  back. It is refused if the account's instances exceed the new limit, and the
+  new limit applies to new instances as soon as the move is scheduled.
+
 ## Refunds
 
 A customer can ask for a payment back from the payment history on `/account`
@@ -144,6 +177,13 @@ amount. What happens to the instances depends on the paid time left:
 Subscribing during the grace starts a new period that day at today's price, and
 a paid charge clears the deadline. A declined card leaves the deadline standing,
 with no retries, and the customer can try another card until then.
+
+A full refund of an upgrade charge for the current period returns the
+subscription to the plan and price it left. Like any refund it also stops
+renewing, but the old plan's paid time still stands, so there is no grace and
+the subscription ends with its period. Instances over the old limit keep
+running, but no more can be added. A full refund of the renewal for the period
+being served also requests a refund of any upgrade charged for that period.
 
 Operators refund in the TossPayments dashboard. The webhook below brings each
 cancellation into the ledger by the same rules.

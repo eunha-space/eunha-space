@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { CircleAlert, CreditCard, ExternalLink } from "lucide-react";
 import { useLingui } from "@lingui/react";
 import { loadTossPayments } from "@tosspayments/tosspayments-sdk";
-import { api, type Billing, type Customer, errorMessage } from "@/api";
+import { api, type Billing, type Customer, errorMessage, type Plan } from "@/api";
+import { cn } from "cn";
 import { absoluteTime } from "@/format";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
@@ -64,6 +65,8 @@ export function SubscriptionCard(
   const [error, setError] = useState("");
   const [confirmingCancel, setConfirmingCancel] = useState(false);
   const [refunding, setRefunding] = useState<Billing["payments"][number] | null>(null);
+  const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
+  const [switching, setSwitching] = useState<Plan | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -111,7 +114,7 @@ export function SubscriptionCard(
     try {
       const checkout = await api<{ client_key: string; customer_key: string }>(
         "/customer/billing/checkout",
-        { method: "POST" },
+        { method: "POST", body: JSON.stringify({ plan_id: choosing ? chosenPlan?.id : undefined }) },
       );
       const toss = await loadTossPayments(checkout.client_key);
       await toss.payment({ customerKey: checkout.customer_key }).requestBillingAuth({
@@ -148,6 +151,27 @@ export function SubscriptionCard(
     }
   }
 
+  async function changePlan(plan: Plan) {
+    setError("");
+    setBusy(true);
+    try {
+      setBilling(
+        await api<Billing>("/customer/billing/plan", {
+          method: "POST",
+          body: JSON.stringify({ plan_id: plan.id }),
+        }),
+      );
+      await onChanged();
+    } catch (e) {
+      setError(t(errorMessage(e)));
+      // A declined upgrade leaves a failed payment in the history.
+      setBilling(await api<Billing>("/customer/billing").catch(() => billing));
+    } finally {
+      setBusy(false);
+      setSwitching(null);
+    }
+  }
+
   async function change(path: "/cancel" | "/resume") {
     setError("");
     setBusy(true);
@@ -167,7 +191,21 @@ export function SubscriptionCard(
   const inGrace = subscription?.refund_grace_until != null;
   const subscribed = (status === "active" || status === "past_due") && !inGrace;
   const pending = billing.payments.some((payment) => payment.status === "pending");
-  const amount = subscription && subscribed ? subscription.amount : billing.amount;
+  const selectable = billing.plans.filter((plan) => plan.active);
+  const choosing = (!subscribed || subscription?.refund_grace_until != null) && !pending;
+  const chosenPlan = selectable.find((plan) => plan.id === selectedPlan) ?? selectable[0] ?? null;
+  const planName = (plan: Plan) => (i18n.locale === "ko" ? plan.name_ko : plan.name_en);
+  const currentPlan = billing.plans.find((plan) => plan.id === subscription?.plan_id) ?? null;
+  const nextPlan = billing.plans.find((plan) => plan.id === subscription?.pending_plan_id) ?? null;
+  const amount = subscription && subscribed && !choosing
+    ? subscription.amount
+    : chosenPlan?.amount ?? null;
+  const limitLabel = (plan: Plan) =>
+    plan.instance_limit == null
+      ? null
+      : i18n.locale === "ko"
+      ? `인스턴스 ${plan.instance_limit}개`
+      : `${plan.instance_limit} instance${plan.instance_limit === 1 ? "" : "s"}`;
 
   let description: string;
   if (inGrace && !pending) {
@@ -213,6 +251,18 @@ export function SubscriptionCard(
       </CardHeader>
       <CardContent className="grid gap-5">
         <dl className="grid grid-cols-2 gap-4 text-sm">
+          {subscribed && currentPlan && (
+            <div className="grid gap-1">
+              <dt className="text-muted-foreground text-xs">{t("Plan")}</dt>
+              <dd className="font-medium">{planName(currentPlan)}</dd>
+            </div>
+          )}
+          {status === "active" && nextPlan && !subscription?.cancel_at_period_end && (
+            <div className="grid gap-1">
+              <dt className="text-muted-foreground text-xs">{t("From your next renewal")}</dt>
+              <dd className="font-medium">{planName(nextPlan)} · {won(nextPlan.amount)}</dd>
+            </div>
+          )}
           {amount != null && (
             <div className="grid gap-1">
               <dt className="text-muted-foreground text-xs">{t("Monthly price")}</dt>
@@ -259,6 +309,40 @@ export function SubscriptionCard(
             <CircleAlert />
             <AlertDescription>{error}</AlertDescription>
           </Alert>
+        )}
+        {(choosing || (status === "active" && !subscription?.cancel_at_period_end)) &&
+          selectable.length > 1 && (
+          <div className="grid gap-2">
+            <h3 className="text-sm font-medium">{choosing ? t("Choose a plan") : t("Change plan")}</h3>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {selectable.map((plan) => {
+                const isCurrent = !choosing && plan.id === subscription?.plan_id;
+                const selected = choosing ? plan.id === chosenPlan?.id : isCurrent;
+                return (
+                  <button
+                    key={plan.id}
+                    type="button"
+                    aria-pressed={selected}
+                    disabled={busy || (isCurrent && !nextPlan)}
+                    onClick={() => (choosing ? setSelectedPlan(plan.id) : setSwitching(plan))}
+                    className={cn(
+                      "grid gap-0.5 rounded-lg border p-3 text-left text-sm transition-colors disabled:cursor-default",
+                      selected ? "border-primary bg-primary/5" : "hover:bg-muted",
+                    )}
+                  >
+                    <span className="font-medium">
+                      {planName(plan)}
+                      {isCurrent ? ` · ${t("Current plan")}` : ""}
+                    </span>
+                    <span className="tabular-nums">{won(plan.amount)}{t(" a month")}</span>
+                    {limitLabel(plan) && (
+                      <span className="text-muted-foreground text-xs">{limitLabel(plan)}</span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         )}
         <div className="flex flex-wrap gap-2">
           {!subscribed && !pending && (
@@ -376,7 +460,7 @@ export function SubscriptionCard(
                 {refunding ? `${t("Refund this payment?")} ${won(refunding.amount)}` : ""}
               </AlertDialogTitle>
               <AlertDialogDescription>
-                {t(
+                {refunding?.kind === "upgrade" ? t("The full amount goes back to your card, you return to the plan you had, and your subscription is cancelled. It keeps running until the end of the paid period.") : t(
                   "The full amount goes back to your card and your subscription is cancelled. Refunding the period you are in leaves your instances running for four more days, then they go offline. Their data is kept, and subscribing again serves them again.",
                 )}
               </AlertDialogDescription>
@@ -413,6 +497,33 @@ export function SubscriptionCard(
                 onClick={() => void change("/cancel")}
               >
                 {t("Cancel subscription")}
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+        <AlertDialog
+          open={switching !== null}
+          onOpenChange={(open) => !open && setSwitching(null)}
+        >
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>
+                {switching ? `${t("Change to this plan?")} ${planName(switching)}` : ""}
+              </AlertDialogTitle>
+              <AlertDialogDescription>
+                {switching && switching.id === subscription?.plan_id
+                  ? t("You stay on your current plan, and the change waiting for your next renewal is dropped.")
+                  : switching?.switch_charge
+                  ? `${t("It starts now, and we charge your card the difference for the rest of this period:")} ${won(switching.switch_charge)}. ${t("Your renewal date stays the same.")}`
+                  : switching && switching.amount > (subscription?.amount ?? 0)
+                  ? t("It starts now at no charge, because so little of this period is left.")
+                  : t("It starts at your next renewal. Nothing changes until then, and you can change your mind.")}
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>{t("Keep this plan")}</AlertDialogCancel>
+              <AlertDialogAction onClick={() => switching && void changePlan(switching)}>
+                {t("Change plan")}
               </AlertDialogAction>
             </AlertDialogFooter>
           </AlertDialogContent>

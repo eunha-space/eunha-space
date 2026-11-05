@@ -255,6 +255,31 @@ const ko: Record<string, string> = {
     "구독이 이미 종료되었습니다. 계속하려면 다시 구독하세요.",
   "The payment was not approved.":
     "결제가 승인되지 않았습니다.",
+  "Plan": "요금제",
+  "Choose a plan": "요금제 선택",
+  "Change plan": "요금제 변경",
+  "Current plan": "현재 요금제",
+  " a month": " / 월",
+  "From your next renewal": "다음 갱신부터",
+  "Change to this plan?": "이 요금제로 변경할까요?",
+  "Keep this plan": "변경하지 않기",
+  "It starts now, and we charge your card the difference for the rest of this period:":
+    "지금 바로 적용되며, 이번 이용 기간의 남은 기간에 대한 차액을 카드로 결제합니다:",
+  "Your renewal date stays the same.": "갱신일은 그대로입니다.",
+  "It starts now at no charge, because so little of this period is left.":
+    "이번 이용 기간이 거의 끝나 추가 요금 없이 지금 바로 적용됩니다.",
+  "It starts at your next renewal. Nothing changes until then, and you can change your mind.":
+    "다음 갱신일부터 적용됩니다. 그때까지는 달라지는 것이 없으며, 언제든 되돌릴 수 있습니다.",
+  "You stay on your current plan, and the change waiting for your next renewal is dropped.":
+    "현재 요금제를 유지하며, 다음 갱신일에 예정된 변경은 취소됩니다.",
+  "The full amount goes back to your card, you return to the plan you had, and your subscription is cancelled. It keeps running until the end of the paid period.":
+    "전액이 카드로 환불되고 이전 요금제로 돌아가며 구독이 해지됩니다. 결제한 기간이 끝날 때까지는 계속 이용할 수 있습니다.",
+  "This plan is not available.": "이 요금제는 선택할 수 없습니다.",
+  "Only an active subscription can change plans.": "이용 중인 구독만 요금제를 변경할 수 있습니다.",
+  "Keep your subscription before changing plans.": "요금제를 변경하려면 먼저 구독을 유지해 주세요.",
+  "Delete instances until you are within this plan's limit first.":
+    "이 요금제의 한도에 맞게 인스턴스를 먼저 삭제해 주세요.",
+  "Add a card before upgrading.": "요금제를 올리려면 먼저 카드를 등록해 주세요.",
   "Refund":
     "환불",
   "Refunded":

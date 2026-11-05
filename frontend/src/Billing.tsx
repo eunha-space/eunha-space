@@ -11,6 +11,8 @@ import { api, errorMessage } from "@/api";
 import { absoluteTime, relativeTime } from "@/format";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
@@ -52,9 +54,19 @@ type Account = {
   last_paid_at: string | null;
 };
 
+type Plan = {
+  id: string;
+  name_en: string;
+  name_ko: string;
+  amount: number;
+  instance_limit: number | null;
+  active: boolean;
+  subscribers: number;
+};
+
 type Overview = {
   enabled: boolean;
-  amount: number | null;
+  plans: Plan[];
   summary: {
     active: number;
     past_due: number;
@@ -150,6 +162,132 @@ function matches(account: Account, filter: Filter): boolean {
   }
 }
 
+function Plans({ plans, onChanged }: { plans: Plan[]; onChanged: () => Promise<void> }) {
+  const [nameEn, setNameEn] = useState("");
+  const [nameKo, setNameKo] = useState("");
+  const [amount, setAmount] = useState("");
+  const [limit, setLimit] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  async function run(action: () => Promise<unknown>) {
+    setBusy(true);
+    setError("");
+    try {
+      await action();
+      await onChanged();
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const create = () =>
+    run(async () => {
+      await api("/billing/plans", {
+        method: "POST",
+        body: JSON.stringify({
+          name_en: nameEn,
+          name_ko: nameKo,
+          amount: Number(amount),
+          instance_limit: limit.trim() === "" ? null : Number(limit),
+        }),
+      });
+      setNameEn("");
+      setNameKo("");
+      setAmount("");
+      setLimit("");
+    });
+
+  const setActive = (plan: Plan, active: boolean) =>
+    run(() =>
+      api(`/billing/plans/${plan.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name_en: plan.name_en,
+          name_ko: plan.name_ko,
+          instance_limit: plan.instance_limit,
+          active,
+        }),
+      })
+    );
+
+  return (
+    <Card className="gap-0 overflow-hidden p-0">
+      <CardHeader className="px-4 py-3">
+        <CardTitle className="text-base">Plans</CardTitle>
+        <CardDescription className="text-xs">
+          A plan's price cannot change: add a new plan and retire the old one. Subscribers keep
+          the plan they are on until they change it.
+        </CardDescription>
+      </CardHeader>
+      {error && (
+        <Alert variant="destructive" className="mx-4 mb-3 w-auto">
+          <CircleAlert />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Name</TableHead>
+            <TableHead className="text-right">Monthly</TableHead>
+            <TableHead className="text-right">Instances</TableHead>
+            <TableHead className="text-right">Subscribers</TableHead>
+            <TableHead>Offered</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {plans.map((plan) => (
+            <TableRow key={plan.id}>
+              <TableCell>{plan.name_en} · {plan.name_ko}</TableCell>
+              <TableCell className="text-right tabular-nums">{won(plan.amount)}</TableCell>
+              <TableCell className="text-right tabular-nums">
+                {plan.instance_limit ?? "Account's limit"}
+              </TableCell>
+              <TableCell className="text-right tabular-nums">{plan.subscribers}</TableCell>
+              <TableCell>
+                <Switch
+                  aria-label={`Offer ${plan.name_en}`}
+                  checked={plan.active}
+                  disabled={busy}
+                  onCheckedChange={(active) => void setActive(plan, active)}
+                />
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+      <form
+        className="grid items-end gap-3 border-t p-4 md:grid-cols-[1fr_1fr_8rem_8rem_auto]"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void create();
+        }}
+      >
+        <div className="grid gap-1">
+          <Label htmlFor="plan-name-en">English name</Label>
+          <Input id="plan-name-en" required maxLength={60} value={nameEn} onChange={(event) => setNameEn(event.target.value)} />
+        </div>
+        <div className="grid gap-1">
+          <Label htmlFor="plan-name-ko">Korean name</Label>
+          <Input id="plan-name-ko" required maxLength={60} value={nameKo} onChange={(event) => setNameKo(event.target.value)} />
+        </div>
+        <div className="grid gap-1">
+          <Label htmlFor="plan-amount">Won a month</Label>
+          <Input id="plan-amount" required type="number" min={100} value={amount} onChange={(event) => setAmount(event.target.value)} />
+        </div>
+        <div className="grid gap-1">
+          <Label htmlFor="plan-limit">Instance limit</Label>
+          <Input id="plan-limit" type="number" min={0} placeholder="Account's" value={limit} onChange={(event) => setLimit(event.target.value)} />
+        </div>
+        <Button type="submit" disabled={busy}>Add plan</Button>
+      </form>
+    </Card>
+  );
+}
+
 export function Billing() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [error, setError] = useState("");
@@ -219,8 +357,8 @@ export function Billing() {
         <Alert>
           <CreditCard />
           <AlertDescription>
-            Billing is off: set TOSSPAYMENTS_CLIENT_KEY, TOSSPAYMENTS_SECRET_KEY and
-            EUNHA_SPACE_SUBSCRIPTION_AMOUNT on the control plane to start charging. Until then
+            Billing is off: set TOSSPAYMENTS_CLIENT_KEY and TOSSPAYMENTS_SECRET_KEY on the
+            control plane, and add a plan below, to start charging. Until then
             nobody needs a subscription and customers see no subscription card.
           </AlertDescription>
         </Alert>
@@ -253,14 +391,13 @@ export function Billing() {
         ))}
       </Card>
 
+      <Plans plans={overview.plans} onChanged={load} />
+
       <Card className="gap-0 overflow-hidden p-0">
         <CardHeader className="flex flex-col gap-3 px-4 py-3">
           <div>
             <CardTitle className="text-base">Subscribers</CardTitle>
             <CardDescription className="text-xs">
-              {overview.amount != null
-                ? `New subscriptions are ${won(overview.amount)} a month. `
-                : ""}
               Accounts that subscribed, are exempt, or run instances unbilled. Select a row for its
               payments.
             </CardDescription>

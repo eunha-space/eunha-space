@@ -61,10 +61,24 @@ pub(crate) struct Account {
     last_paid_at: Option<OffsetDateTime>,
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct Plan {
+    id: Uuid,
+    name_en: String,
+    name_ko: String,
+    amount: i64,
+    instance_limit: Option<i64>,
+    active: bool,
+    /// Running subscriptions on it, or moving to it at their next renewal.
+    subscribers: i64,
+}
+
+const PLAN_COLUMNS: &str = "id,name_en,name_ko,amount,instance_limit,active,(SELECT count(*) FROM subscriptions s WHERE s.status IN ('active','past_due') AND plans.id IN (s.plan_id,s.pending_plan_id)) subscribers";
+
 #[derive(Serialize)]
 pub(crate) struct Overview {
     enabled: bool,
-    amount: Option<i64>,
+    plans: Vec<Plan>,
     summary: Summary,
     accounts: Vec<Account>,
 }
@@ -108,9 +122,15 @@ pub(crate) async fn overview(
     )
     .fetch_all(&s.db)
     .await?;
+    billing::ensure_initial_plan(&s).await?;
+    let plans = sqlx::query_as::<_, Plan>(&format!(
+        "SELECT {PLAN_COLUMNS} FROM plans ORDER BY active DESC,amount,created_at"
+    ))
+    .fetch_all(&s.db)
+    .await?;
     Ok(Json(Overview {
         enabled: s.billing.is_some(),
-        amount: s.billing.as_ref().map(|billing| billing.amount),
+        plans,
         summary,
         accounts,
     }))
@@ -221,6 +241,109 @@ pub(crate) async fn retry(
         tracing::warn!(%user_id, "could not charge a subscription an operator retried");
     }
     Ok(StatusCode::NO_CONTENT)
+}
+
+fn plan_name(name: &str) -> Result<&str, ApiError> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 60 {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "A plan's name must be 1 to 60 characters.".into(),
+        ));
+    }
+    Ok(name)
+}
+
+#[derive(Deserialize)]
+pub(crate) struct NewPlan {
+    name_en: String,
+    name_ko: String,
+    amount: i64,
+    instance_limit: Option<i64>,
+}
+
+/// Offer a new plan. Its price is fixed from here on.
+pub(crate) async fn create_plan(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<NewPlan>,
+) -> Result<Json<Plan>, ApiError> {
+    let (admin_id, _) = admin_user(&headers, &s.db).await?;
+    if body.amount < 100 || body.instance_limit.is_some_and(|limit| limit < 0) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "A plan costs at least 100 won and cannot have a negative limit.".into(),
+        ));
+    }
+    let mut tx = s.db.begin().await?;
+    let plan = sqlx::query_as::<_, Plan>(&format!(
+        "INSERT INTO plans(name_en,name_ko,amount,instance_limit) VALUES($1,$2,$3,$4) RETURNING {PLAN_COLUMNS}"
+    ))
+    .bind(plan_name(&body.name_en)?)
+    .bind(plan_name(&body.name_ko)?)
+    .bind(body.amount)
+    .bind(body.instance_limit)
+    .fetch_one(&mut *tx)
+    .await?;
+    billing::record(
+        &mut tx,
+        admin_id,
+        "subscription_plan_create",
+        "succeeded",
+        serde_json::json!({ "plan_id": plan.id, "amount": plan.amount }),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(plan))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PlanUpdate {
+    name_en: String,
+    name_ko: String,
+    instance_limit: Option<i64>,
+    active: bool,
+}
+
+/// Rename a plan, change its limit, or retire or bring it back. Retiring leaves
+/// those on it where they are; it only stops anyone new choosing it.
+pub(crate) async fn update_plan(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PlanUpdate>,
+) -> Result<Json<Plan>, ApiError> {
+    let (admin_id, _) = admin_user(&headers, &s.db).await?;
+    if body.instance_limit.is_some_and(|limit| limit < 0) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "A plan cannot have a negative limit.".into(),
+        ));
+    }
+    let mut tx = s.db.begin().await?;
+    let plan = sqlx::query_as::<_, Plan>(&format!(
+        "UPDATE plans SET name_en=$2,name_ko=$3,instance_limit=$4,active=$5 WHERE id=$1 RETURNING {PLAN_COLUMNS}"
+    ))
+    .bind(id)
+    .bind(plan_name(&body.name_en)?)
+    .bind(plan_name(&body.name_ko)?)
+    .bind(body.instance_limit)
+    .bind(body.active)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Plan not found.".into()))?;
+    billing::record(
+        &mut tx,
+        admin_id,
+        "subscription_plan_update",
+        "succeeded",
+        serde_json::json!({ "plan_id": id, "instance_limit": body.instance_limit, "active": body.active }),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(plan))
 }
 
 #[derive(Deserialize)]
