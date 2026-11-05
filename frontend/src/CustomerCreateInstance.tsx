@@ -71,7 +71,7 @@ export function CustomerCreateInstance(
   return (
     <div className="grid gap-6">
       <div>
-        <Button variant="ghost" className="mb-3 -ml-3" render={<a href="/" />}>
+        <Button variant="ghost" className="mb-3 -ml-3" render={<a href="/instances" />}>
           <ArrowLeft /> {t("All instances")}
         </Button>
         <h1 className="text-2xl font-semibold tracking-tight">

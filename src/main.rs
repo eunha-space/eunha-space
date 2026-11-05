@@ -1026,7 +1026,8 @@ async fn main() -> Result<()> {
         .route_service("/signup", index.clone())
         .route_service("/verify", index.clone())
         .route_service("/account", index.clone())
-        .route_service("/account/billing", index)
+        .route_service("/account/billing", index.clone())
+        .route_service("/instances", index)
         .route_service(
             "/instances/{id}",
             ServeFile::new(frontend_directory.join("index.html")),

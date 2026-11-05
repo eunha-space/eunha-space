@@ -1,6 +1,5 @@
 import { useLingui } from "@lingui/react";
 import { Button } from "@/components/ui/button";
-import { SiteHeader } from "@/SiteHeader";
 
 const EXPLANATIONS = [
   {
@@ -74,14 +73,15 @@ const STEPS = [
   },
 ];
 
-/** What a signed-out visitor sees at `/`. */
-export function Landing() {
+/** The front page, at `/`, for anyone. */
+export function Landing({ signedIn }: { signedIn: boolean }) {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
+  const start = signedIn
+    ? { href: "/instances", label: t("Your instances") }
+    : { href: "/signup", label: t("Create account") };
   return (
-    <main data-landing className="mx-auto w-full max-w-5xl flex-1 break-keep px-4 md:px-8">
-      <SiteHeader />
-
+    <main className="mx-auto w-full max-w-5xl flex-1 break-keep px-4 md:px-8">
       <section className="grid items-center gap-10 py-12 md:grid-cols-[3fr_2fr] md:py-20">
         <div>
           <h1 className="text-4xl font-semibold tracking-tight text-balance md:text-6xl">
@@ -93,8 +93,8 @@ export function Landing() {
             )}
           </p>
           <div className="mt-8 flex flex-wrap gap-3">
-            <Button size="lg" render={<a href="/signup" />}>
-              {t("Create account")}
+            <Button size="lg" render={<a href={start.href} />}>
+              {start.label}
             </Button>
             <Button size="lg" variant="outline" render={<a href="#how-it-works" />}>
               {t("How it works")}
@@ -147,8 +147,8 @@ export function Landing() {
           {t("Start your own server.")}
         </h2>
         <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-3">
-          <Button size="lg" render={<a href="/signup" />}>
-            {t("Create account")}
+          <Button size="lg" render={<a href={start.href} />}>
+            {start.label}
           </Button>
           <a
             href="/pricing"

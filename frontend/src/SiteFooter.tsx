@@ -12,8 +12,8 @@ const BUSINESS_DETAILS = [
 export function SiteFooter() {
   return (
     <footer lang="ko" className="text-muted-foreground border-t py-6 text-xs">
-      {/* Lines up with the page above it: the portal's column, or the landing page's. */}
-      <dl className="mx-auto grid max-w-2xl grid-cols-[auto_1fr] gap-x-4 gap-y-1 px-4 group-has-data-landing/site:max-w-5xl group-has-data-landing/site:md:px-8">
+      {/* Lines up with the site header. */}
+      <dl className="mx-auto grid max-w-5xl grid-cols-[auto_1fr] gap-x-4 gap-y-1 px-4 md:px-8">
         {BUSINESS_DETAILS.map(([label, value]) => (
           <div key={label} className="col-span-2 grid grid-cols-subgrid">
             <dt>{label}</dt>

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { CircleAlert, CreditCard, LogOut, Plus, UserRound } from "lucide-react";
+import { CircleAlert, CreditCard, Plus } from "lucide-react";
 import {
   api,
   countsTowardInstanceLimit,
@@ -21,15 +21,15 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Mark, ThemeToggle } from "@/components/console/brand";
+import { Mark } from "@/components/console/brand";
 import { Spinner } from "@/components/console/status";
 import { useLingui } from "@lingui/react";
-import { LanguageToggle } from "@/i18n";
 import { CustomerInstanceDetail } from "@/CustomerInstanceDetail";
 import { CustomerAccount } from "@/CustomerAccount";
 import { CustomerCreateInstance } from "@/CustomerCreateInstance";
 import { Landing } from "@/Landing";
 import { Pricing } from "@/Pricing";
+import { SiteHeader } from "@/SiteHeader";
 
 export function CustomerApp() {
   const { i18n } = useLingui();
@@ -52,17 +52,16 @@ export function CustomerApp() {
     const nextTenants = await api<Tenant[]>("/customer/tenants");
     setCustomer(me);
     setTenants(nextTenants);
-    // Signed in, these paths have nothing to show; `/` is the instance list.
-    // A customer sees and changes plans on `/account`.
-    if (["/signin", "/signup", "/pricing"].includes(location.pathname)) {
-      history.replaceState(null, "", "/");
+    // Signed in, these paths have nothing to show.
+    if (["/signin", "/signup"].includes(location.pathname)) {
+      history.replaceState(null, "", "/instances");
     }
   }
   useEffect(() => {
     const token = new URLSearchParams(location.search).get("token");
     if (location.pathname === "/verify" && token) {
       void api(`/customer/verify?token=${encodeURIComponent(token)}`)
-        .then(() => location.replace(`${location.origin}/?verified=1`))
+        .then(() => location.replace(`${location.origin}/instances?verified=1`))
         .catch((e) => setError(errorMessage(e)));
     }
     load().catch(() => {}).finally(() => setSessionLoaded(true));
@@ -109,38 +108,39 @@ export function CustomerApp() {
   }
   async function signOut() {
     await api("/customer/session", { method: "DELETE" });
-    setCustomer(null);
-    setTenants([]);
+    location.assign("/");
   }
   const activeInstances = tenants.filter(countsTowardInstanceLimit).length;
   const reachedInstanceLimit = customer?.instance_limit != null &&
     activeInstances >= customer.instance_limit;
+  const header = (
+    <SiteHeader customer={sessionLoaded ? customer : undefined} onSignOut={signOut} />
+  );
+  const withHeader = (main: React.ReactNode) => (
+    <>
+      {header}
+      {main}
+    </>
+  );
+  const portal = (page: React.ReactNode) =>
+    withHeader(<main className="mx-auto w-full max-w-2xl flex-1 px-4 pt-4 pb-10">{page}</main>);
   if (!sessionLoaded) {
-    return (
+    return withHeader(
       <main className="grid flex-1 place-items-center p-4">
         <div className="grid justify-items-center gap-4">
           <Mark />
           <Spinner label={t("Loading…")} />
         </div>
-      </main>
+      </main>,
     );
   }
+  if (location.pathname === "/") return withHeader(<Landing signedIn={customer !== null} />);
+  if (location.pathname === "/pricing") return withHeader(<Pricing customer={customer} />);
   if (!customer) {
-    if (location.pathname === "/" && !verified) return <Landing />;
-    if (location.pathname === "/pricing") return <Pricing />;
-    return (
+    return withHeader(
       <main className="grid flex-1 place-items-center p-4">
-        <div className="fixed top-5 right-5">
-          <div className="flex gap-2">
-            <LanguageToggle />
-            <ThemeToggle />
-          </div>
-        </div>
         <Card className="w-full max-w-md">
           <CardHeader>
-            <a href="/" aria-label={t("eunha space")} className="mb-4 w-fit">
-              <Mark />
-            </a>
             <CardTitle>
               {t(signup ? "Create your account" : "Your eunha space instances")}
             </CardTitle>
@@ -232,43 +232,29 @@ export function CustomerApp() {
             </CardContent>
           )}
         </Card>
-      </main>
+      </main>,
     );
   }
   if (location.pathname === "/account" || location.pathname === "/account/billing") {
-    return (
-      <main className="mx-auto w-full max-w-2xl flex-1 p-4 md:py-10">
-        <CustomerHeader customer={customer} onSignOut={signOut} />
-        <CustomerAccount customer={customer} onChanged={load} />
-      </main>
-    );
+    return portal(<CustomerAccount customer={customer} onChanged={load} />);
   }
   if (
     location.pathname === "/instances/new" && customer.has_password &&
     !customer.subscription_required
   ) {
-    return (
-      <main className="mx-auto w-full max-w-2xl flex-1 p-4 md:py-10">
-        <CustomerHeader customer={customer} onSignOut={signOut} />
-        <CustomerCreateInstance
-          customer={customer}
-          activeInstances={activeInstances}
-        />
-      </main>
+    return portal(
+      <CustomerCreateInstance
+        customer={customer}
+        activeInstances={activeInstances}
+      />,
     );
   }
   const instanceId = location.pathname.match(/^\/instances\/([^/]+)$/)?.[1];
   if (instanceId) {
-    return (
-      <main className="mx-auto w-full max-w-2xl flex-1 p-4 md:py-10">
-        <CustomerHeader customer={customer} onSignOut={signOut} />
-        <CustomerInstanceDetail id={instanceId} />
-      </main>
-    );
+    return portal(<CustomerInstanceDetail id={instanceId} />);
   }
-  return (
-    <main className="mx-auto w-full max-w-2xl flex-1 p-4 md:py-10">
-      <CustomerHeader customer={customer} onSignOut={signOut} />
+  return portal(
+    <>
       {error && (
         <Alert variant="destructive" className="mb-4">
           <CircleAlert />
@@ -344,44 +330,6 @@ export function CustomerApp() {
           </CardContent>
         </Card>
       )}
-    </main>
-  );
-}
-
-function CustomerHeader(
-  { customer, onSignOut }: {
-    customer: Customer;
-    onSignOut: () => Promise<void>;
-  },
-) {
-  const { i18n } = useLingui();
-  return (
-    <header className="mb-8 flex items-center justify-between">
-      <div className="flex items-center gap-3">
-        <Mark />
-        <div>
-          <strong>{i18n._("eunha space")}</strong>
-          <p className="text-muted-foreground text-sm">{customer.email}</p>
-        </div>
-      </div>
-      <div className="flex gap-2">
-        {customer.is_admin && (
-          <Button variant="outline" render={<a href="/admin" />}>{i18n._("Control plane")}</Button>
-        )}
-        <LanguageToggle />
-        <ThemeToggle />
-        <Button
-          variant="outline"
-          size="icon"
-          aria-label={i18n._("Account")}
-          render={<a href="/account" />}
-        >
-          <UserRound />
-        </Button>
-        <Button variant="outline" size="icon" onClick={() => void onSignOut()}>
-          <LogOut />
-        </Button>
-      </div>
-    </header>
+    </>,
   );
 }

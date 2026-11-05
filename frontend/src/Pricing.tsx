@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 import { useLingui } from "@lingui/react";
-import { api, type PublicPlan } from "@/api";
+import { api, type Customer, type PublicPlan } from "@/api";
 import { Button } from "@/components/ui/button";
 import { won } from "@/format";
 import { CONTACT_EMAIL, planLimits } from "@/planLimits";
-import { SiteHeader } from "@/SiteHeader";
 
 const TERMS = [
   "Every plan is charged monthly.",
@@ -15,7 +14,7 @@ const TERMS = [
 ];
 
 /** The plans on offer, at `/pricing`, for anyone. */
-export function Pricing() {
+export function Pricing({ customer }: { customer: Customer | null }) {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
   const [plans, setPlans] = useState<PublicPlan[]>([]);
@@ -24,9 +23,12 @@ export function Pricing() {
     api<PublicPlan[]>("/customer/plans").then(setPlans).catch(() => {});
   }, []);
   const korean = i18n.locale === "ko";
+  // A customer subscribes and changes plans on their account page.
+  const action = !customer
+    ? { href: "/signup", label: t("Create account") }
+    : { href: "/account", label: t(customer.subscription_required ? "Subscribe" : "Change plan") };
   return (
-    <main data-landing className="mx-auto w-full max-w-5xl flex-1 break-keep px-4 md:px-8">
-      <SiteHeader />
+    <main className="mx-auto w-full max-w-5xl flex-1 break-keep px-4 md:px-8">
       <section className="py-12 md:py-16">
         <h1 className="text-4xl font-semibold tracking-tight text-balance md:text-5xl">
           {t("Pricing")}
@@ -47,8 +49,8 @@ export function Pricing() {
               <ul className="text-muted-foreground mt-4 mb-6 grid gap-1 text-sm">
                 {planLimits(plan, korean).map((limit) => <li key={limit}>{limit}</li>)}
               </ul>
-              <Button variant="outline" className="mt-auto" render={<a href="/signup" />}>
-                {t("Create account")}
+              <Button variant="outline" className="mt-auto" render={<a href={action.href} />}>
+                {action.label}
               </Button>
             </li>
           ))}

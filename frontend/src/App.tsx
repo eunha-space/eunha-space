@@ -62,7 +62,7 @@ export function App() {
     if (options.manual) setRefreshing(true);
     try {
       const me = await api<Customer>("/customer/session/me");
-      if (!me.is_admin) { location.replace("/"); return; }
+      if (!me.is_admin) { location.replace("/instances"); return; }
       const [nextTenants, nextRuntimes, nextOperations] = await Promise.all([
         api<Tenant[]>("/tenants"),
         api<Runtime[]>("/runtimes"),

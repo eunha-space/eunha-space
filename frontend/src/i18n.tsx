@@ -100,6 +100,8 @@ const ko: Record<string, string> = {
   "Already have an account? Sign in": "이미 계정이 있나요? 로그인",
   "New here? Create an account": "처음이신가요? 계정 만들기",
   Account: "계정",
+  "Sign out": "로그아웃",
+  "Control plane": "컨트롤 플레인",
   "Set your password": "비밀번호 설정",
   "Set password": "비밀번호 설정",
   "Change your password": "비밀번호 변경",

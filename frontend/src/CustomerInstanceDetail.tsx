@@ -144,7 +144,7 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
   return (
     <div className="grid gap-6">
       <div>
-        <Button variant="ghost" className="mb-3 -ml-3" render={<a href="/" />}>
+        <Button variant="ghost" className="mb-3 -ml-3" render={<a href="/instances" />}>
           <ArrowLeft /> {t("All instances")}
         </Button>
         <div className="flex flex-wrap items-center gap-3">
@@ -470,7 +470,7 @@ function DeleteInstance(
       });
       if (path === "/purge") {
         // A purged instance is gone from the customer's list.
-        location.assign("/");
+        location.assign("/instances");
         return;
       }
       onChanged();
