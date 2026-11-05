@@ -56,6 +56,17 @@ const MID_MISMATCH_RECHECK: &str = "1 hour";
 /// own timeout, so a slow approval is not sent again while it is still running.
 const LEASE: &str = "3 minutes";
 
+/// The longest `customerEmail` TossPayments takes.
+const TOSS_EMAIL_MAX: usize = 100;
+
+/// How long a request to TossPayments may take. An approval can take 60 seconds
+/// by its documentation, which asks for at least that much.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// How long connecting may take. Divided among the addresses a name resolves
+/// to, so one that drops packets does not use up the request's whole timeout.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// How often the renewer looks for a subscription that is due.
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -81,6 +92,12 @@ pub(crate) enum Charge {
 #[derive(Debug, PartialEq)]
 pub(crate) enum Lookup {
     Settled(Charge),
+    /// Approved, then partly given back before the approval was recorded. It is
+    /// paid, and the cancellation is recorded once it is.
+    PartlyCanceled {
+        paid: Charge,
+        payment: crate::billing_sync::PaymentRecord,
+    },
     /// TossPayments has no such order: nothing was charged under it.
     NotFound,
     Unknown,
@@ -148,7 +165,12 @@ impl Config {
             order_name: order_name.chars().take(100).collect(),
             mid,
             client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(60))
+                .timeout(REQUEST_TIMEOUT)
+                .connect_timeout(CONNECT_TIMEOUT)
+                // TossPayments moves between addresses and asks that connections
+                // not outlive its DNS answers. Charges are too far apart for
+                // reusing one to save anything.
+                .pool_max_idle_per_host(0)
                 .build()?,
         })
     }
@@ -217,7 +239,7 @@ impl Config {
                 "amount": amount,
                 "orderId": order_id,
                 "orderName": self.order_name,
-                "customerEmail": email,
+                "customerEmail": toss_email(email),
             }))
             .send()
             .await;
@@ -253,7 +275,8 @@ impl Config {
     async fn payment_by_order(&self, order_id: &str, amount: i64) -> Charge {
         match self.lookup(order_id, amount).await {
             Lookup::Settled(outcome) => outcome,
-            Lookup::NotFound | Lookup::Unknown => Charge::Unknown,
+            // The renewer's next look settles it and records the cancellation.
+            Lookup::PartlyCanceled { .. } | Lookup::NotFound | Lookup::Unknown => Charge::Unknown,
         }
     }
 
@@ -298,6 +321,30 @@ impl Config {
                     code: payment.status,
                     message: "The payment was not approved.".into(),
                 })
+            }
+            // Cancelled before the approval was recorded: nothing is kept, so
+            // the period is not paid for.
+            Ok(payment) if payment.order_id == order_id && payment.status == "CANCELED" => {
+                Lookup::Settled(Charge::Declined {
+                    code: payment.status,
+                    message: "The payment was canceled.".into(),
+                })
+            }
+            Ok(payment)
+                if payment.order_id == order_id
+                    && payment.status == "PARTIAL_CANCELED"
+                    && payment.total_amount == amount =>
+            {
+                match serde_json::from_slice(&body) {
+                    Ok(record) => Lookup::PartlyCanceled {
+                        paid: Charge::Paid {
+                            payment_key: payment.payment_key,
+                            receipt_url: payment.receipt.and_then(|receipt| receipt.url),
+                        },
+                        payment: record,
+                    },
+                    Err(_) => Lookup::Unknown,
+                }
             }
             // IN_PROGRESS, READY, or a record for another order: not settled.
             _ => Lookup::Unknown,
@@ -388,6 +435,12 @@ pub(crate) fn merchant_setup_error(status: reqwest::StatusCode, body: &[u8]) -> 
 }
 
 /// Read a charge's response. `None` when it does not say what happened.
+/// The address to send TossPayments with a charge, which it refuses if it is too
+/// long. It only uses it to mail its own receipt, and ours goes out regardless.
+fn toss_email(email: Option<&str>) -> Option<&str> {
+    email.filter(|email| email.chars().count() <= TOSS_EMAIL_MAX)
+}
+
 pub(crate) fn charge_outcome(
     status: reqwest::StatusCode,
     body: &[u8],
@@ -1387,6 +1440,11 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
                 settle(s, &due, &pending, outcome).await?;
                 return Ok(true);
             }
+            Lookup::PartlyCanceled { paid, payment } => {
+                settle(s, &due, &pending, paid).await?;
+                crate::billing_sync::apply_cancellation(s, &pending.order_id, &payment).await?;
+                return Ok(true);
+            }
             // Never recorded, and long enough ago that it will not be: nothing
             // was charged, so a new order takes its place now. Not a decline.
             Lookup::NotFound if pending.abandonable => {
@@ -1753,6 +1811,15 @@ pub(crate) async fn notify(s: &Shared, user_id: Uuid, notice: Notice<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_address_tosspayments_would_refuse_is_left_out() {
+        let longest = format!("{}@example.com", "a".repeat(88));
+        assert_eq!(longest.len(), TOSS_EMAIL_MAX);
+        assert_eq!(toss_email(Some(&longest)), Some(longest.as_str()));
+        assert_eq!(toss_email(Some(&format!("a{longest}"))), None);
+        assert_eq!(toss_email(None), None);
+    }
 
     #[test]
     fn order_ids_read_as_the_day_in_korea_and_eight_digits() {

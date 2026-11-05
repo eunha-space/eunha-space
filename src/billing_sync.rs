@@ -41,7 +41,7 @@ const REFUND_RETRY: &str = "5 minutes";
 const WEBHOOK_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(7);
 
 /// A payment as TossPayments records it, as far as refunds need it.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PaymentRecord {
     #[serde(default)]
@@ -369,7 +369,7 @@ async fn withdraw_refund(s: &Shared, due: &DueRefund, reason: &str) -> anyhow::R
 /// offline at once, and one of the period being served takes that period's
 /// upgrades back with it. What an operator gives back, here or in the dashboard,
 /// returns the money and changes nothing else.
-async fn apply_cancellation(
+pub(crate) async fn apply_cancellation(
     s: &Shared,
     order_id: &str,
     payment: &PaymentRecord,
@@ -497,15 +497,15 @@ async fn payment_changed(s: &Shared, order_id: &str) -> anyhow::Result<bool> {
         Found::NotFound => return Ok(true),
         Found::Unknown => return Ok(false),
     };
-    if payment.refunded() > 0 {
-        apply_cancellation(s, order_id, &payment).await?;
-    } else if status == "pending" {
-        // Settling a charge belongs to the renewer, which looks it up again;
-        // this only brings that forward.
+    if status == "pending" {
+        // Settling a charge belongs to the renewer, which looks it up again and
+        // records any cancellation; this only brings that forward.
         sqlx::query("UPDATE subscriptions SET next_attempt_at=now() WHERE user_id=$1 AND status IN ('incomplete','active','past_due')")
             .bind(user_id)
             .execute(&s.db)
             .await?;
+    } else if payment.refunded() > 0 {
+        apply_cancellation(s, order_id, &payment).await?;
     }
     Ok(true)
 }

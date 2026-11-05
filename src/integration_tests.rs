@@ -2084,6 +2084,65 @@ async fn an_approval_whose_answer_was_lost_is_found_and_not_charged_again(pool: 
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_charge_canceled_before_its_approval_was_recorded_is_not_paid(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    toss.answer(&[TossScript::LostApproval]);
+    let view = subscribe(&state, &headers).await;
+    let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+
+    // The event brings the renewer's look forward, which settles the order.
+    toss.cancel_in_dashboard(&order_id);
+    let event = axum::body::Bytes::from(
+        serde_json::json!({"eventType":"PAYMENT_STATUS_CHANGED","data":{"orderId":order_id,"status":"CANCELED"}})
+            .to_string(),
+    );
+    assert_eq!(
+        billing_sync::webhook(State(state.clone()), event).await,
+        StatusCode::OK
+    );
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(toss.charges().len(), 1);
+    assert_eq!(subscription_status(&pool, user_id).await, "incomplete");
+    let (status, code): (String, Option<String>) =
+        sqlx::query_as("SELECT status,failure_code FROM subscription_payments WHERE order_id=$1")
+            .bind(&order_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "failed");
+    assert_eq!(code.as_deref(), Some("CANCELED"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_charge_partly_canceled_before_its_approval_was_recorded_is_paid(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    toss.answer(&[TossScript::LostApproval]);
+    let view = subscribe(&state, &headers).await;
+    let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+
+    toss.cancel_part_in_dashboard(&order_id, 1000);
+    make_due(&pool, user_id).await;
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(toss.charges().len(), 1);
+    assert_eq!(subscription_status(&pool, user_id).await, "active");
+    let (status, refunded): (String, i64) = sqlx::query_as(
+        "SELECT status,refunded_amount FROM subscription_payments WHERE order_id=$1",
+    )
+    .bind(&order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(status, "paid");
+    assert_eq!(refunded, 1000);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
 async fn a_key_from_another_mid_is_not_charged_or_counted(pool: PgPool) {
     let (toss, base) = toss_stand_in().await;
     let state = billed_state(pool.clone(), &base);

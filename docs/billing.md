@@ -74,10 +74,17 @@ answer for 15 days, errors included, so a charge whose outcome is unknown (a
 timeout, a 5xx response, or a TossPayments-side processing code) is never sent
 again under its key. Five minutes later the order is looked up instead. An
 approved order is settled as paid, and one TossPayments ended (`ABORTED`,
-`EXPIRED`) as declined. An order TossPayments has no record of
+`EXPIRED`) or that was cancelled in full before the approval was recorded
+(`CANCELED`) as declined. One cancelled in part (`PARTIAL_CANCELED`) is settled
+as paid, with the part given back recorded as a refund. An order TossPayments has no record of
 (`NOT_FOUND_PAYMENT`) 45 minutes after it was sent is `expired`, and a new order
 for the same period is charged at once; that is not counted as a decline. A
 charge in flight holds a lease, so two control planes cannot send it at once.
+
+Requests to TossPayments time out after 90 seconds, of which connecting may
+take 10, and don't reuse connections, as its network requirements ask. An email
+address over 100 characters, the most TossPayments takes, is left out of the
+billing window and the charge; it only uses it to mail its own receipt.
 
 A declined renewal is retried after 1, 2, and 4 more days. During those retries
 the subscription is `past_due`, its instances keep running, and the customer is
@@ -194,7 +201,8 @@ Point TossPayments' webhook at `/api/webhooks/tosspayments` for
 
 Payment events are unsigned, so their content is only a reason to look the
 payment up. A cancellation found that way is recorded as above. A change to a
-charge still being confirmed brings the renewer's next look at it forward. An
+charge still being confirmed, a cancellation included, brings the renewer's
+next look at it forward. An
 event the control plane cannot look up is answered with a 503, so TossPayments
 sends it again.
 

@@ -317,6 +317,8 @@ const ko: Record<string, string> = {
     "구독이 이미 종료되었습니다. 계속하려면 다시 구독하세요.",
   "The payment was not approved.":
     "결제가 승인되지 않았습니다.",
+  "The payment was canceled.":
+    "결제가 취소되었습니다.",
   "Plan": "요금제",
   "Choose a plan": "요금제 선택",
   "Change plan": "요금제 변경",

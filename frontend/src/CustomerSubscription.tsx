@@ -118,7 +118,8 @@ export function SubscriptionCard(
         method: "CARD",
         successUrl: location.origin + RETURN_PATH,
         failUrl: location.origin + RETURN_PATH,
-        customerEmail: customer.email,
+        // TossPayments takes no more than 100 characters.
+        customerEmail: customer.email.length <= 100 ? customer.email : undefined,
       });
     } catch (e) {
       // Closing the window is not a failure worth reporting.
