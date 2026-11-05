@@ -1,6 +1,9 @@
+import { useEffect, useState } from "react";
 import { useLingui } from "@lingui/react";
+import { api, type PublicPlan } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Mark, ThemeToggle } from "@/components/console/brand";
+import { won } from "@/format";
 import { LanguageToggle } from "@/i18n";
 
 const EXPLANATIONS = [
@@ -76,7 +79,7 @@ const STEPS = [
 ];
 
 const TERMS = [
-  "Plans are monthly, and you see them before you subscribe.",
+  "Every plan is charged monthly.",
   "Get a full refund within 7 days of a payment, with no reason needed.",
   "Cancel any time and keep the period you already paid for.",
   "If a subscription ends, your instances go offline and their data is kept. Subscribing again brings them back.",
@@ -87,6 +90,12 @@ const TERMS = [
 export function Landing() {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
+  const [plans, setPlans] = useState<PublicPlan[]>([]);
+  useEffect(() => {
+    // Without prices the rest of the page still explains the service.
+    api<PublicPlan[]>("/customer/plans").then(setPlans).catch(() => {});
+  }, []);
+  const korean = i18n.locale === "ko";
   return (
     <main className="mx-auto w-full max-w-5xl flex-1 break-keep px-4 md:px-8">
       <header className="flex items-center justify-between gap-3 py-5">
@@ -163,7 +172,34 @@ export function Landing() {
         </ol>
       </Section>
 
-      <Section title={t("Paying and stopping")}>
+      <Section title={t("Pricing")}>
+        {plans.length > 0 && (
+          <ul className="mb-6 divide-y border-y">
+            {plans.map((plan) => (
+              <li
+                key={plan.name_en}
+                className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 py-3"
+              >
+                <div>
+                  <h3 className="font-medium">
+                    {korean ? plan.name_ko : plan.name_en}
+                  </h3>
+                  {plan.instance_limit != null && (
+                    <p className="text-muted-foreground text-sm">
+                      {korean
+                        ? `인스턴스 ${plan.instance_limit}개`
+                        : `${plan.instance_limit} instance${plan.instance_limit === 1 ? "" : "s"}`}
+                    </p>
+                  )}
+                </div>
+                <p>
+                  <span className="font-medium">{won(plan.amount)}</span>{" "}
+                  <span className="text-muted-foreground text-sm">{t("/ month")}</span>
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
         <ul className="text-muted-foreground grid list-disc gap-2 pl-5">
           {TERMS.map((term) => <li key={term}>{t(term)}</li>)}
         </ul>

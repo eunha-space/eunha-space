@@ -659,6 +659,30 @@ pub(crate) async fn get(
     Ok(Json(view(&s, user_id).await?))
 }
 
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct PublicPlan {
+    name_en: String,
+    name_ko: String,
+    amount: i64,
+    instance_limit: Option<i64>,
+}
+
+/// The plans on offer, cheapest first, for visitors who have no account yet.
+/// With billing off nobody pays, so there are no prices to show.
+pub(crate) async fn public_plans(
+    State(s): State<Shared>,
+) -> Result<Json<Vec<PublicPlan>>, ApiError> {
+    if s.billing.is_none() {
+        return Ok(Json(vec![]));
+    }
+    let plans = sqlx::query_as::<_, PublicPlan>(
+        "SELECT name_en,name_ko,amount,instance_limit FROM plans WHERE active ORDER BY amount,created_at",
+    )
+    .fetch_all(&s.db)
+    .await?;
+    Ok(Json(plans))
+}
+
 /// Below this TossPayments will not charge a card, and it is not worth doing:
 /// an upgrade this close to renewal costs nothing.
 const SMALLEST_CHARGE: i64 = 100;

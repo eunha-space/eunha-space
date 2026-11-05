@@ -3202,6 +3202,36 @@ async fn a_downgrade_waits_for_the_renewal_and_can_be_taken_back(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn visitors_see_the_plans_on_offer_only_when_billing_is_on(pool: PgPool) {
+    plan(&pool, 19900, Some(5)).await;
+    plan(&pool, 9900, None).await;
+    let retired = plan(&pool, 4900, Some(1)).await;
+    sqlx::query("UPDATE plans SET active=false WHERE id=$1")
+        .bind(retired)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let Json(plans) = billing::public_plans(State(state(pool.clone())))
+        .await
+        .unwrap();
+    assert_eq!(serde_json::to_value(plans).unwrap(), serde_json::json!([]));
+
+    let (_toss, base) = toss_stand_in().await;
+    let Json(plans) = billing::public_plans(State(billed_state(pool, &base)))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(plans).unwrap(),
+        serde_json::json!([
+            {"name_en":"plan 9900","name_ko":"plan 9900","amount":9900,"instance_limit":null},
+            {"name_en":"plan 19900","name_ko":"plan 19900","amount":19900,"instance_limit":5},
+        ])
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
 async fn a_plan_limits_instances_and_a_downgrade_must_fit(pool: PgPool) {
     let (_toss, base) = toss_stand_in().await;
     let state = billed_state(pool.clone(), &base);

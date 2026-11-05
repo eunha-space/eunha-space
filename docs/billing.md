@@ -117,6 +117,10 @@ worked out from it. To change a price, add a plan and stop offering the old one.
 Those on a retired plan stay on it, at their price, until they move.
 Without a plan on offer, customers cannot subscribe.
 
+The landing page shows the plans on offer to anyone, from
+`GET /api/customer/plans`, which needs no session and lists nothing while
+billing is off.
+
 Plans are monthly only: a period is always one month.
 
 ## Changing plans

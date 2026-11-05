@@ -28,7 +28,7 @@ const ko: Record<string, string> = {
     "각자 독립적으로 운영되는 소셜 서버들이 ActivityPub이라는 공개 프로토콜로 서로 소통하는 네트워크입니다. 그중 가장 잘 알려진 것이 마스토돈입니다. 이메일처럼 계정이 어느 서버에 있든 다른 서버의 사람들과 소통할 수 있습니다.",
   Eunha: "은하",
   "Free, open-source server software that reimplements Mastodon in Rust. It tracks each Mastodon release and works with Mastodon's apps.":
-    "마스토돈을 Rust로 다시 구현한 자유 오픈소스 서버 소프트웨어입니다. 마스토돈의 새 릴리스를 계속 따라가며, 마스토돈 앱을 그대로 쓸 수 있습니다.",
+    "마스토돈을 Rust로 다시 구현한 오픈 소스 서버 소프트웨어입니다. 마스토돈의 새 릴리스를 계속 따라가며, 마스토돈 및 호환 앱을 그대로 쓸 수 있습니다.",
   "Hosting for Eunha. We run the server and keep it up to date, so you can spend your time on your community instead.":
     "은하 호스팅 서비스입니다. 서버 운영과 업데이트는 저희가 맡으니, 커뮤니티에만 집중하세요.",
   "What you get": "제공 내용",
@@ -49,7 +49,7 @@ const ko: Record<string, string> = {
     "eunha.space 주소에서는 서버 이메일이 이미 설정되어 있습니다. 내 도메인을 쓴다면 인스턴스 페이지에서 SMTP 서비스를 추가하세요.",
   "Free to leave": "언제든 떠날 자유",
   "Members can export their data and move their accounts, followers included, to another server. Eunha itself is open source under the AGPL.":
-    "회원은 데이터를 내보내고, 팔로워와 함께 계정을 다른 서버로 옮길 수 있습니다. 은하는 AGPL 라이선스의 오픈소스입니다.",
+    "회원은 데이터를 내보내고, 팔로워와 함께 계정을 다른 서버로 옮길 수 있습니다. 은하는 AGPL 라이선스의 오픈 소스입니다.",
   "Create an account": "계정 만들기",
   "All you need is an email address. Follow the link we send you.":
     "이메일 주소만 있으면 됩니다. 보내 드리는 링크를 따라가세요.",
@@ -60,9 +60,9 @@ const ko: Record<string, string> = {
   "Sign in to your server": "내 서버에 로그인",
   "Create your admin password on the instance page, then sign in at your new address.":
     "인스턴스 페이지에서 관리자 비밀번호를 만든 뒤, 새 주소에서 로그인하세요.",
-  "Paying and stopping": "결제와 해지",
-  "Plans are monthly, and you see them before you subscribe.":
-    "요금제는 월 단위이며, 구독하기 전에 확인할 수 있습니다.",
+  Pricing: "요금",
+  "/ month": "/ 월",
+  "Every plan is charged monthly.": "모든 요금제는 매월 결제됩니다.",
   "Get a full refund within 7 days of a payment, with no reason needed.":
     "결제일로부터 7일 이내에는 이유를 묻지 않고 전액 환불해 드립니다.",
   "Cancel any time and keep the period you already paid for.":

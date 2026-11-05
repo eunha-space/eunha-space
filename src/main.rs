@@ -914,6 +914,7 @@ async fn main() -> Result<()> {
             post(domain_change::customer_cancel),
         )
         .route("/customer/dns-check", get(customer_dns_check))
+        .route("/customer/plans", get(billing::public_plans))
         .route("/customer/billing", get(billing::get))
         .route("/customer/billing/checkout", post(billing::checkout))
         .route("/customer/billing/authorization", post(billing::authorize))

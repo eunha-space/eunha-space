@@ -1,3 +1,4 @@
+import { won } from "@/format";
 import { useEffect, useState } from "react";
 import { CircleAlert, CreditCard, ExternalLink } from "lucide-react";
 import { useLingui } from "@lingui/react";
@@ -44,11 +45,6 @@ const RETURN_PATH = "/account/billing";
  * twice, so the exchange is remembered outside the component.
  */
 let returnHandled = false;
-
-function won(amount: number): string {
-  return new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW" })
-    .format(amount);
-}
 
 function day(iso: string): string {
   const date = new Date(iso);

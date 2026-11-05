@@ -1,3 +1,8 @@
+/** "₩9,900" */
+export function won(amount: number): string {
+  return new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW" }).format(amount);
+}
+
 const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
 
 const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [

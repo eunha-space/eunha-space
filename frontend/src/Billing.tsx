@@ -1,3 +1,4 @@
+import { won } from "@/format";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ChevronDown,
@@ -108,10 +109,6 @@ type AccountDetail = {
 };
 
 type Filter = "all" | "attention" | "active" | "canceling" | "ended" | "unbilled" | "exempt";
-
-function won(amount: number): string {
-  return new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW" }).format(amount);
-}
 
 function day(iso: string | null): string {
   if (!iso) return "—";

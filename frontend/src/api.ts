@@ -141,6 +141,9 @@ export type Plan = {
   switch_charge: number | null;
 };
 
+/** A plan as shown to visitors, who have no account yet. */
+export type PublicPlan = Pick<Plan, "name_en" | "name_ko" | "amount" | "instance_limit">;
+
 export type Billing = {
   enabled: boolean;
   /** Cheapest first. */
