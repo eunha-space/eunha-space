@@ -149,8 +149,9 @@ Past-due subscriptions must pay first.
 A customer can ask for a payment back from the payment history on `/account`
 within seven days of paying (`POST /api/customer/billing/payments/{order_id}/refund`).
 The full amount is refunded; there are no partial refunds here. The refund
-policy on the landing and subscription pages (*frontend/src/RefundPolicy.tsx*)
-states these rates, so change it along with the window. The request is
+policy on the subscription page (*frontend/src/RefundPolicy.tsx*) and the
+landing page's pricing terms state these rates, so change them along with the
+window. The request is
 recorded first and carried out by the renewer, which looks the payment up
 before every attempt, so a refund interrupted mid-request is finished later and
 never asked for twice:

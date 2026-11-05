@@ -5,7 +5,6 @@ import { Button } from "@/components/ui/button";
 import { Mark, ThemeToggle } from "@/components/console/brand";
 import { won } from "@/format";
 import { LanguageToggle } from "@/i18n";
-import { RefundPolicy } from "./RefundPolicy";
 import { planLimits } from "@/planLimits";
 
 const EXPLANATIONS = [
@@ -203,9 +202,6 @@ export function Landing() {
         <ul className="text-muted-foreground grid list-disc gap-2 pl-5">
           {TERMS.map((term) => <li key={term}>{t(term)}</li>)}
         </ul>
-        <div className="mt-8">
-          <RefundPolicy />
-        </div>
       </Section>
 
       <section className="border-t py-12 md:py-16">
