@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useLingui } from "@lingui/react";
 import { cn } from "cn";
 import { useNavigationProgress } from "@/navigation";
@@ -11,7 +11,6 @@ const FINISH_DURATION = 300;
  * end for as long as that takes, since nothing says how long that will be.
  */
 export function NavigationProgress() {
-  const { i18n } = useLingui();
   const { id, active } = useNavigationProgress();
   const [shown, setShown] = useState(false);
 
@@ -26,16 +25,31 @@ export function NavigationProgress() {
   }, [active]);
 
   if (!active && !shown) return null;
+  return <Bar key={id} active={active} />;
+}
+
+function Bar({ active }: { active: boolean }) {
+  const { i18n } = useLingui();
+  const bar = useRef<HTMLDivElement>(null);
+  const [started, setStarted] = useState(false);
+
+  // Not @starting-style: Safari ignores it when set through Tailwind's scale
+  // variables, and the bar then starts full and shrinks. Reading the layout has
+  // the browser take the empty bar as where the transition begins.
+  useLayoutEffect(() => {
+    bar.current?.getBoundingClientRect();
+    setStarted(true);
+  }, []);
+
   return (
     <div
-      key={id}
+      ref={bar}
       role="progressbar"
       aria-label={i18n._("Loading…")}
+      style={{ scale: active ? (started ? "0.9 1" : "0 1") : "1 1" }}
       className={cn(
         "bg-primary pointer-events-none fixed inset-x-0 top-0 z-50 h-[3px] origin-left transition-[scale,opacity] motion-reduce:transition-none",
-        active
-          ? "scale-x-90 duration-[8000ms] ease-out starting:scale-x-0"
-          : "scale-x-100 opacity-0 duration-300",
+        active ? "duration-[8000ms] ease-out" : "opacity-0 duration-300",
       )}
     />
   );
