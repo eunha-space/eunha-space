@@ -35,7 +35,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Spinner } from "@/components/console/status";
-import { planLimits } from "./planLimits";
+import { CONTACT_EMAIL, planLimits } from "./planLimits";
 import { RefundPolicy } from "./RefundPolicy";
 
 /** Where TossPayments' billing window sends the customer back, either way. */
@@ -333,6 +333,16 @@ export function SubscriptionCard(
                   </button>
                 );
               })}
+              <a
+                href={`mailto:${CONTACT_EMAIL}`}
+                className="hover:bg-muted grid gap-0.5 rounded-lg border p-3 text-left text-sm transition-colors"
+              >
+                <span className="font-medium">{t("Custom")}</span>
+                <span>{t("Contact us")}</span>
+                <span className="text-muted-foreground text-xs">
+                  {t("For bigger instances, we'll work out a plan with you.")}
+                </span>
+              </a>
             </div>
           </div>
         )}

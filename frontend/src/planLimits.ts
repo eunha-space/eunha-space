@@ -1,5 +1,8 @@
 import type { PublicPlan } from "@/api";
 
+/** Where to ask about a plan bigger than those on offer. */
+export const CONTACT_EMAIL = "hello@eunha.space";
+
 /** What a plan promises beyond its price, in the reader's language. */
 export function planLimits(plan: PublicPlan, korean: boolean): string[] {
   const compact = (value: number) =>

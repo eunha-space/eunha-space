@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Mark, ThemeToggle } from "@/components/console/brand";
 import { won } from "@/format";
 import { LanguageToggle } from "@/i18n";
-import { planLimits } from "@/planLimits";
+import { CONTACT_EMAIL, planLimits } from "@/planLimits";
 
 const EXPLANATIONS = [
   {
@@ -197,6 +197,20 @@ export function Landing() {
                 </p>
               </li>
             ))}
+            <li className="flex flex-wrap items-baseline justify-between gap-x-6 gap-y-1 py-3">
+              <div>
+                <h3 className="font-medium">{t("Custom")}</h3>
+                <p className="text-muted-foreground text-sm">
+                  {t("For bigger instances, we'll work out a plan with you.")}
+                </p>
+              </div>
+              <a
+                href={`mailto:${CONTACT_EMAIL}`}
+                className="font-medium underline underline-offset-4"
+              >
+                {t("Contact us")}
+              </a>
+            </li>
           </ul>
         )}
         <ul className="text-muted-foreground grid list-disc gap-2 pl-5">

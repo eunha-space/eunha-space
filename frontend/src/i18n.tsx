@@ -62,6 +62,10 @@ const ko: Record<string, string> = {
     "인스턴스 페이지에서 관리자 비밀번호를 만든 뒤, 새 주소에서 로그인하세요.",
   Pricing: "요금",
   "/ month": "/ 월",
+  Custom: "맞춤",
+  "For bigger instances, we'll work out a plan with you.":
+    "더 큰 인스턴스를 위한 요금제를 함께 정해 드립니다.",
+  "Contact us": "문의하기",
   "Every plan is charged monthly.": "모든 요금제는 매월 결제됩니다.",
   "A payment can be refunded in full for 7 days after it is made, and not after that.":
     "결제 후 7일 이내에는 결제 금액의 100%를 환불받을 수 있으며, 7일이 지나면 환불되지 않습니다.",
