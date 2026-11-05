@@ -172,7 +172,8 @@ The full amount is refunded; there are no partial refunds here. The refund
 policy at `/refund-policy` (*frontend/src/RefundPolicy.tsx*), linked from the
 site footer, the pricing page and the payment history, and the pricing page's
 terms state these rates, so change them along with the
-window. The request is
+window. The policy is written in Korean with an English translation beside it;
+change both together. The request is
 recorded first and carried out by the renewer, which looks the payment up
 before every attempt, so a refund interrupted mid-request is finished later and
 never asked for twice:

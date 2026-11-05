@@ -376,6 +376,81 @@ const ko: Record<string, string> = {
     "이 사이트와 보내 드리는 이메일의 언어를 선택하세요.",
   "Choose English or Korean.":
     "영어나 한국어를 선택하세요.",
+  // Messages the server answers customers with; ErrorAlert looks them up.
+  "Too many attempts. Try again in 15 minutes.":
+    "시도 횟수가 너무 많습니다. 15분 뒤에 다시 시도하세요.",
+  "Password is too long.": "비밀번호가 너무 깁니다.",
+  "Password service is busy. Try again shortly.":
+    "비밀번호 확인이 지연되고 있습니다. 잠시 뒤에 다시 시도하세요.",
+  "Client address unavailable.": "접속 주소를 확인할 수 없습니다.",
+  "Sign in required": "로그인이 필요합니다.",
+  "Session expired": "세션이 만료되었습니다. 다시 로그인하세요.",
+  "Enter a valid email address.": "올바른 이메일 주소를 입력하세요.",
+  "Invalid email address.": "올바르지 않은 이메일 주소입니다.",
+  "An account with that email already exists.": "이미 그 이메일로 만든 계정이 있습니다.",
+  "Customer email verification is not configured.":
+    "이메일 인증이 설정되어 있지 않습니다. 문의해 주세요.",
+  "Could not build the email link.": "이메일 링크를 만들지 못했습니다.",
+  "Could not send the email link.": "이메일 링크를 보내지 못했습니다.",
+  "That verification link is invalid or expired.":
+    "인증 링크가 올바르지 않거나 만료되었습니다.",
+  "Invalid credentials": "이메일 주소나 비밀번호가 올바르지 않습니다.",
+  "Set a password after signing in with an email link.":
+    "이메일 링크로 로그인한 뒤 비밀번호를 설정하세요.",
+  "Verify your email before signing in.": "로그인하기 전에 이메일 인증을 완료하세요.",
+  "Instance not found": "인스턴스를 찾을 수 없습니다.",
+  "Set a password before creating an instance.":
+    "인스턴스를 만들기 전에 비밀번호를 설정하세요.",
+  "Use up to 30 letters, numbers, and underscores for the admin username.":
+    "관리자 사용자 이름은 영문자, 숫자, 밑줄(_)로 30자까지 쓸 수 있습니다.",
+  "No runtime is currently available.":
+    "지금은 인스턴스를 만들 수 없습니다. 잠시 뒤에 다시 시도하세요.",
+  "Enter a valid externally owned custom domain.":
+    "직접 소유한 올바른 커스텀 도메인을 입력하세요.",
+  "Enter a valid domain.": "올바른 도메인을 입력하세요.",
+  "No provided domain suffix is configured.":
+    "eunha.space 주소를 지금은 쓸 수 없습니다. 문의해 주세요.",
+  "That subdomain is reserved.": "예약된 하위 주소입니다.",
+  "Cloudflare for SaaS is not configured.":
+    "커스텀 도메인을 지금은 쓸 수 없습니다. 문의해 주세요.",
+  "You have reached your instance limit.": "만들 수 있는 인스턴스 수에 도달했습니다.",
+  "That domain is already managed.": "이미 사용 중인 도메인입니다.",
+  "Could not generate tenant keys.": "인스턴스 키를 만들지 못했습니다.",
+  "This instance is already deleted.": "이미 삭제된 인스턴스입니다.",
+  "Only a deleted instance can be deleted permanently.":
+    "삭제된 인스턴스만 영구 삭제할 수 있습니다.",
+  "Type the instance's address to confirm.": "확인을 위해 인스턴스 주소를 입력하세요.",
+  "Only a deleted instance can be restored.": "삭제된 인스턴스만 복원할 수 있습니다.",
+  "Delete another instance before restoring this one.":
+    "이 인스턴스를 복원하려면 먼저 다른 인스턴스를 삭제하세요.",
+  "Its custom domain is now used by another instance, so it cannot be restored.":
+    "커스텀 도메인을 다른 인스턴스가 쓰고 있어 복원할 수 없습니다.",
+  "Only failed provisioning can be retried.": "설정에 실패한 인스턴스만 다시 시도할 수 있습니다.",
+  "The admin account is not ready yet.": "관리자 계정이 아직 준비되지 않았습니다.",
+  "Only a running instance can change its domain.":
+    "운영 중인 인스턴스만 도메인을 바꿀 수 있습니다.",
+  "The instance already has that domain.": "인스턴스가 이미 그 도메인을 쓰고 있습니다.",
+  "The instance is already changing its domain.": "인스턴스의 도메인을 이미 바꾸고 있습니다.",
+  "Another domain change is running.": "다른 도메인 변경이 진행 중입니다.",
+  "No part-way domain change to retry.": "다시 시도할 중단된 도메인 변경이 없습니다.",
+  "No domain change is running.": "진행 중인 도메인 변경이 없습니다.",
+  "The instance has begun moving and can no longer stop.":
+    "인스턴스 이동이 시작되어 더 이상 멈출 수 없습니다.",
+  "The domain change was cancelled; the instance stays where it was.":
+    "도메인 변경이 취소되었습니다. 인스턴스는 그대로 있습니다.",
+  "Enter an SMTP hostname, port 465 or 587, credentials, and a sender email address.":
+    "SMTP 호스트 이름, 포트(465 또는 587), 인증 정보, 발신 이메일 주소를 입력하세요.",
+  "SMTP settings require a ready instance with an active custom primary domain.":
+    "SMTP 설정은 커스텀 도메인이 기본 도메인으로 연결된, 준비된 인스턴스에서만 할 수 있습니다.",
+  "The card was declined.": "카드 결제가 거절되었습니다.",
+  "Only the account's owner can do that, not an administrator signed in as them.":
+    "계정 소유자만 할 수 있습니다. 관리자가 대신 로그인한 상태에서는 할 수 없습니다.",
+  "Request could not be completed. Reference: {id}":
+    "요청을 처리하지 못했습니다. 참조 번호: {id}",
+  "Request failed ({status})": "요청에 실패했습니다 ({status})",
+  "Refund amounts": "환불 가능 금액",
+  "When you ask": "환불 신청 시점",
+  "Amount refunded": "환불 가능 금액",
 };
 i18n.load("en", en);
 i18n.load("ko", ko);

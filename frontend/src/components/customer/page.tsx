@@ -128,10 +128,18 @@ export function Loading({ inline = false }: { inline?: boolean }) {
 /** A failure. Server messages are catalog keys too, so they localize here. */
 export function ErrorAlert({ message }: { message: string }) {
   const { i18n } = useLingui();
+  // Two messages carry a value, so they are looked up by their pattern.
+  const reference = /^Request could not be completed\. Reference: (\S+)$/.exec(message);
+  const failed = /^Request failed \((\d+)\)$/.exec(message);
+  const text = reference
+    ? i18n._("Request could not be completed. Reference: {id}", { id: reference[1] })
+    : failed
+      ? i18n._("Request failed ({status})", { status: failed[1] })
+      : i18n._(message);
   return (
     <Alert variant="destructive">
       <CircleAlert />
-      <AlertDescription>{i18n._(message)}</AlertDescription>
+      <AlertDescription>{text}</AlertDescription>
     </Alert>
   );
 }
