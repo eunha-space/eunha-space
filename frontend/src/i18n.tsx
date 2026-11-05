@@ -4,6 +4,16 @@ import { Button } from "@/components/ui/button";
 
 const en: Record<string, string> = {};
 const ko: Record<string, string> = {
+  "Port 465 uses TLS; port 587 requires STARTTLS.": "포트 465는 TLS를, 포트 587은 STARTTLS를 사용합니다.",
+  "Enter both credentials whenever you save; saved credentials are never displayed.": "저장할 때마다 사용자 이름과 비밀번호를 입력하세요. 저장된 인증 정보는 표시되지 않습니다.",
+  "Refund policy": "환불정책",
+  "Billing terms": "결제 안내",
+  "Open instance": "인스턴스 열기",
+  "No payments yet.": "아직 결제 내역이 없습니다.",
+  "Refunds are available for 7 days after a payment.": "결제 후 7일 동안 환불할 수 있습니다.",
+  Site: "사이트",
+  "Switch to the light theme": "밝은 테마로 전환",
+  "Switch to the dark theme": "어두운 테마로 전환",
   "Custom domains require your own SMTP credentials. Email delivery is unavailable until you save them.": "커스텀 도메인은 직접 SMTP 인증 정보를 설정해야 합니다. 저장하기 전까지 이메일을 발송할 수 없습니다.",
   "Email delivery": "이메일 발송",
   "SMTP hostname": "SMTP 호스트 이름",
@@ -14,7 +24,6 @@ const ko: Record<string, string> = {
   "Save SMTP settings": "SMTP 설정 저장",
   "Saving…": "저장 중…",
   "Saved. Your instance will apply these settings shortly.": "저장되었습니다. 곧 인스턴스에 설정이 적용됩니다.",
-  "Use your SMTP provider for instance emails. Port 465 uses TLS; port 587 requires STARTTLS. Enter both credentials whenever you save; saved credentials are never displayed.": "인스턴스 이메일을 내 SMTP 서비스로 발송합니다. 포트 465는 TLS를, 포트 587은 STARTTLS를 사용합니다. 저장할 때마다 사용자 이름과 비밀번호를 입력하세요. 저장된 인증 정보는 표시되지 않습니다.",
   "eunha space": "은하공간",
   "Your own Mastodon-compatible server, run for you.":
     "마스토돈과 호환되는 나만의 서버, 운영은 저희가 맡습니다.",
@@ -80,7 +89,6 @@ const ko: Record<string, string> = {
   "Start your own server.": "나만의 서버를 시작하세요.",
   "About Eunha": "은하 소개",
   "Source code": "소스 코드",
-  "Your eunha space instances": "나의 은하공간 인스턴스",
   "Create your account": "계정 만들기",
   "Sign in to create and manage your instances.":
     "로그인하여 인스턴스를 만들고 관리하세요.",
@@ -116,20 +124,16 @@ const ko: Record<string, string> = {
   "Your email is verified. Add a password of at least 14 characters for password sign-in.":
     "이메일 인증이 완료되었습니다. 비밀번호 로그인을 위해 14자 이상의 비밀번호를 설정하세요.",
   "Create an instance": "인스턴스 만들기",
-  "Create instance": "인스턴스 만들기",
   "You are using every instance your account allows. Delete one to make room for another.":
     "계정에서 허용하는 인스턴스를 모두 사용 중입니다. 새로 만들려면 하나를 삭제하세요.",
   "Creating…": "생성 중…",
   "Your instances": "내 인스턴스",
   "No instances yet.": "아직 인스턴스가 없습니다.",
-  "All instances": "모든 인스턴스",
   Ready: "사용 가능",
   "Setting up": "설정 중",
   "Custom domain setup": "커스텀 도메인 설정",
   Connected: "연결됨",
   "Waiting for DNS": "DNS 설정 대기 중",
-  "Your custom domain is connected. Keep this CNAME record at your DNS provider; without it, your instance can't be reached at this domain.":
-    "커스텀 도메인이 연결되었습니다. DNS 설정에서 이 CNAME 레코드를 유지하세요. 레코드가 없으면 이 도메인으로 인스턴스에 접속할 수 없습니다.",
   "Add this CNAME record at your DNS provider.":
     "도메인의 DNS 설정에 다음 CNAME 레코드를 추가하세요.",
   "If requested, also add this verification record.":
@@ -138,7 +142,6 @@ const ko: Record<string, string> = {
   "Your instance is ready to use.": "인스턴스를 사용할 수 있습니다.",
   "This page updates automatically while we set things up.":
     "설정이 진행되는 동안 이 페이지는 자동으로 업데이트됩니다.",
-  "Setup complete": "설정 완료",
   "Preparing your instance": "인스턴스 준비",
   "Starting your instance": "인스턴스 시작",
   "Creating your admin account": "관리자 계정 만들기",
@@ -192,7 +195,7 @@ const ko: Record<string, string> = {
   Value: "값",
   "Eunha hostname": "호스트명",
   Name: "이름",
-  "Configure site settings inside Eunha after setup.": "설정이 완료되면 Eunha에서 인스턴스 설정을 변경하세요.",
+  "Configure site settings inside Eunha after setup.": "설정이 완료되면 은하에서 인스턴스 설정을 변경하세요.",
   "No instance limit.": "인스턴스 수 제한이 없습니다.",
   Address: "주소",
   "eunha space address": "은하공간 주소",
@@ -325,7 +328,6 @@ const ko: Record<string, string> = {
   "Choose a plan": "요금제 선택",
   "Change plan": "요금제 변경",
   "Current plan": "현재 요금제",
-  " a month": " / 월",
   "From your next renewal": "다음 갱신부터",
   "Change to this plan?": "이 요금제로 변경할까요?",
   "Keep this plan": "변경하지 않기",

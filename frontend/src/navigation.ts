@@ -79,7 +79,7 @@ export function navigate(href: string, { replace = false } = {}) {
 
 /** The paths CustomerApp renders. Anything else on this origin needs a real load. */
 function isCustomerPage(pathname: string) {
-  return ["/", "/pricing", "/signin", "/signup", "/account", "/account/billing", "/instances"]
+  return ["/", "/pricing", "/refund-policy", "/signin", "/signup", "/account", "/account/billing", "/instances"]
     .includes(pathname) || /^\/instances\/[^/]+$/.test(pathname);
 }
 

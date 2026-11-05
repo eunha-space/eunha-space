@@ -1,20 +1,12 @@
 import { useState } from "react";
-import { ArrowLeft, CircleAlert } from "lucide-react";
 import { useLingui } from "@lingui/react";
 import { api, type Customer, errorMessage } from "@/api";
 import { navigate } from "@/navigation";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { ErrorAlert, Page, PageHeader, SectionCard, SuccessAlert } from "@/components/customer/page";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { SubscriptionCard } from "@/CustomerSubscription";
+import { SubscriptionSections } from "@/CustomerSubscription";
 import { setLocale, type Locale } from "@/i18n";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
@@ -24,20 +16,12 @@ export function CustomerAccount(
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
   return (
-    <div className="grid gap-6">
-      <div>
-        <Button variant="ghost" className="mb-3 -ml-3" render={<a href="/instances" />}>
-          <ArrowLeft /> {t("All instances")}
-        </Button>
-        <h1 className="text-2xl font-semibold tracking-tight">{t("Account")}</h1>
-        <p className="text-muted-foreground text-sm">{customer.email}</p>
-      </div>
-      {customer.has_password && (
-        <SubscriptionCard customer={customer} onChanged={onChanged} />
-      )}
+    <Page>
+      <PageHeader title={t("Account")} description={customer.email} />
+      {customer.has_password && <SubscriptionSections customer={customer} onChanged={onChanged} />}
       <PasswordCard customer={customer} onChanged={onChanged} />
       <LanguageCard />
-    </div>
+    </Page>
   );
 }
 
@@ -45,29 +29,25 @@ function LanguageCard() {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{t("Language")}</CardTitle>
-        <CardDescription>
-          {t("Choose the language for this site and the emails we send you.")}
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
-        <ToggleGroup
-          variant="outline"
-          value={[i18n.locale]}
-          onValueChange={(value) => {
-            const next = value[0] as Locale | undefined;
-            if (next && next !== i18n.locale) void setLocale(next);
-          }}
-          aria-label={t("Language")}
-        >
-          {/* Each language is named in itself, so either reader finds theirs. */}
-          <ToggleGroupItem value="ko" lang="ko">한국어</ToggleGroupItem>
-          <ToggleGroupItem value="en" lang="en">English</ToggleGroupItem>
-        </ToggleGroup>
-      </CardContent>
-    </Card>
+    <SectionCard
+      title={t("Language")}
+      description={t("Choose the language for this site and the emails we send you.")}
+    >
+      <ToggleGroup
+        variant="outline"
+        size="sm"
+        value={[i18n.locale]}
+        onValueChange={(value) => {
+          const next = value[0] as Locale | undefined;
+          if (next && next !== i18n.locale) void setLocale(next);
+        }}
+        aria-label={t("Language")}
+      >
+        {/* Each language is named in itself, so either reader finds theirs. */}
+        <ToggleGroupItem value="ko" lang="ko">한국어</ToggleGroupItem>
+        <ToggleGroupItem value="en" lang="en">English</ToggleGroupItem>
+      </ToggleGroup>
+    </SectionCard>
   );
 }
 
@@ -112,30 +92,20 @@ function PasswordCard(
       setChanged(true);
       await onChanged();
     } catch (e) {
-      // Server messages are catalog keys too, so they localize like the rest.
-      setError(t(errorMessage(e)));
+      setError(errorMessage(e));
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <Card className={first ? "border-primary/40" : undefined}>
-      <CardHeader>
-        <CardTitle>
-          {first ? t("Set your password") : t("Change your password")}
-        </CardTitle>
-        <CardDescription>
-          {first
-            ? t(
-              "Your email is verified. Add a password of at least 14 characters for password sign-in.",
-            )
-            : t(
-              "A new password of at least 14 characters signs out every other device.",
-            )}
-        </CardDescription>
-      </CardHeader>
-      <CardContent>
+    <SectionCard
+      highlight={first}
+      title={first ? t("Set your password") : t("Change your password")}
+      description={first
+        ? t("Your email is verified. Add a password of at least 14 characters for password sign-in.")
+        : t("A new password of at least 14 characters signs out every other device.")}
+    >
         <form onSubmit={submit} className="grid gap-4">
           {customer.requires_current_password && (
             <div className="grid gap-2">
@@ -163,17 +133,8 @@ function PasswordCard(
               required
             />
           </div>
-          {error && (
-            <Alert variant="destructive">
-              <CircleAlert />
-              <AlertDescription>{error}</AlertDescription>
-            </Alert>
-          )}
-          {changed && (
-            <Alert>
-              <AlertDescription>{t("Your password was changed.")}</AlertDescription>
-            </Alert>
-          )}
+          {error && <ErrorAlert message={error} />}
+          {changed && <SuccessAlert>{t("Your password was changed.")}</SuccessAlert>}
           <div>
             <Button type="submit" disabled={busy}>
               {busy
@@ -184,7 +145,6 @@ function PasswordCard(
             </Button>
           </div>
         </form>
-      </CardContent>
-    </Card>
+    </SectionCard>
   );
 }

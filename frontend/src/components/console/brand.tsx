@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useLingui } from "@lingui/react";
 import { Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "cn";
@@ -17,6 +18,7 @@ export function Mark({ className }: { className?: string }) {
  * index.html, so the first paint already carries the right theme.
  */
 export function ThemeToggle() {
+  const { i18n } = useLingui();
   const [dark, setDark] = useState(() => document.documentElement.classList.contains("dark"));
 
   useEffect(() => {
@@ -24,7 +26,7 @@ export function ThemeToggle() {
     localStorage.theme = dark ? "dark" : "light";
   }, [dark]);
 
-  const label = dark ? "Switch to the light theme" : "Switch to the dark theme";
+  const label = i18n._(dark ? "Switch to the light theme" : "Switch to the dark theme");
   return (
     <Button variant="outline" size="icon" onClick={() => setDark(!dark)} aria-label={label} title={label}>
       {dark ? <Sun /> : <Moon />}

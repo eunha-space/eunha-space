@@ -1,3 +1,7 @@
+import { useLingui } from "@lingui/react";
+import { siteColumn } from "@/components/customer/page";
+import { cn } from "cn";
+
 // The seller's details Korean e-commerce law requires on the site. They are
 // stated as registered, so they stay in Korean whatever the interface language.
 const BUSINESS_DETAILS = [
@@ -10,17 +14,33 @@ const BUSINESS_DETAILS = [
 ] as const;
 
 export function SiteFooter() {
+  const { i18n } = useLingui();
+  const t = (message: string) => i18n._(message);
+  const links = [
+    { href: "/pricing", label: t("Pricing") },
+    { href: "/refund-policy", label: t("Refund policy") },
+    { href: "https://eunha.social", label: t("About Eunha") },
+    { href: "https://github.com/eunha-space/eunha", label: t("Source code") },
+  ];
   return (
-    <footer lang="ko" className="text-muted-foreground border-t py-6 text-xs">
-      {/* Lines up with the site header. */}
-      <dl className="mx-auto grid max-w-5xl grid-cols-[auto_1fr] gap-x-4 gap-y-1 px-4 md:px-8">
-        {BUSINESS_DETAILS.map(([label, value]) => (
-          <div key={label} className="col-span-2 grid grid-cols-subgrid">
-            <dt>{label}</dt>
-            <dd className="text-foreground">{value}</dd>
-          </div>
-        ))}
-      </dl>
+    <footer className="text-muted-foreground border-t py-6 text-xs">
+      <div className={cn(siteColumn, "grid gap-4")}>
+        <nav aria-label={t("Site")} className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+          {links.map(({ href, label }) => (
+            <a key={href} href={href} className="hover:text-foreground underline-offset-4 hover:underline">
+              {label}
+            </a>
+          ))}
+        </nav>
+        <dl lang="ko" className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+          {BUSINESS_DETAILS.map(([label, value]) => (
+            <div key={label} className="col-span-2 grid grid-cols-subgrid">
+              <dt>{label}</dt>
+              <dd className="text-foreground">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
     </footer>
   );
 }

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, CircleAlert, Clock, Globe, X } from "lucide-react";
+import { Globe, X } from "lucide-react";
 import { useLingui } from "@lingui/react";
 import {
   api,
@@ -8,7 +8,6 @@ import {
   errorMessage,
 } from "@/api";
 import { absoluteTime } from "@/format";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -20,17 +19,16 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Spinner } from "@/components/console/status";
+import {
+  type AddressKind,
+  AddressKindToggle,
+  ErrorAlert,
+  ProgressSteps,
+  SectionCard,
+} from "@/components/customer/page";
 
 // A change is six steps; a customer follows four stages of it.
 const STAGES: { label: string; steps: DomainChange["step"][] }[] = [
@@ -70,7 +68,7 @@ export function CustomerDomainChange(
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
   const [editing, setEditing] = useState(false);
-  const [kind, setKind] = useState<"provided" | "custom">("provided");
+  const [kind, setKind] = useState<AddressKind>("provided");
   const [subdomain, setSubdomain] = useState("");
   const [customDomain, setCustomDomain] = useState("");
   const [confirming, setConfirming] = useState(false);
@@ -119,18 +117,12 @@ export function CustomerDomainChange(
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{t("Domain")}</CardTitle>
-        <CardDescription>
-          {running
-            ? `${change.from_domain} → ${change.to_domain}`
-            : t(
-              "Your instance's address. Every account's handle and every post's link are under it.",
-            )}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-4">
+    <SectionCard
+      title={t("Domain")}
+      description={running
+        ? `${change.from_domain} → ${change.to_domain}`
+        : t("Your instance's address. Every account's handle and every post's link are under it.")}
+    >
         {running && <ChangeProgress change={change} />}
 
         {change && !running && change.finished_at &&
@@ -148,23 +140,15 @@ export function CustomerDomainChange(
             )
             : change.status === "failed"
             ? (
-              <Alert variant="destructive">
-                <CircleAlert />
-                <AlertDescription>
-                  {change.step === "attach"
-                    ? t("The move didn't start: the new domain couldn't be connected. Your instance stays where it is.")
-                    : t("The move stopped part of the way. We've been told and will finish it.")}
-                </AlertDescription>
-              </Alert>
+              <ErrorAlert
+                message={change.step === "attach"
+                  ? t("The move didn't start: the new domain couldn't be connected. Your instance stays where it is.")
+                  : t("The move stopped part of the way. We've been told and will finish it.")}
+              />
             )
             : null)}
 
-        {error && (
-          <Alert variant="destructive">
-            <CircleAlert />
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
+        {error && <ErrorAlert message={error} />}
 
         {running && change.step === "attach" && (
           <div>
@@ -190,18 +174,7 @@ export function CustomerDomainChange(
               setConfirming(true);
             }}
           >
-            <ToggleGroup
-              variant="outline"
-              size="sm"
-              value={[kind]}
-              onValueChange={(next) =>
-                setKind((next[0] as "provided" | "custom" | undefined) ?? kind)}
-            >
-              <ToggleGroupItem value="provided">
-                {t("eunha space address")}
-              </ToggleGroupItem>
-              <ToggleGroupItem value="custom">{t("My own domain")}</ToggleGroupItem>
-            </ToggleGroup>
+            <AddressKindToggle value={kind} onChange={setKind} />
             {kind === "provided"
               ? (
                 <div className="grid gap-2">
@@ -266,46 +239,24 @@ export function CustomerDomainChange(
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
-      </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
 function ChangeProgress({ change }: { change: DomainChange }) {
   const { i18n } = useLingui();
-  const t = (message: string) => i18n._(message);
   return (
-    <ol className="grid gap-4">
-      {STAGES.map((stage) => {
+    <ProgressSteps
+      steps={STAGES.map((stage) => {
         const status = stageStatus(change, stage.steps);
         const followers = stage.steps.includes("deliver") && status === "running" &&
           change.pending !== null;
-        return (
-          <li key={stage.label} className="flex items-center gap-3">
-            {status === "succeeded"
-              ? <Check className="text-success size-5" />
-              : status === "running"
-              ? <Spinner label={t("In progress")} className="text-pending size-5" />
-              : status === "failed"
-              ? <CircleAlert className="text-destructive size-5" />
-              : <Clock className="text-muted-foreground size-5" />}
-            <span className="flex-1 text-sm font-medium">{t(stage.label)}</span>
-            <span className="text-muted-foreground text-xs">
-              {followers
-                ? `${change.pending} ${t("servers to go")}`
-                : t(
-                  status === "succeeded"
-                    ? "Done"
-                    : status === "running"
-                    ? "In progress"
-                    : status === "failed"
-                    ? "Needs attention"
-                    : "Waiting",
-                )}
-            </span>
-          </li>
-        );
+        return {
+          label: stage.label,
+          status,
+          note: followers ? `${change.pending} ${i18n._("servers to go")}` : undefined,
+        };
       })}
-    </ol>
+    />
   );
 }

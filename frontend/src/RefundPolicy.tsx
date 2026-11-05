@@ -1,3 +1,4 @@
+import { useLingui } from "@lingui/react";
 import {
   Table,
   TableBody,
@@ -6,6 +7,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Page, PageHeader, SectionCard } from "@/components/customer/page";
 
 // The refund policy as written, in Korean whatever the interface language.
 // The rates state what `REFUND_WINDOW` in src/billing_sync.rs enforces.
@@ -37,33 +39,40 @@ const REFUND_POLICY = [
   ],
 ];
 
+/** The refund policy, at `/refund-policy`, for anyone. */
 export function RefundPolicy() {
+  const { i18n } = useLingui();
   return (
-    <section lang="ko" className="grid gap-2">
-      <h3 className="text-sm font-medium">환불정책</h3>
-      <Table className="text-xs">
-        <TableHeader>
-          <TableRow>
-            <TableHead>환불 신청 시점</TableHead>
-            <TableHead>환불 가능 금액</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {REFUND_RATES.map(([period, rate]) => (
-            <TableRow key={period}>
-              <TableCell>{period}</TableCell>
-              <TableCell>{rate}</TableCell>
-            </TableRow>
+    <Page>
+      <PageHeader title={i18n._("Refund policy")} />
+      <div lang="ko" className="grid gap-6">
+        <SectionCard title="환불 가능 금액">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>환불 신청 시점</TableHead>
+                <TableHead>환불 가능 금액</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {REFUND_RATES.map(([period, rate]) => (
+                <TableRow key={period}>
+                  <TableCell>{period}</TableCell>
+                  <TableCell>{rate}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </SectionCard>
+        <dl className="grid gap-5">
+          {REFUND_POLICY.map(([title, body]) => (
+            <div key={title}>
+              <dt className="font-medium">{title}</dt>
+              <dd className="text-muted-foreground mt-1">{body}</dd>
+            </div>
           ))}
-        </TableBody>
-      </Table>
-      <ul className="text-muted-foreground grid list-disc gap-1.5 pl-5 text-xs">
-        {REFUND_POLICY.map(([title, body]) => (
-          <li key={title}>
-            <strong className="text-foreground font-medium">{title}:</strong> {body}
-          </li>
-        ))}
-      </ul>
-    </section>
+        </dl>
+      </div>
+    </Page>
   );
 }

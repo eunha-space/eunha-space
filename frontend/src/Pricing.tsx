@@ -2,6 +2,9 @@ import { useEffect, useState } from "react";
 import { useLingui } from "@lingui/react";
 import { api, type Customer, type PublicPlan } from "@/api";
 import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Page, PageHeader } from "@/components/customer/page";
 import { won } from "@/format";
 import { CONTACT_EMAIL, planLimits } from "@/planLimits";
 
@@ -18,9 +21,13 @@ export function Pricing({ customer }: { customer: Customer | null }) {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
   const [plans, setPlans] = useState<PublicPlan[]>([]);
+  const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     // Without prices the page still says how to ask and what the terms are.
-    api<PublicPlan[]>("/customer/plans").then(setPlans).catch(() => {});
+    api<PublicPlan[]>("/customer/plans")
+      .then(setPlans)
+      .catch(() => {})
+      .finally(() => setLoaded(true));
   }, []);
   const korean = i18n.locale === "ko";
   // A customer subscribes and changes plans on their account page.
@@ -28,35 +35,36 @@ export function Pricing({ customer }: { customer: Customer | null }) {
     ? { href: "/signup", label: t("Create account") }
     : { href: "/account", label: t(customer.subscription_required ? "Subscribe" : "Change plan") };
   return (
-    <main className="mx-auto w-full max-w-5xl flex-1 break-keep px-4 md:px-8">
-      <section className="py-12 md:py-16">
-        <h1 className="text-4xl font-semibold tracking-tight text-balance md:text-5xl">
-          {t("Pricing")}
-        </h1>
-        <p className="text-muted-foreground mt-4 max-w-xl text-lg text-pretty">
-          {t("Every plan includes hosting, automatic updates and an address of your own.")}
-        </p>
-        <ul className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {plans.map((plan) => (
-            <li key={plan.name_en} className="flex flex-col rounded-lg border p-5">
-              <h2 className="font-medium">{korean ? plan.name_ko : plan.name_en}</h2>
-              <p className="mt-2">
+    <Page wide>
+      <PageHeader
+        title={t("Pricing")}
+        description={t("Every plan includes hosting, automatic updates and an address of your own.")}
+      />
+      <ul className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        {!loaded && [0, 1, 2].map((key) => (
+          <li key={key}><Skeleton className="h-72 rounded-xl" /></li>
+        ))}
+        {plans.map((plan) => (
+          <li key={plan.name_en} className="grid">
+            <PlanCard title={korean ? plan.name_ko : plan.name_en}>
+              <p>
                 <span className="text-3xl font-semibold tracking-tight tabular-nums">
                   {won(plan.amount)}
                 </span>{" "}
                 <span className="text-muted-foreground text-sm">{t("/ month")}</span>
               </p>
-              <ul className="text-muted-foreground mt-4 mb-6 grid gap-1 text-sm">
+              <ul className="text-muted-foreground grid gap-1 text-sm">
                 {planLimits(plan, korean).map((limit) => <li key={limit}>{limit}</li>)}
               </ul>
-              <Button variant="outline" className="mt-auto" render={<a href={action.href} />}>
+              <Button className="mt-auto" render={<a href={action.href} />}>
                 {action.label}
               </Button>
-            </li>
-          ))}
-          <li className="flex flex-col rounded-lg border p-5">
-            <h2 className="font-medium">{t("Custom")}</h2>
-            <p className="text-muted-foreground mt-2 mb-6 text-sm">
+            </PlanCard>
+          </li>
+        ))}
+        <li className="grid">
+          <PlanCard title={t("Custom")}>
+            <p className="text-muted-foreground text-sm">
               {t("For bigger instances, we'll work out a plan with you.")}
             </p>
             <Button
@@ -66,14 +74,31 @@ export function Pricing({ customer }: { customer: Customer | null }) {
             >
               {t("Contact us")}
             </Button>
-          </li>
-        </ul>
-      </section>
-      <section className="border-t py-12 md:py-16">
-        <ul className="text-muted-foreground grid max-w-2xl list-disc gap-2 pl-5">
+          </PlanCard>
+        </li>
+      </ul>
+      <section className="grid max-w-2xl gap-3 border-t pt-6">
+        <h2 className="text-xl font-semibold tracking-tight">{t("Billing terms")}</h2>
+        <ul className="text-muted-foreground grid list-disc gap-2 pl-5">
           {TERMS.map((term) => <li key={term}>{t(term)}</li>)}
         </ul>
+        <p>
+          <a href="/refund-policy" className="text-sm underline underline-offset-4">
+            {t("Refund policy")}
+          </a>
+        </p>
       </section>
-    </main>
+    </Page>
+  );
+}
+
+function PlanCard({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle><h2>{title}</h2></CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-1 flex-col gap-4">{children}</CardContent>
+    </Card>
   );
 }

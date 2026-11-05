@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowLeft, CircleAlert } from "lucide-react";
+import { CircleAlert } from "lucide-react";
 import { useLingui } from "@lingui/react";
 import { api, type Customer, errorMessage } from "@/api";
 import { instanceUsage } from "@/format";
@@ -9,7 +9,12 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import {
+  AddressKindToggle,
+  ErrorAlert,
+  Page,
+  PageHeader,
+} from "@/components/customer/page";
 
 export function CustomerCreateInstance(
   { customer, activeInstances }: {
@@ -70,19 +75,14 @@ export function CustomerCreateInstance(
   }
 
   return (
-    <div className="grid gap-6">
-      <div>
-        <Button variant="ghost" className="mb-3 -ml-3" render={<a href="/instances" />}>
-          <ArrowLeft /> {t("All instances")}
-        </Button>
-        <h1 className="text-2xl font-semibold tracking-tight">
-          {t("Create an instance")}
-        </h1>
-        <p className="text-muted-foreground text-sm">
-          {i18n._(instanceUsage(i18n.locale, activeInstances, customer.instance_limit))}
-          {" "}{t("Configure site settings inside Eunha after setup.")}
-        </p>
-      </div>
+    <Page>
+      <PageHeader
+        back={{ href: "/instances", label: t("Your instances") }}
+        title={t("Create an instance")}
+        description={`${i18n._(instanceUsage(i18n.locale, activeInstances, customer.instance_limit))} ${
+          t("Configure site settings inside Eunha after setup.")
+        }`}
+      />
       {reachedInstanceLimit
         ? (
           <Alert>
@@ -100,25 +100,7 @@ export function CustomerCreateInstance(
               <form onSubmit={create} className="grid gap-4">
                 <div className="grid gap-2">
                   <Label>{t("Address")}</Label>
-                  <ToggleGroup
-                    variant="outline"
-                    size="sm"
-                    // Base UI keeps single-select state as an array and clears it
-                    // when the pressed item is pressed again; keep the choice.
-                    value={[addressKind]}
-                    onValueChange={(next) =>
-                      setAddressKind(
-                        (next[0] as "provided" | "custom" | undefined) ??
-                          addressKind,
-                      )}
-                  >
-                    <ToggleGroupItem value="provided">
-                      {t("eunha space address")}
-                    </ToggleGroupItem>
-                    <ToggleGroupItem value="custom">
-                      {t("My own domain")}
-                    </ToggleGroupItem>
-                  </ToggleGroup>
+                  <AddressKindToggle value={addressKind} onChange={setAddressKind} />
                 </div>
                 {addressKind === "provided" && (
                   <div className="grid gap-2">
@@ -190,21 +172,16 @@ export function CustomerCreateInstance(
                     {t("Letters, numbers, and underscores.")}
                   </span>
                 </div>
-                {error && (
-                  <Alert variant="destructive">
-                    <CircleAlert />
-                    <AlertDescription>{error}</AlertDescription>
-                  </Alert>
-                )}
+                {error && <ErrorAlert message={error} />}
                 <div>
                   <Button type="submit" disabled={busy}>
-                    {busy ? t("Creating…") : t("Create instance")}
+                    {busy ? t("Creating…") : t("Create an instance")}
                   </Button>
                 </div>
               </form>
             </CardContent>
           </Card>
         )}
-    </div>
+    </Page>
   );
 }

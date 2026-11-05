@@ -1,5 +1,6 @@
 import { useLingui } from "@lingui/react";
 import { Button } from "@/components/ui/button";
+import { ProseSection, siteColumn } from "@/components/customer/page";
 
 const EXPLANATIONS = [
   {
@@ -81,7 +82,7 @@ export function Landing({ signedIn }: { signedIn: boolean }) {
     ? { href: "/instances", label: t("Your instances") }
     : { href: "/signup", label: t("Create account") };
   return (
-    <main className="mx-auto w-full max-w-5xl flex-1 break-keep px-4 md:px-8">
+    <main className={`${siteColumn} flex-1`}>
       <section className="grid items-center gap-10 py-12 md:grid-cols-[3fr_2fr] md:py-20">
         <div>
           <h1 className="text-4xl font-semibold tracking-tight text-balance md:text-6xl">
@@ -104,7 +105,7 @@ export function Landing({ signedIn }: { signedIn: boolean }) {
         <Constellation label={t("Your server")} />
       </section>
 
-      <Section title={t("What is this?")}>
+      <ProseSection title={t("What is this?")}>
         <dl className="grid gap-6">
           {EXPLANATIONS.map(({ term, definition }) => (
             <div key={term}>
@@ -113,9 +114,9 @@ export function Landing({ signedIn }: { signedIn: boolean }) {
             </div>
           ))}
         </dl>
-      </Section>
+      </ProseSection>
 
-      <Section title={t("What you get")}>
+      <ProseSection title={t("What you get")}>
         <div className="grid gap-x-10 gap-y-6 sm:grid-cols-2">
           {FEATURES.map(({ title, body }) => (
             <div key={title}>
@@ -124,9 +125,9 @@ export function Landing({ signedIn }: { signedIn: boolean }) {
             </div>
           ))}
         </div>
-      </Section>
+      </ProseSection>
 
-      <Section id="how-it-works" title={t("How it works")}>
+      <ProseSection id="how-it-works" title={t("How it works")}>
         <ol className="grid gap-6">
           {STEPS.map(({ title, body }, index) => (
             <li key={title} className="grid grid-cols-[2rem_1fr]">
@@ -140,7 +141,7 @@ export function Landing({ signedIn }: { signedIn: boolean }) {
             </li>
           ))}
         </ol>
-      </Section>
+      </ProseSection>
 
       <section className="border-t py-12 md:py-16">
         <h2 className="text-2xl font-semibold tracking-tight text-balance md:text-3xl">
@@ -156,39 +157,9 @@ export function Landing({ signedIn }: { signedIn: boolean }) {
           >
             {t("Pricing")}
           </a>
-          <a
-            href="https://eunha.social"
-            className="text-muted-foreground hover:text-foreground text-sm underline underline-offset-4"
-          >
-            {t("About Eunha")}
-          </a>
-          <a
-            href="https://github.com/eunha-space/eunha"
-            className="text-muted-foreground hover:text-foreground text-sm underline underline-offset-4"
-          >
-            {t("Source code")}
-          </a>
         </div>
       </section>
     </main>
-  );
-}
-
-function Section(
-  { id, title, children }: {
-    id?: string;
-    title: string;
-    children: React.ReactNode;
-  },
-) {
-  return (
-    <section
-      id={id}
-      className="grid scroll-mt-4 gap-6 border-t py-12 md:grid-cols-[12rem_1fr] md:gap-10 md:py-16"
-    >
-      <h2 className="text-xl font-semibold tracking-tight">{title}</h2>
-      <div className="max-w-2xl">{children}</div>
-    </section>
   );
 }
 

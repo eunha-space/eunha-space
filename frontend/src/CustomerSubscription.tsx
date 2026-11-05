@@ -1,12 +1,11 @@
 import { won } from "@/format";
 import { useEffect, useState } from "react";
-import { CircleAlert, CreditCard, ExternalLink } from "lucide-react";
+import { CreditCard, ExternalLink } from "lucide-react";
 import { useLingui } from "@lingui/react";
 import { loadTossPayments } from "@tosspayments/tosspayments-sdk";
 import { api, type Billing, type Customer, errorMessage, type Plan } from "@/api";
 import { cn } from "cn";
 import { absoluteTime } from "@/format";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -17,15 +16,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import {
   Table,
   TableBody,
@@ -35,8 +26,14 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Spinner } from "@/components/console/status";
+import {
+  Detail,
+  ErrorAlert,
+  Loading,
+  SectionCard,
+  StateBadge,
+} from "@/components/customer/page";
 import { CONTACT_EMAIL, planLimits } from "./planLimits";
-import { RefundPolicy } from "./RefundPolicy";
 
 /** Where TossPayments' billing window sends the customer back, either way. */
 const RETURN_PATH = "/account/billing";
@@ -52,7 +49,8 @@ function day(iso: string): string {
   return Number.isNaN(date.getTime()) ? iso : date.toLocaleDateString();
 }
 
-export function SubscriptionCard(
+/** The subscription and its payments, as sections of the account page. */
+export function SubscriptionSections(
   { customer, onChanged }: { customer: Customer; onChanged: () => Promise<void> },
 ) {
   const { i18n } = useLingui();
@@ -64,6 +62,8 @@ export function SubscriptionCard(
   const [refunding, setRefunding] = useState<Billing["payments"][number] | null>(null);
   const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
   const [switching, setSwitching] = useState<Plan | null>(null);
+  // A subscriber's plans stay out of the way until they ask to change theirs.
+  const [changingPlan, setChangingPlan] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -85,7 +85,7 @@ export function SubscriptionCard(
             if (active) setBilling(next);
             await onChanged();
           } catch (e) {
-            if (active) setError(t(errorMessage(e)));
+            if (active) setError(errorMessage(e));
           } finally {
             if (active) setBusy(false);
           }
@@ -97,13 +97,20 @@ export function SubscriptionCard(
       const next = await api<Billing>("/customer/billing");
       if (active) setBilling(next);
     }
-    load().catch((e) => active && setError(t(errorMessage(e))));
+    load().catch((e) => active && setError(errorMessage(e)));
     return () => {
       active = false;
     };
   }, []);
 
-  if (!billing || !billing.enabled) return null;
+  if (!billing) {
+    return (
+      <SectionCard title={t("Subscription")}>
+        {error ? <ErrorAlert message={error} /> : <Loading inline />}
+      </SectionCard>
+    );
+  }
+  if (!billing.enabled) return null;
 
   async function openBillingWindow() {
     setError("");
@@ -124,7 +131,7 @@ export function SubscriptionCard(
     } catch (e) {
       // Closing the window is not a failure worth reporting.
       const code = (e as { code?: string } | null)?.code;
-      if (code !== "USER_CANCEL") setError(t(errorMessage(e)));
+      if (code !== "USER_CANCEL") setError(errorMessage(e));
     } finally {
       setBusy(false);
     }
@@ -142,7 +149,7 @@ export function SubscriptionCard(
       );
       await onChanged();
     } catch (e) {
-      setError(t(errorMessage(e)));
+      setError(errorMessage(e));
     } finally {
       setBusy(false);
       setRefunding(null);
@@ -161,7 +168,7 @@ export function SubscriptionCard(
       );
       await onChanged();
     } catch (e) {
-      setError(t(errorMessage(e)));
+      setError(errorMessage(e));
       // A declined upgrade leaves a failed payment in the history.
       setBilling(await api<Billing>("/customer/billing").catch(() => billing));
     } finally {
@@ -177,7 +184,7 @@ export function SubscriptionCard(
       setBilling(await api<Billing>(`/customer/billing${path}`, { method: "POST" }));
       await onChanged();
     } catch (e) {
-      setError(t(errorMessage(e)));
+      setError(errorMessage(e));
     } finally {
       setBusy(false);
       setConfirmingCancel(false);
@@ -220,90 +227,58 @@ export function SubscriptionCard(
     description = t("Subscribe to create and run instances.");
   }
 
+  const canChangePlan = status === "active" && !subscription?.cancel_at_period_end &&
+    selectable.length > 1;
+
   return (
-    <Card className={customer.subscription_required ? "border-primary/40" : undefined}>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          {t("Subscription")}
-          {status === "active" && !subscription?.cancel_at_period_end && (
-            <Badge>{t("Active")}</Badge>
-          )}
-          {status === "active" && subscription?.cancel_at_period_end && (
-            <Badge variant="secondary">{t("Cancelled")}</Badge>
-          )}
-          {status === "past_due" && (
-            <Badge variant="destructive">{t("Payment declined")}</Badge>
-          )}
-        </CardTitle>
-        <CardDescription>{description}</CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-5">
-        <dl className="grid grid-cols-2 gap-4 text-sm">
+    <>
+    <SectionCard
+      highlight={customer.subscription_required}
+      title={t("Subscription")}
+      badge={status === "active" && !subscription?.cancel_at_period_end
+        ? <StateBadge tone="ok">{t("Active")}</StateBadge>
+        : status === "active"
+        ? <StateBadge tone="neutral">{t("Cancelled")}</StateBadge>
+        : status === "past_due"
+        ? <StateBadge tone="problem">{t("Payment declined")}</StateBadge>
+        : undefined}
+      description={description}
+    >
+        <dl className="grid grid-cols-2 gap-4">
           {subscribed && currentPlan && (
-            <div className="grid gap-1">
-              <dt className="text-muted-foreground text-xs">{t("Plan")}</dt>
-              <dd className="font-medium">{planName(currentPlan)}</dd>
-            </div>
+            <Detail label={t("Plan")}>{planName(currentPlan)}</Detail>
           )}
           {status === "active" && nextPlan && !subscription?.cancel_at_period_end && (
-            <div className="grid gap-1">
-              <dt className="text-muted-foreground text-xs">{t("From your next renewal")}</dt>
-              <dd className="font-medium">{planName(nextPlan)} · {won(nextPlan.amount)}</dd>
-            </div>
+            <Detail label={t("From your next renewal")}>
+              {planName(nextPlan)} · {won(nextPlan.amount)}
+            </Detail>
           )}
-          {amount != null && (
-            <div className="grid gap-1">
-              <dt className="text-muted-foreground text-xs">{t("Monthly price")}</dt>
-              <dd className="font-medium">{won(amount)}</dd>
-            </div>
-          )}
+          {amount != null && <Detail label={t("Monthly price")}>{won(amount)}</Detail>}
           {subscribed && subscription?.has_card && (
-            <div className="grid gap-1">
-              <dt className="text-muted-foreground text-xs">{t("Card")}</dt>
-              <dd className="font-medium">
-                {[subscription.card_company, subscription.card_number]
-                  .filter(Boolean)
-                  .join(" ")}
-              </dd>
-            </div>
+            <Detail label={t("Card")}>
+              {[subscription.card_company, subscription.card_number].filter(Boolean).join(" ")}
+            </Detail>
           )}
           {status === "active" && subscription?.current_period_end && (
-            <div className="grid gap-1">
-              <dt className="text-muted-foreground text-xs">
-                {subscription.cancel_at_period_end ? t("Ends on") : t("Renews on")}
-              </dt>
-              <dd className="font-medium">
-                {day(
-                  subscription.cancel_at_period_end
-                    ? subscription.current_period_end
-                    : (subscription.renews_at ?? subscription.current_period_end),
-                )}
-              </dd>
-            </div>
+            <Detail label={subscription.cancel_at_period_end ? t("Ends on") : t("Renews on")}>
+              {day(
+                subscription.cancel_at_period_end
+                  ? subscription.current_period_end
+                  : (subscription.renews_at ?? subscription.current_period_end),
+              )}
+            </Detail>
           )}
           {status === "past_due" && subscription?.next_attempt_at && (
-            <div className="grid gap-1">
-              <dt className="text-muted-foreground text-xs">{t("Next attempt")}</dt>
-              <dd className="font-medium">{absoluteTime(subscription.next_attempt_at)}</dd>
-            </div>
+            <Detail label={t("Next attempt")}>{absoluteTime(subscription.next_attempt_at)}</Detail>
           )}
         </dl>
         {subscription?.last_error &&
           (status === "past_due" || status === "incomplete") &&
           !pending && (
-          <Alert variant="destructive">
-            <CircleAlert />
-            <AlertDescription>{t(subscription.last_error)}</AlertDescription>
-          </Alert>
+          <ErrorAlert message={subscription.last_error} />
         )}
-        {error && (
-          <Alert variant="destructive">
-            <CircleAlert />
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
-        {(choosing || (status === "active" && !subscription?.cancel_at_period_end)) &&
-          selectable.length > 1 && (
+        {error && <ErrorAlert message={error} />}
+        {((choosing && selectable.length > 1) || (canChangePlan && changingPlan)) && (
           <div className="grid gap-2">
             <h3 className="text-sm font-medium">{choosing ? t("Choose a plan") : t("Change plan")}</h3>
             <div className="grid gap-2 sm:grid-cols-2">
@@ -326,7 +301,7 @@ export function SubscriptionCard(
                       {planName(plan)}
                       {isCurrent ? ` · ${t("Current plan")}` : ""}
                     </span>
-                    <span className="tabular-nums">{won(plan.amount)}{t(" a month")}</span>
+                    <span className="tabular-nums">{won(plan.amount)} {t("/ month")}</span>
                     {limitLabel(plan) && (
                       <span className="text-muted-foreground text-xs">{limitLabel(plan)}</span>
                     )}
@@ -351,6 +326,15 @@ export function SubscriptionCard(
             <Button disabled={busy || !chosenPlan} onClick={() => void openBillingWindow()}>
               {busy ? <Spinner label={t("Please wait…")} /> : <CreditCard />}
               {t("Subscribe with a card")}
+            </Button>
+          )}
+          {canChangePlan && (
+            <Button
+              variant="outline"
+              aria-expanded={changingPlan}
+              onClick={() => setChangingPlan(!changingPlan)}
+            >
+              {t("Change plan")}
             </Button>
           )}
           {subscribed && (
@@ -379,79 +363,6 @@ export function SubscriptionCard(
             </Button>
           )}
         </div>
-        {billing.payments.length > 0 && (
-          <div className="grid gap-2">
-            <h3 className="text-sm font-medium">{t("Payments")}</h3>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>{t("Period")}</TableHead>
-                  <TableHead className="text-right">{t("Amount")}</TableHead>
-                  <TableHead>{t("Status")}</TableHead>
-                  <TableHead />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {billing.payments.map((payment) => (
-                  <TableRow key={payment.order_id}>
-                    <TableCell>
-                      {day(payment.period_start)} – {day(payment.period_end)}
-                    </TableCell>
-                    <TableCell className="text-right tabular-nums">
-                      {won(payment.amount)}
-                    </TableCell>
-                    <TableCell>
-                      {payment.status === "refunded"
-                        ? t("Refunded")
-                        : payment.refund_pending
-                        ? t("Refund pending")
-                        : payment.status === "paid" && payment.receipt_url
-                        ? (
-                          <a
-                            href={payment.receipt_url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="inline-flex items-center gap-1 underline-offset-4 hover:underline"
-                          >
-                            {t("Paid")} <ExternalLink className="size-3" />
-                          </a>
-                        )
-                        : payment.status === "paid"
-                        ? t("Paid")
-                        : payment.status === "pending"
-                        ? t("Confirming")
-                        : (
-                          <span
-                            className="text-destructive"
-                            title={payment.failure_message ?? undefined}
-                          >
-                            {t("Declined")}
-                          </span>
-                        )}
-                      {payment.refund_error && !payment.refund_pending && (
-                        <p className="text-destructive text-xs">
-                          {t("Refund refused")}: {t(payment.refund_error)}
-                        </p>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {payment.refundable && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          disabled={busy}
-                          onClick={() => setRefunding(payment)}
-                        >
-                          {t("Refund")}
-                        </Button>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        )}
         <AlertDialog
           open={refunding !== null}
           onOpenChange={(open) => !open && setRefunding(null)}
@@ -528,8 +439,88 @@ export function SubscriptionCard(
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
-        <RefundPolicy />
-      </CardContent>
-    </Card>
+    </SectionCard>
+    <SectionCard title={t("Payments")}>
+      {billing.payments.length === 0
+        ? <p className="text-muted-foreground text-sm">{t("No payments yet.")}</p>
+        : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{t("Period")}</TableHead>
+                  <TableHead className="text-right">{t("Amount")}</TableHead>
+                  <TableHead>{t("Status")}</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {billing.payments.map((payment) => (
+                  <TableRow key={payment.order_id}>
+                    <TableCell>
+                      {day(payment.period_start)} – {day(payment.period_end)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {won(payment.amount)}
+                    </TableCell>
+                    <TableCell>
+                      {payment.status === "refunded"
+                        ? t("Refunded")
+                        : payment.refund_pending
+                        ? t("Refund pending")
+                        : payment.status === "paid" && payment.receipt_url
+                        ? (
+                          <a
+                            href={payment.receipt_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1 underline-offset-4 hover:underline"
+                          >
+                            {t("Paid")} <ExternalLink className="size-3" />
+                          </a>
+                        )
+                        : payment.status === "paid"
+                        ? t("Paid")
+                        : payment.status === "pending"
+                        ? t("Confirming")
+                        : (
+                          <span
+                            className="text-destructive"
+                            title={payment.failure_message ?? undefined}
+                          >
+                            {t("Declined")}
+                          </span>
+                        )}
+                      {payment.refund_error && !payment.refund_pending && (
+                        <p className="text-destructive text-xs">
+                          {t("Refund refused")}: {t(payment.refund_error)}
+                        </p>
+                      )}
+                      {/* In this column, so that the table fits a phone. */}
+                      {payment.refundable && (
+                        <div>
+                          <Button
+                            size="xs"
+                            variant="outline"
+                            className="mt-1"
+                            disabled={busy}
+                            onClick={() => setRefunding(payment)}
+                          >
+                            {t("Refund")}
+                          </Button>
+                        </div>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+        )}
+      <p className="text-muted-foreground text-sm">
+        {billing.payments.length > 0 ? `${t("Refunds are available for 7 days after a payment.")} ` : ""}
+        <a href="/refund-policy" className="text-foreground underline underline-offset-4">
+          {t("Refund policy")}
+        </a>
+      </p>
+    </SectionCard>
+    </>
   );
 }

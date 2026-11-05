@@ -1,14 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  ArrowLeft,
-  Check,
-  CircleAlert,
-  Clock,
-  Copy,
-  KeyRound,
-  RotateCcw,
-  Trash2,
-} from "lucide-react";
+import { Copy, ExternalLink, KeyRound, RotateCcw, Trash2 } from "lucide-react";
 import { useLingui } from "@lingui/react";
 import {
   api,
@@ -17,11 +8,10 @@ import {
   type CustomerTenantDetail,
   errorMessage,
   instanceAddress,
-  instanceStatus,
+  isOffline,
 } from "@/api";
 import { absoluteTime } from "@/format";
 import { navigate } from "@/navigation";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -33,17 +23,21 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { Spinner } from "@/components/console/status";
+import {
+  BackLink,
+  Detail,
+  ErrorAlert,
+  Loading,
+  Page,
+  PageHeader,
+  ProgressSteps,
+  SectionCard,
+  StateBadge,
+} from "@/components/customer/page";
+import { InstanceStatusBadge } from "@/components/customer/instance";
 import { CustomerSmtp } from "@/CustomerSmtp";
 import { CustomerDomainChange } from "@/CustomerDomainChange";
 
@@ -105,19 +99,20 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
     };
   }, [id, revision]);
 
+  const back = { href: "/instances", label: t("Your instances") };
   if (!detail && !error) {
     return (
-      <div className="grid min-h-64 place-items-center">
-        <Spinner label={t("Loading…")} />
-      </div>
+      <Page>
+        <Loading />
+      </Page>
     );
   }
   if (!detail) {
     return (
-      <Alert variant="destructive">
-        <CircleAlert />
-        <AlertDescription>{error}</AlertDescription>
-      </Alert>
+      <Page>
+        <BackLink {...back} />
+        <ErrorAlert message={error} />
+      </Page>
     );
   }
 
@@ -125,9 +120,8 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
     domain.kind === "custom"
   );
   const ready = detail.tenant.lifecycle_state === "ready";
-  // Once every step has succeeded there is nothing left to follow, so the
-  // progress list gives way to a single line and the admin account, which is
-  // what the customer came for, takes the top of the page.
+  // With setup done the admin account, which is what the customer came for,
+  // takes the top of the page.
   const setupDone = ready &&
     detail.provisioning_steps.every((step) => step.status === "succeeded");
   const accountReady = ready && detail.tenant.owner_ready;
@@ -136,48 +130,35 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
   const waitingForDomain = customDomains.some((domain) =>
     domain.status === "pending"
   );
-  const status = instanceStatus(detail.tenant);
   // A deleted instance is not being served, so setup, domain and admin details
   // would describe something that is not there.
-  const offline = detail.tenant.lifecycle_state === "deprovisioning" ||
-    detail.tenant.lifecycle_state === "retained" ||
-    detail.tenant.lifecycle_state === "purged";
+  const offline = isOffline(detail.tenant);
   return (
-    <div className="grid gap-6">
-      <div>
-        <Button variant="ghost" className="mb-3 -ml-3" render={<a href="/instances" />}>
-          <ArrowLeft /> {t("All instances")}
-        </Button>
-        <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight">
-            {instanceAddress(detail.tenant)}
-          </h1>
-          <Badge
-            variant={status === "Ready" ? "secondary" : "outline"}
-            className={status === "Ready" ? undefined : "text-pending"}
+    <Page>
+      <PageHeader
+        back={back}
+        title={instanceAddress(detail.tenant)}
+        badge={<InstanceStatusBadge tenant={detail.tenant} />}
+        action={!offline && ready && (
+          <Button
+            variant="outline"
+            render={
+              <a
+                href={`https://${instanceAddress(detail.tenant)}`}
+                target="_blank"
+                rel="noreferrer"
+              />
+            }
           >
-            {t(status)}
-          </Badge>
-        </div>
-        <a
-          className="text-muted-foreground hover:text-foreground text-sm underline-offset-4 hover:underline"
-          href={`https://${instanceAddress(detail.tenant)}`}
-          target="_blank"
-          rel="noreferrer"
-        >
-          {instanceAddress(detail.tenant)}
-        </a>
-      </div>
-
-      <div className="grid gap-6">
+            <ExternalLink /> {t("Open instance")}
+          </Button>
+        )}
+      />
         {!offline && (() => {
-          const setup = (
-            <InstanceSetup
-              key="setup"
-              steps={detail.provisioning_steps}
-              done={setupDone}
-            />
-          );
+          // Once every step has succeeded there is nothing left to follow.
+          const setup = setupDone
+            ? null
+            : <InstanceSetup key="setup" steps={detail.provisioning_steps} />;
           const domain = customDomains.length > 0
             ? (
               <CustomDomainSetup
@@ -222,67 +203,33 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
             ? [domain, setup, account]
             : [setup, domain, account];
         })()}
-        {detail.tenant.lifecycle_state === "ready" && detail.domains.some((domain) => domain.kind === "custom" && domain.status === "active" && domain.is_primary) && <CustomerSmtp key={id} tenantId={id} />}
+        {ready &&
+          detail.domains.some((domain) =>
+            domain.kind === "custom" && domain.status === "active" && domain.is_primary
+          ) && <CustomerSmtp key={id} tenantId={id} />}
         <DeleteInstance
           tenant={detail.tenant}
           onChanged={() => setRevision((value) => value + 1)}
         />
-      </div>
-    </div>
+    </Page>
   );
 }
 
-function InstanceSetup(
-  { steps, done }: { steps: CustomerProvisioningStep[]; done: boolean },
-) {
+function InstanceSetup({ steps }: { steps: CustomerProvisioningStep[] }) {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{t("Instance setup")}</CardTitle>
-        {!done && (
-          <CardDescription>
-            {t("This page updates automatically while we set things up.")}
-          </CardDescription>
-        )}
-      </CardHeader>
-      <CardContent>
-        {done
-          ? (
-            <div className="flex items-center gap-3 text-sm">
-              <Check className="text-success size-5" />
-              {t("Setup complete")}
-            </div>
-          )
-          : (
-            <ol className="grid gap-4">
-              {stepGroups(steps).map((group) => {
-                const status = groupStatus(group.steps);
-                return (
-                  <li key={group.label} className="flex items-center gap-3">
-                    <StepIcon status={status} />
-                    <span className="flex-1 text-sm font-medium">
-                      {t(group.label)}
-                    </span>
-                    <span className="text-muted-foreground text-xs">
-                      {t(
-                        status === "succeeded"
-                          ? "Done"
-                          : status === "running"
-                          ? "In progress"
-                          : status === "failed"
-                          ? "Needs attention"
-                          : "Waiting",
-                      )}
-                    </span>
-                  </li>
-                );
-              })}
-            </ol>
-          )}
-      </CardContent>
-    </Card>
+    <SectionCard
+      title={t("Instance setup")}
+      description={t("This page updates automatically while we set things up.")}
+    >
+      <ProgressSteps
+        steps={stepGroups(steps).map((group) => ({
+          label: group.label,
+          status: groupStatus(group.steps),
+        }))}
+      />
+    </SectionCard>
   );
 }
 
@@ -349,46 +296,27 @@ function AdminAccount(
   );
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{t("Admin account")}</CardTitle>
-        <CardDescription>
-          {t("Sign in to your instance as its owner to manage it.")}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-4">
-        <div className="grid gap-4 sm:grid-cols-3">
-          <div className="grid gap-1">
-            <span className="text-muted-foreground text-xs">
-              {t("Sign-in email")}
-            </span>
-            <code className="break-all">{email}</code>
-          </div>
-          <div className="grid gap-1">
-            <span className="text-muted-foreground text-xs">{t("Username")}</span>
-            <code className="break-all">@{username}</code>
-          </div>
-          <div className="grid gap-1">
-            <span className="text-muted-foreground text-xs">{t("Sign-in page")}</span>
+    <SectionCard
+      title={t("Admin account")}
+      description={t("Sign in to your instance as its owner to manage it.")}
+    >
+        <dl className="grid gap-4 sm:grid-cols-2">
+          <Detail label={t("Sign-in email")}>{email}</Detail>
+          <Detail label={t("Username")}>@{username}</Detail>
+          <Detail label={t("Sign-in page")}>
             <a
-              className="break-all text-sm underline-offset-4 hover:underline"
+              className="underline-offset-4 hover:underline"
               href={loginUrl}
               target="_blank"
               rel="noreferrer"
             >
               {loginUrl}
             </a>
-          </div>
-        </div>
+          </Detail>
+        </dl>
 
         {issued && (
           <div className="bg-muted/60 grid gap-3 rounded-md p-3 text-sm">
-            <div className="grid gap-1">
-              <span className="text-muted-foreground text-xs">
-                {t("Sign-in email")}
-              </span>
-              <code className="break-all select-all">{issued.email}</code>
-            </div>
             <div className="grid gap-1">
               <span className="text-muted-foreground text-xs">
                 {t("New password")}
@@ -409,12 +337,7 @@ function AdminAccount(
           </div>
         )}
 
-        {error && (
-          <Alert variant="destructive">
-            <CircleAlert />
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
+        {error && <ErrorAlert message={error} />}
 
         <div>
           {passwordIssued && !busy
@@ -441,8 +364,7 @@ function AdminAccount(
             )
             : button}
         </div>
-      </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -476,8 +398,7 @@ function DeleteInstance(
       }
       onChanged();
     } catch (failure) {
-      // Server messages are catalog keys too, so they localize like the rest.
-      setError(t(errorMessage(failure)));
+      setError(errorMessage(failure));
     } finally {
       setBusy(false);
       setConfirmation("");
@@ -510,28 +431,18 @@ function DeleteInstance(
   }
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{retained ? t("Deleted instance") : t("Delete instance")}</CardTitle>
-        <CardDescription>{description}</CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-4">
+    <SectionCard
+      title={retained ? t("Deleted instance") : t("Delete instance")}
+      description={description}
+    >
         {(retained || state === "deprovisioning") && tenant.purge_scheduled_for && (
-          <div className="grid gap-1">
-            <span className="text-muted-foreground text-xs">
-              {t("Permanently deleted on")}
-            </span>
-            <span className="text-sm font-medium">
+          <dl>
+            <Detail label={t("Permanently deleted on")}>
               {absoluteTime(tenant.purge_scheduled_for)}
-            </span>
-          </div>
+            </Detail>
+          </dl>
         )}
-        {error && (
-          <Alert variant="destructive">
-            <CircleAlert />
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
+        {error && <ErrorAlert message={error} />}
         <div className="flex flex-wrap gap-2">
           {retained && (
             <>
@@ -617,8 +528,7 @@ function DeleteInstance(
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
-      </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -631,39 +541,24 @@ function CustomDomainSetup(
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>{t("Custom domain setup")}</CardTitle>
-        <CardDescription>
-          {t("Keep each domain's DNS record in place for as long as it is connected.")}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-5">
+    <SectionCard
+      title={t("Custom domain setup")}
+      description={t("Keep each domain's DNS record in place for as long as it is connected.")}
+    >
         {domains.map((domain) => (
           <section key={domain.hostname} className="grid gap-3">
             <div className="flex items-center justify-between gap-3">
               <strong className="break-all">{domain.hostname}</strong>
-              <Badge variant={domain.status === "active" ? "secondary" : "outline"}>
+              <StateBadge tone={domain.status === "active" ? "ok" : "waiting"}>
                 {domain.status === "active"
                   ? t("Connected")
                   : domain.status === "removing"
                   ? t("Removing")
                   : t("Waiting for DNS")}
-              </Badge>
+              </StateBadge>
             </div>
             {domain.status === "active" && (
-              <>
-                <p className="text-muted-foreground text-sm">
-                  {t(
-                    "Your custom domain is connected. Keep this CNAME record at your DNS provider; without it, your instance can't be reached at this domain.",
-                  )}
-                </p>
-                <DnsRecord
-                  type="CNAME"
-                  name={domain.hostname}
-                  value={domain.cname_target}
-                />
-              </>
+              <DnsRecord type="CNAME" name={domain.hostname} value={domain.cname_target} />
             )}
             {domain.status === "removing" && (
               <p className="text-muted-foreground text-sm">
@@ -700,21 +595,17 @@ function CustomDomainSetup(
                   </p>
                 )}
                 {domain.setup_deadline && (
-                  <div className="grid gap-1">
-                    <span className="text-muted-foreground text-xs">
-                      {t("If it isn't connected by then, this instance is deleted")}
-                    </span>
-                    <span className="text-sm font-medium">
+                  <dl>
+                    <Detail label={t("If it isn't connected by then, this instance is deleted")}>
                       {absoluteTime(domain.setup_deadline)}
-                    </span>
-                  </div>
+                    </Detail>
+                  </dl>
                 )}
               </>
             )}
           </section>
         ))}
-      </CardContent>
-    </Card>
+    </SectionCard>
   );
 }
 
@@ -723,33 +614,10 @@ function DnsRecord(
 ) {
   const { i18n } = useLingui();
   return (
-    <div className="bg-muted/60 grid gap-3 rounded-md p-3 text-sm">
-      <div className="grid gap-1">
-        <span className="text-muted-foreground text-xs">{i18n._("Type")}</span>
-        <code>{type}</code>
-      </div>
-      <div className="grid gap-1">
-        <span className="text-muted-foreground text-xs">{i18n._("Name")}</span>
-        <code className="break-all">{name}</code>
-      </div>
-      <div className="grid gap-1">
-        <span className="text-muted-foreground text-xs">{i18n._("Value")}</span>
-        <code className="break-all">{value}</code>
-      </div>
-    </div>
+    <dl className="bg-muted/60 grid gap-3 rounded-md p-3 sm:grid-cols-[auto_1fr_1fr]">
+      <Detail label={i18n._("Type")}><code>{type}</code></Detail>
+      <Detail label={i18n._("Name")}><code>{name}</code></Detail>
+      <Detail label={i18n._("Value")}><code>{value}</code></Detail>
+    </dl>
   );
-}
-
-function StepIcon({ status }: { status: CustomerProvisioningStep["status"] }) {
-  const { i18n } = useLingui();
-  if (status === "succeeded") return <Check className="text-success size-5" />;
-  if (status === "running") {
-    return (
-      <Spinner label={i18n._("In progress")} className="text-pending size-5" />
-    );
-  }
-  if (status === "failed") {
-    return <CircleAlert className="text-destructive size-5" />;
-  }
-  return <Clock className="text-muted-foreground size-5" />;
 }

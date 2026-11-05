@@ -3,11 +3,14 @@ import { LogOut, Server, Shield, UserRound } from "lucide-react";
 import type { Customer } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Mark, ThemeToggle } from "@/components/console/brand";
+import { siteColumn } from "@/components/customer/page";
 import { LanguageToggle } from "@/i18n";
+import { cn } from "cn";
 
 /**
- * The top of every page but the console. `customer` is undefined until the
- * session is known, when the header offers neither signing in nor an account.
+ * The top of every page but the console: where to go, then the site's settings,
+ * then the session. `customer` is undefined until the session is known, when the
+ * header offers neither signing in nor an account.
  */
 export function SiteHeader(
   { customer, onSignOut }: {
@@ -17,8 +20,9 @@ export function SiteHeader(
 ) {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
+  const path = location.pathname;
   return (
-    <div className="mx-auto w-full max-w-5xl px-4 md:px-8">
+    <div className={siteColumn}>
       <header className="flex items-center justify-between gap-3 py-5">
         <a
           href="/"
@@ -29,22 +33,30 @@ export function SiteHeader(
           {/* A signed-in header has more to fit on a phone. */}
           <span className={customer ? "hidden sm:inline" : undefined}>{t("eunha space")}</span>
         </a>
-        <div className="flex shrink-0 gap-2">
-          {/* There is no room on a phone; the landing page links here further down. */}
-          <Button variant="ghost" className="hidden sm:inline-flex" render={<a href="/pricing" />}>
-            {t("Pricing")}
-          </Button>
-          {customer?.is_admin && (
-            <Button
-              variant="ghost"
-              className="max-sm:aspect-square max-sm:px-0"
-              aria-label={t("Control plane")}
-              render={<a href="/admin" />}
-            >
-              <Shield className="sm:hidden" />
-              <span className="max-sm:hidden">{t("Control plane")}</span>
-            </Button>
-          )}
+        <div className="flex shrink-0 items-center gap-1 sm:gap-2">
+          <nav className="flex items-center gap-1 sm:gap-2" aria-label={t("Site")}>
+            {/* There is no room on a phone; the footer links here on every page. */}
+            <NavLink href="/pricing" label={t("Pricing")} current={path === "/pricing"} hideOnPhone />
+            {customer && (
+              <>
+                <NavLink
+                  href="/instances"
+                  label={t("Your instances")}
+                  icon={<Server />}
+                  current={path === "/instances" || path.startsWith("/instances/")}
+                />
+                <NavLink
+                  href="/account"
+                  label={t("Account")}
+                  icon={<UserRound />}
+                  current={path === "/account" || path === "/account/billing"}
+                />
+              </>
+            )}
+            {customer?.is_admin && (
+              <NavLink href="/admin" label={t("Control plane")} icon={<Shield />} />
+            )}
+          </nav>
           <LanguageToggle />
           <ThemeToggle />
           {customer === null && (
@@ -53,38 +65,47 @@ export function SiteHeader(
             </Button>
           )}
           {customer && (
-            <>
-              <Button
-                variant="outline"
-                className="max-sm:aspect-square max-sm:px-0"
-                aria-label={t("Your instances")}
-                render={<a href="/instances" />}
-              >
-                <Server />
-                <span className="max-sm:hidden">{t("Your instances")}</span>
-              </Button>
-              <Button
-                variant="outline"
-                size="icon"
-                aria-label={t("Account")}
-                title={customer.email}
-                render={<a href="/account" />}
-              >
-                <UserRound />
-              </Button>
-              <Button
-                variant="outline"
-                size="icon"
-                aria-label={t("Sign out")}
-                title={t("Sign out")}
-                onClick={() => void onSignOut()}
-              >
-                <LogOut />
-              </Button>
-            </>
+            <Button
+              variant="outline"
+              size="icon"
+              aria-label={t("Sign out")}
+              title={t("Sign out")}
+              onClick={() => void onSignOut()}
+            >
+              <LogOut />
+            </Button>
           )}
         </div>
       </header>
     </div>
+  );
+}
+
+/** A page the header goes to: its name, shrinking to its icon where space is short. */
+function NavLink(
+  { href, label, icon, current = false, hideOnPhone = false }: {
+    href: string;
+    label: string;
+    icon?: React.ReactNode;
+    current?: boolean;
+    hideOnPhone?: boolean;
+  },
+) {
+  return (
+    <Button
+      variant="ghost"
+      className={cn(
+        hideOnPhone && "hidden sm:inline-flex",
+        icon && "max-md:aspect-square max-md:px-0",
+        current && "bg-muted",
+      )}
+      aria-label={label}
+      aria-current={current ? "page" : undefined}
+      title={label}
+      render={<a href={href} />}
+    >
+      {icon}
+      <span className={icon ? "max-md:hidden" : undefined}>{label}</span>
+    </Button>
   );
 }

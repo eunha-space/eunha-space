@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { CircleAlert, CreditCard, Plus } from "lucide-react";
+import { CreditCard, KeyRound, Plus, Server } from "lucide-react";
 import {
   api,
   ApiError,
@@ -7,14 +7,11 @@ import {
   type Customer,
   errorMessage,
   instanceAddress,
-  instanceStatus,
   type Tenant,
 } from "@/api";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Card,
-  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
@@ -22,14 +19,25 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Mark } from "@/components/console/brand";
-import { Spinner } from "@/components/console/status";
+import { EmptyState } from "@/components/console/status";
+import {
+  ActionAlert,
+  ErrorAlert,
+  Loading,
+  Page,
+  PageHeader,
+  siteColumn,
+  SuccessAlert,
+} from "@/components/customer/page";
+import { InstanceStatusBadge } from "@/components/customer/instance";
+import { instanceUsage } from "@/format";
 import { useLingui } from "@lingui/react";
 import { CustomerInstanceDetail } from "@/CustomerInstanceDetail";
 import { CustomerAccount } from "@/CustomerAccount";
 import { CustomerCreateInstance } from "@/CustomerCreateInstance";
 import { Landing } from "@/Landing";
 import { Pricing } from "@/Pricing";
+import { RefundPolicy } from "@/RefundPolicy";
 import { SiteHeader } from "@/SiteHeader";
 import { navigate, useCustomerNavigation } from "@/navigation";
 
@@ -139,27 +147,25 @@ export function CustomerApp() {
       {main}
     </>
   );
-  const portal = (page: React.ReactNode) =>
-    withHeader(<main className="mx-auto w-full max-w-2xl flex-1 px-4 pt-4 pb-10">{page}</main>);
   if (!sessionLoaded) {
     return withHeader(
-      <main className="grid flex-1 place-items-center p-4">
-        <div className="grid justify-items-center gap-4">
-          <Mark />
-          <Spinner label={t("Loading…")} />
-        </div>
-      </main>,
+      <Page>
+        <Loading />
+      </Page>,
     );
   }
   if (location.pathname === "/") return withHeader(<Landing signedIn={customer !== null} />);
   if (location.pathname === "/pricing") return withHeader(<Pricing customer={customer} />);
+  if (location.pathname === "/refund-policy") return withHeader(<RefundPolicy />);
   if (!customer) {
     return withHeader(
-      <main className="grid flex-1 place-items-center p-4">
+      // A form on its own, centred; at a fixed height, so that it stays put
+      // when it switches between signing in and signing up.
+      <main className={`${siteColumn} grid flex-1 content-start justify-items-center py-8 md:py-12`}>
         <Card className="w-full max-w-md">
           <CardHeader>
             <CardTitle>
-              {t(signup ? "Create your account" : "Your eunha space instances")}
+              <h1>{t(signup ? "Create your account" : "Sign in")}</h1>
             </CardTitle>
             <CardDescription>
               {sent
@@ -172,11 +178,9 @@ export function CustomerApp() {
           {!sent && (
             <CardContent>
               {verified && (
-                <Alert className="mb-4">
-                  <AlertDescription>
-                    {t("Email verified. Sign in to continue.")}
-                  </AlertDescription>
-                </Alert>
+                <div className="mb-4">
+                  <SuccessAlert>{t("Email verified. Sign in to continue.")}</SuccessAlert>
+                </div>
               )}
               <form onSubmit={authenticate} className="grid gap-4">
                 <div className="grid gap-2">
@@ -203,12 +207,7 @@ export function CustomerApp() {
                     />
                   </div>
                 )}
-                {error && (
-                  <Alert variant="destructive">
-                    <CircleAlert />
-                    <AlertDescription>{error}</AlertDescription>
-                  </Alert>
-                )}
+                {error && <ErrorAlert message={error} />}
                 <Button type="submit" disabled={busy}>
                   {busy
                     ? t("Please wait…")
@@ -250,13 +249,13 @@ export function CustomerApp() {
     );
   }
   if (location.pathname === "/account" || location.pathname === "/account/billing") {
-    return portal(<CustomerAccount customer={customer} onChanged={load} />);
+    return withHeader(<CustomerAccount customer={customer} onChanged={load} />);
   }
   if (
     location.pathname === "/instances/new" && customer.has_password &&
     !customer.subscription_required
   ) {
-    return portal(
+    return withHeader(
       <CustomerCreateInstance
         customer={customer}
         activeInstances={activeInstances}
@@ -264,87 +263,60 @@ export function CustomerApp() {
     );
   }
   const instanceId = location.pathname.match(/^\/instances\/([^/]+)$/)?.[1];
-  if (instanceId) {
-    return portal(<CustomerInstanceDetail key={instanceId} id={instanceId} />);
+  // Without a password or a subscription there is no form yet, only the list
+  // saying what to do first.
+  if (instanceId && instanceId !== "new") {
+    return withHeader(<CustomerInstanceDetail key={instanceId} id={instanceId} />);
   }
-  return portal(
-    <>
-      {error && (
-        <Alert variant="destructive" className="mb-4">
-          <CircleAlert />
-          <AlertDescription>{error}</AlertDescription>
-        </Alert>
-      )}
+  const canCreate = customer.has_password && !reachedInstanceLimit &&
+    !customer.subscription_required;
+  return withHeader(
+    <Page>
+      <PageHeader
+        title={t("Your instances")}
+        description={customer.has_password
+          ? i18n._(instanceUsage(i18n.locale, activeInstances, customer.instance_limit))
+          : undefined}
+        action={canCreate && (
+          <Button render={<a href="/instances/new" />}>
+            <Plus /> {t("Create an instance")}
+          </Button>
+        )}
+      />
+      {error && <ErrorAlert message={error} />}
       {!customer.has_password && (
-        <Card className="border-primary/40 mb-6">
-          <CardHeader>
-            <CardTitle>{t("Set your password")}</CardTitle>
-            <CardDescription>
-              {t(
-                "Your email is verified. Add a password of at least 14 characters for password sign-in.",
-              )}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Button render={<a href="/account" />}>{t("Set password")}</Button>
-          </CardContent>
-        </Card>
+        <ActionAlert icon={<KeyRound />} href="/account" action={t("Set password")}>
+          {t("Your email is verified. Add a password of at least 14 characters for password sign-in.")}
+        </ActionAlert>
+      )}
+      {customer.has_password && customer.subscription_required && (
+        <ActionAlert icon={<CreditCard />} href="/account" action={t("Subscribe")}>
+          {t("Subscribe to create and run instances.")}
+        </ActionAlert>
       )}
       {customer.has_password && (
-        <Card>
-          <CardHeader>
-            <CardTitle>{t("Your instances")}</CardTitle>
-            {customer.instance_limit != null && (
-              <CardDescription>
-                {i18n.locale === "ko"
-                  ? `${customer.instance_limit}개 중 ${activeInstances}개 사용 중입니다.`
-                  : `${activeInstances} of ${customer.instance_limit} used.`}
-              </CardDescription>
+        <Card className="py-0">
+          {tenants.length === 0
+            ? <EmptyState icon={<Server />}>{t("No instances yet.")}</EmptyState>
+            : (
+              <ul className="divide-y">
+                {tenants.map((tenant) => (
+                  <li key={tenant.id}>
+                    <a
+                      href={`/instances/${tenant.id}`}
+                      className="hover:bg-muted flex items-center justify-between gap-3 px-4 py-3 transition-colors"
+                    >
+                      <span className="min-w-0 font-medium wrap-anywhere">
+                        {instanceAddress(tenant)}
+                      </span>
+                      <InstanceStatusBadge tenant={tenant} />
+                    </a>
+                  </li>
+                ))}
+              </ul>
             )}
-            {!reachedInstanceLimit && !customer.subscription_required && (
-              <CardAction>
-                <Button render={<a href="/instances/new" />}>
-                  <Plus /> {t("Create an instance")}
-                </Button>
-              </CardAction>
-            )}
-          </CardHeader>
-          <CardContent className="grid gap-3">
-            {customer.subscription_required && (
-              <Alert>
-                <CreditCard />
-                <AlertDescription>
-                  {t("Subscribe to create and run instances.")}
-                </AlertDescription>
-                {/* Not in the description, which underlines every link in it. */}
-                <div className="col-start-2 mt-2.5">
-                  <Button size="sm" render={<a href="/account" />}>
-                    {t("Subscribe")}
-                  </Button>
-                </div>
-              </Alert>
-            )}
-            {tenants.length === 0
-              ? (
-                <p className="text-muted-foreground text-sm">
-                  {t("No instances yet.")}
-                </p>
-              )
-              : tenants.map((t) => (
-                <a
-                  key={t.id}
-                  href={`/instances/${t.id}`}
-                  className="bg-muted/50 hover:bg-muted rounded-md p-3 transition-colors"
-                >
-                  <strong>{instanceAddress(t)}</strong>
-                  <p className="text-muted-foreground text-sm">
-                    {i18n._(instanceStatus(t))}
-                  </p>
-                </a>
-              ))}
-          </CardContent>
         </Card>
       )}
-    </>,
+    </Page>,
   );
 }
