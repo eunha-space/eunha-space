@@ -26,7 +26,7 @@ const ko: Record<string, string> = {
   "Saved. Your instance will apply these settings shortly.": "저장되었습니다. 곧 인스턴스에 설정이 적용됩니다.",
   "eunha space": "은하공간",
   "Your own Mastodon-compatible server, run for you.":
-    "마스토돈 호환 서버: 은하, 호스팅은 은하공간에 맡기세요",
+    "마스토돈 호환 서버: 은하 호스팅은 은하공간에 맡기세요",
   "eunha space hosts Eunha, a Mastodon-compatible fediverse server. Choose an address and you have a server of your own, where you can follow and be followed by people on Mastodon and across the fediverse.":
     "은하공간은 마스토돈과 호환되는 연합우주(페디버스) 서버 은하를 호스팅하는 서비스입니다. 주소만 정하면 나만의 서버가 생기고, 마스토돈을 비롯한 연합우주 곳곳의 사람들과 서로 팔로우할 수 있습니다.",
   "How it works": "이용 방법",
