@@ -97,7 +97,7 @@ export function Landing() {
   }, []);
   const korean = i18n.locale === "ko";
   return (
-    <main className="mx-auto w-full max-w-5xl flex-1 break-keep px-4 md:px-8">
+    <main data-landing className="mx-auto w-full max-w-5xl flex-1 break-keep px-4 md:px-8">
       <header className="flex items-center justify-between gap-3 py-5">
         <a href="/" className="flex min-w-0 items-center gap-2 font-semibold">
           <Mark className="size-9 shrink-0" />
