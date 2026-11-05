@@ -33,6 +33,12 @@ use crate::{
 /// How long after it was paid a customer may ask for a payment back.
 pub(crate) const REFUND_WINDOW: &str = "7 days";
 
+/// TossPayments' events are a few hundred bytes.
+const WEBHOOK_BODY_LIMIT: usize = 64 * 1024;
+
+/// The signature headers TossPayments documents.
+const WEBHOOK_SIGNATURE_HEADERS: [&str; 2] = ["tosspayments-webhook-signature", "toss-signature"];
+
 /// How long to wait before asking about a refund whose outcome is not known.
 const REFUND_RETRY: &str = "5 minutes";
 
@@ -54,8 +60,17 @@ pub(crate) struct PaymentRecord {
 }
 
 impl PaymentRecord {
+    /// Whether TossPayments is holding money for this payment.
+    pub(crate) fn keeps_money(&self) -> bool {
+        matches!(self.status.as_str(), "DONE" | "PARTIAL_CANCELED")
+    }
+
+    pub(crate) fn status(&self) -> &str {
+        &self.status
+    }
+
     /// How much of the payment has been given back.
-    fn refunded(&self) -> i64 {
+    pub(crate) fn refunded(&self) -> i64 {
         match self.status.as_str() {
             "CANCELED" | "PARTIAL_CANCELED" => {
                 (self.total_amount - self.balance_amount.unwrap_or(0)).clamp(0, self.total_amount)
@@ -66,13 +81,13 @@ impl PaymentRecord {
 }
 
 /// What TossPayments said about an order.
-enum Found {
+pub(crate) enum Found {
     Payment(PaymentRecord),
     NotFound,
     Unknown,
 }
 
-async fn find_order(s: &Shared, order_id: &str) -> Found {
+pub(crate) async fn find_order(s: &Shared, order_id: &str) -> Found {
     let Some(billing) = s.billing.as_deref() else {
         return Found::Unknown;
     };
@@ -443,11 +458,84 @@ struct WebhookEvent {
 /// only a reason to look the payment up. `BILLING_DELETED` cannot be looked
 /// up, but it names the key it is about, which only TossPayments and this
 /// control plane know, and all it does is stop charging that key.
-pub(crate) async fn webhook(State(s): State<Shared>, body: Bytes) -> StatusCode {
-    if s.billing.is_none() || body.len() > 64 * 1024 {
+pub(crate) async fn webhook(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> StatusCode {
+    if s.billing.is_none() {
         return StatusCode::OK;
     }
-    let Ok(event) = serde_json::from_slice::<WebhookEvent>(&body) else {
+    let status = answer_webhook(&s, &body).await;
+    keep_webhook(&s, &headers, &body, status).await;
+    status
+}
+
+/// Keep what arrived. A failure here must not change the answer, or a database
+/// problem would become a stream of resends.
+async fn keep_webhook(s: &Shared, headers: &HeaderMap, body: &[u8], status: StatusCode) {
+    let event = (body.len() <= WEBHOOK_BODY_LIMIT)
+        .then(|| serde_json::from_slice::<serde_json::Value>(body).ok())
+        .flatten()
+        .map(|mut event| {
+            remove_secrets(&mut event);
+            event
+        });
+    let text = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(|value| value.as_str())
+            .map(|value| value.chars().take(200).collect::<String>())
+    };
+    let kept = sqlx::query("INSERT INTO toss_webhook_deliveries(event_type,order_id,signed,headers,payload,http_status) VALUES($1,$2,$3,$4,$5,$6)")
+        .bind(text(event.as_ref().and_then(|event| event.get("eventType"))))
+        .bind(text(event.as_ref().and_then(|event| event.pointer("/data/orderId"))))
+        .bind(WEBHOOK_SIGNATURE_HEADERS.iter().any(|name| headers.contains_key(*name)))
+        .bind(kept_headers(headers))
+        .bind(event.map(|event| event.to_string()))
+        .bind(i32::from(status.as_u16()))
+        .execute(&s.db)
+        .await;
+    if kept.is_err() {
+        tracing::warn!("could not keep a TossPayments webhook");
+    }
+}
+
+fn kept_headers(headers: &HeaderMap) -> serde_json::Value {
+    let kept = headers
+        .iter()
+        .filter(|(name, _)| !matches!(name.as_str(), "authorization" | "cookie"))
+        .filter_map(|(name, value)| {
+            let value: String = value.to_str().ok()?.chars().take(1000).collect();
+            Some((name.as_str().to_owned(), serde_json::Value::String(value)))
+        })
+        .take(50)
+        .collect::<serde_json::Map<_, _>>();
+    serde_json::Value::Object(kept)
+}
+
+/// Billing keys are what charges a card, and a virtual account's `secret`
+/// verifies its deposits; neither belongs in a log.
+fn remove_secrets(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (name, field) in fields.iter_mut() {
+                if matches!(name.as_str(), "billingKey" | "secret") {
+                    *field = "[removed]".into();
+                } else {
+                    remove_secrets(field);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(remove_secrets),
+        _ => {}
+    }
+}
+
+async fn answer_webhook(s: &Shared, body: &[u8]) -> StatusCode {
+    if body.len() > WEBHOOK_BODY_LIMIT {
+        return StatusCode::OK;
+    }
+    let Ok(event) = serde_json::from_slice::<WebhookEvent>(body) else {
         return StatusCode::OK;
     };
     let field = |name: &str| {
@@ -461,14 +549,14 @@ pub(crate) async fn webhook(State(s): State<Shared>, body: Bytes) -> StatusCode 
     let handled = match event.event_type.as_deref() {
         Some("PAYMENT_STATUS_CHANGED") => match field("orderId") {
             Some(order_id) => {
-                tokio::time::timeout(WEBHOOK_LOOKUP_TIMEOUT, payment_changed(&s, &order_id))
+                tokio::time::timeout(WEBHOOK_LOOKUP_TIMEOUT, payment_changed(s, &order_id))
                     .await
                     .unwrap_or(Ok(false))
             }
             None => Ok(true),
         },
         Some("BILLING_DELETED") => match field("billingKey") {
-            Some(billing_key) => billing_key_deleted(&s, &billing_key).await.map(|_| true),
+            Some(billing_key) => billing_key_deleted(s, &billing_key).await.map(|_| true),
             None => Ok(true),
         },
         _ => Ok(true),

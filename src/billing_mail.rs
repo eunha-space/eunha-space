@@ -215,8 +215,9 @@ pub(crate) async fn refund(
 /// Write a reminder for every subscription renewing within `RENEWAL_NOTICE`
 /// that has not had one for that renewal. Returns how many were written.
 pub(crate) async fn schedule_renewal_notices(s: &Shared) -> Result<u64> {
+    let renews_at = crate::billing::renewal_time("s.current_period_end");
     let due = sqlx::query_as::<_, (Uuid, i64, String, String, Option<String>, Option<String>)>(&format!(
-        "SELECT s.user_id,COALESCE(next.amount,s.amount),to_char(s.current_period_end AT TIME ZONE 'Asia/Seoul','YYYY-MM-DD'),to_char(s.current_period_end,'YYYYMMDDHH24MISS'),s.card_company,s.card_number
+        "SELECT s.user_id,COALESCE(next.amount,s.amount),to_char({renews_at} AT TIME ZONE 'Asia/Seoul','YYYY-MM-DD'),to_char(s.current_period_end,'YYYYMMDDHH24MISS'),s.card_company,s.card_number
         FROM subscriptions s LEFT JOIN plans next ON next.id=s.pending_plan_id
         WHERE s.status='active' AND NOT s.cancel_at_period_end AND s.billing_key IS NOT NULL
           AND s.current_period_end > now()+interval '{RENEWAL_NOTICE_TOO_LATE}'

@@ -176,6 +176,7 @@ export type Billing = {
     current_period_end: string | null;
     cancel_at_period_end: boolean;
     next_attempt_at: string | null;
+    renews_at: string | null;
     /** TossPayments' or the card company's reason for the last decline. */
     last_error: string | null;
   } | null;

@@ -86,7 +86,16 @@ take 10, and don't reuse connections, as its network requirements ask. An email
 address over 100 characters, the most TossPayments takes, is left out of the
 billing window and the charge; it only uses it to mail its own receipt.
 
-A declined renewal is retried after 1, 2, and 4 more days. During those retries
+Renewals and their retries are charged at 09:00 in Korea. One due later than
+that waits for the next day's, so a customer whose period ends at 14:00 is
+charged at 09:00 the next morning, without the next period moving: its dates
+still follow the original one. What a customer is waiting on goes straight away:
+a first charge, a new card for a declined renewal, an upgrade, and an operator's
+retry. A subscription set to end still ends with its period, and looking up a
+charge whose outcome is unknown carries on through the day. Customers see the
+charge date on the subscription page and in the renewal reminder.
+
+A declined renewal is retried at 09:00 after 1, 2, and 4 more days. During those retries
 the subscription is `past_due`, its instances keep running, and the customer is
 emailed about each decline when control-plane SMTP is configured. After the
 fourth decline, the subscription is `lapsed`.
@@ -199,7 +208,13 @@ What a refund does depends on who gave it back, which is
 Point TossPayments' webhook at `/api/webhooks/tosspayments` for
 `PAYMENT_STATUS_CHANGED` and `BILLING_DELETED`.
 
-Payment events are unsigned, so their content is only a reason to look the
+Every webhook is kept in `toss_webhook_deliveries` with its headers and what it
+was answered, for five years. Billing keys, the `authorization` header and
+cookies are removed first. The billing page shows the latest and whether they
+were signed. TossPayments' documentation disagrees about whether these events
+are signed, and it is not yet known whether they are under live keys.
+
+Payment events are treated as unsigned, so their content is only a reason to look the
 payment up. A cancellation found that way is recorded as above. A change to a
 charge still being confirmed, a cancellation included, brings the renewer's
 next look at it forward. An
@@ -278,3 +293,27 @@ refund, and subscription end is recorded as an operation with no tenant (`subscr
 customer. Charges record the order id, amount, period, and the decline code.
 `subscription_payments` keeps every charge, including the TossPayments payment
 key and receipt URL. Customers see their receipts on the account page.
+
+## Comparing with TossPayments
+
+The other paths only ask about orders still open. So once a day, after 04:00 in
+Korea, the renewer compares the day before with `GET /v1/transactions`. A control
+plane that was down catches up on up to seven days, and a failed comparison is
+tried again after an hour. `toss_transaction_checks` records each day.
+
+A cancellation the books have not heard of, because its webhook never came, is
+recorded like any other. Anything else is written once to `toss_mismatches` and
+logged as an error, and nothing is changed: only a person can tell whether a
+charge should be honoured or given back. They appear on the billing page until
+marked resolved.
+
+| Kind                    | Meaning                                                                     |
+| :---------------------- | :-------------------------------------------------------------------------- |
+| `approved_not_recorded` | Closed here as `failed` or `expired`, but TossPayments holds the money.     |
+| `unknown_order`         | TossPayments moved money on an order the books don't have.                  |
+| `amount_differs`        | The approved amount isn't the recorded one.                                 |
+| `not_at_toss`           | Recorded as paid, but TossPayments has no such payment.                     |
+| `still_pending`         | No outcome a day after the charge. Resolves itself once settled.            |
+
+Payments under another MID are skipped, because the current key can't see them.
+Test orders from other machines sharing a test key appear as `unknown_order`.

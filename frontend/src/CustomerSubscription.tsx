@@ -273,7 +273,11 @@ export function SubscriptionCard(
                 {subscription.cancel_at_period_end ? t("Ends on") : t("Renews on")}
               </dt>
               <dd className="font-medium">
-                {day(subscription.current_period_end)}
+                {day(
+                  subscription.cancel_at_period_end
+                    ? subscription.current_period_end
+                    : (subscription.renews_at ?? subscription.current_period_end),
+                )}
               </dd>
             </div>
           )}

@@ -49,12 +49,30 @@ const RETRY_UNKNOWN: &str = "5 minutes";
 /// a request that timed out may still be approved for a while after.
 const ABANDON_UNRECORDED_ORDER: &str = "45 minutes";
 
-/// How often a subscription held back by an MID mismatch is looked at again.
+/// How soon a subscription held back by an MID mismatch may be looked at again,
+/// which the renewer does at the next charge time after it.
 const MID_MISMATCH_RECHECK: &str = "1 hour";
 
 /// How long a charge in flight holds its subscription. Longer than the request's
 /// own timeout, so a slow approval is not sent again while it is still running.
 const LEASE: &str = "3 minutes";
+
+/// The most recent 09:00 in Korea, when renewals are charged. A renewal due later
+/// than this waits for the next one. SQL.
+const LATEST_CHARGE_TIME: &str = "((date_trunc('day',now() AT TIME ZONE 'Asia/Seoul'-interval '9 hours')+interval '9 hours') AT TIME ZONE 'Asia/Seoul')";
+
+/// The first 09:00 in Korea after a time given in SQL.
+fn charge_time_after(at: &str) -> String {
+    format!(
+        "((date_trunc('day',({at}) AT TIME ZONE 'Asia/Seoul'-interval '9 hours')+interval '33 hours') AT TIME ZONE 'Asia/Seoul')"
+    )
+}
+
+/// When a renewal at the end of a period given in SQL is charged: the period's
+/// end if that is 09:00 in Korea, or else the next 09:00.
+pub(crate) fn renewal_time(period_end: &str) -> String {
+    charge_time_after(&format!("{period_end}-interval '1 microsecond'"))
+}
 
 /// The longest `customerEmail` TossPayments takes.
 const TOSS_EMAIL_MAX: usize = 100;
@@ -610,6 +628,9 @@ pub(crate) struct SubscriptionView {
     cancel_at_period_end: bool,
     #[serde(with = "time::serde::rfc3339::option")]
     next_attempt_at: Option<OffsetDateTime>,
+    /// When the next renewal is charged, which is at 09:00 in Korea.
+    #[serde(with = "time::serde::rfc3339::option")]
+    renews_at: Option<OffsetDateTime>,
     last_error: Option<String>,
     #[serde(skip)]
     period_start: Option<OffsetDateTime>,
@@ -667,7 +688,7 @@ pub(crate) struct BillingView {
 
 pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiError> {
     let subscription = sqlx::query_as::<_, SubscriptionView>(
-        "SELECT status,amount,plan_id,pending_plan_id,card_company,card_number,billing_key IS NOT NULL has_card,current_period_end,cancel_at_period_end,next_attempt_at,last_error,anchor_at+make_interval(months => GREATEST(periods_paid-1,0)) period_start FROM subscriptions WHERE user_id=$1",
+        &format!("SELECT status,amount,plan_id,pending_plan_id,card_company,card_number,billing_key IS NOT NULL has_card,current_period_end,cancel_at_period_end,next_attempt_at,{} renews_at,last_error,anchor_at+make_interval(months => GREATEST(periods_paid-1,0)) period_start FROM subscriptions WHERE user_id=$1", renewal_time("current_period_end")),
     )
     .bind(user_id)
     .fetch_optional(&s.db)
@@ -1290,6 +1311,9 @@ pub async fn renewer(state: Shared) {
                     }
                 }
             }
+            if crate::billing_check::check_due(&state).await.is_err() {
+                tracing::warn!("could not compare a day with TossPayments' transactions");
+            }
             for _ in 0..MAX_PER_PASS {
                 match crate::billing_sync::delete_retired_key(&state).await {
                     Ok(true) => continue,
@@ -1352,7 +1376,7 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
     };
     let mut tx = s.db.begin().await?;
     let Some(due) = sqlx::query_as::<_, Due>(
-        "SELECT s.user_id,s.customer_key,s.status,s.cancel_at_period_end,s.billing_key,s.toss_mid,u.email FROM subscriptions s JOIN users u ON u.id=s.user_id WHERE s.next_attempt_at<=now() AND (s.lease_until IS NULL OR s.lease_until<now()) AND s.status IN ('incomplete','active','past_due') AND NOT EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=s.user_id AND p.refund_requested_at IS NOT NULL AND p.refunded_at IS NULL) AND ($1::uuid IS NULL OR s.user_id=$1) ORDER BY s.next_attempt_at LIMIT 1 FOR UPDATE OF s SKIP LOCKED",
+        &format!("SELECT s.user_id,s.customer_key,s.status,s.cancel_at_period_end,s.billing_key,s.toss_mid,u.email FROM subscriptions s JOIN users u ON u.id=s.user_id WHERE s.next_attempt_at<=now() AND (s.lease_until IS NULL OR s.lease_until<now()) AND s.status IN ('incomplete','active','past_due') AND NOT EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=s.user_id AND p.refund_requested_at IS NOT NULL AND p.refunded_at IS NULL) AND ($1::uuid IS NULL OR s.user_id=$1) AND ($1::uuid IS NOT NULL OR s.status='incomplete' OR s.cancel_at_period_end OR s.billing_key IS NULL OR s.next_attempt_at<={LATEST_CHARGE_TIME} OR EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=s.user_id AND p.status='pending')) ORDER BY s.next_attempt_at LIMIT 1 FOR UPDATE OF s SKIP LOCKED"),
     )
     .bind(user_id)
     .fetch_optional(&mut *tx)
@@ -1607,7 +1631,11 @@ async fn settle(s: &Shared, due: &Due, pending: &PendingPayment, outcome: Charge
             .await?;
             match RETRY_AFTER_DECLINE.get(failed_attempts as usize - 1) {
                 Some(wait) => {
-                    sqlx::query(&format!("UPDATE subscriptions SET status='past_due',next_attempt_at=now()+interval '{wait}' WHERE user_id=$1"))
+                    // Half a day short, so a decline just after 09:00 is tried
+                    // again at 09:00 that many days on, not the day after.
+                    let next =
+                        charge_time_after(&format!("now()+interval '{wait}'-interval '12 hours'"));
+                    sqlx::query(&format!("UPDATE subscriptions SET status='past_due',next_attempt_at={next} WHERE user_id=$1"))
                         .bind(due.user_id)
                         .execute(&mut *tx)
                         .await?;

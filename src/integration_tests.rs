@@ -1587,6 +1587,8 @@ struct TossStandIn {
     charges: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     /// What TossPayments recorded, by order id.
     orders: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
+    /// What the transactions API lists.
+    transactions: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     /// Whether the next cancel is refused on its merits.
     refuse_cancel: Arc<std::sync::atomic::AtomicBool>,
     /// Billing keys deleted, in order.
@@ -1596,6 +1598,11 @@ struct TossStandIn {
 impl TossStandIn {
     fn answer(&self, answers: &[TossScript]) {
         self.script.lock().unwrap().extend(answers);
+    }
+    fn lists_transaction(&self, order_id: &str, status: &str, amount: i64) {
+        let mut transactions = self.transactions.lock().unwrap();
+        let key = format!("tx_{}", transactions.len());
+        transactions.push(serde_json::json!({"transactionKey":key,"orderId":order_id,"status":status,"amount":amount}));
     }
     fn charges(&self) -> Vec<(String, String)> {
         self.charges.lock().unwrap().clone()
@@ -1725,6 +1732,14 @@ async fn toss_stand_in() -> (TossStandIn, String) {
         order["balanceAmount"] = 0.into();
         (StatusCode::OK, Json(order.clone()))
     };
+    let transactions =
+        |State(toss): State<TossStandIn>,
+         axum::extract::RawQuery(query): axum::extract::RawQuery| async move {
+            let query = query.unwrap();
+            assert!(query.contains("startDate=2026-11-04T00:00:00"), "{query}");
+            assert!(query.contains("endDate=2026-11-04T23:59:59"), "{query}");
+            Json(toss.transactions.lock().unwrap().clone())
+        };
     let delete_key = |State(toss): State<TossStandIn>, Path(billing_key): Path<String>| async move {
         toss.deleted_keys.lock().unwrap().push(billing_key);
         StatusCode::OK
@@ -1734,6 +1749,7 @@ async fn toss_stand_in() -> (TossStandIn, String) {
         .route("/v1/billing/{billing_key}", post(charge).delete(delete_key))
         .route("/v1/payments/{payment_key}/cancel", post(cancel))
         .route("/v1/payments/orders/{order_id}", get(lookup))
+        .route("/v1/transactions", get(transactions))
         .with_state(toss.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1811,7 +1827,7 @@ async fn subscription_status(pool: &PgPool, user_id: Uuid) -> String {
 }
 
 async fn make_due(pool: &PgPool, user_id: Uuid) {
-    sqlx::query("UPDATE subscriptions SET next_attempt_at=now() WHERE user_id=$1")
+    sqlx::query("UPDATE subscriptions SET next_attempt_at=now()-interval '1 day' WHERE user_id=$1")
         .bind(user_id)
         .execute(pool)
         .await
@@ -2082,6 +2098,266 @@ async fn an_approval_whose_answer_was_lost_is_found_and_not_charged_again(pool: 
     );
 }
 
+async fn mismatches(pool: &PgPool) -> Vec<(String, String)> {
+    sqlx::query_as("SELECT order_id,kind FROM toss_mismatches WHERE resolved_at IS NULL ORDER BY order_id,kind")
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+/// Set the day a payment was settled on to the one the checks below compare.
+async fn settled_on_the_checked_day(pool: &PgPool, order_id: &str) {
+    sqlx::query(
+        "UPDATE subscription_payments SET settled_at='2026-11-04 12:00:00+09' WHERE order_id=$1",
+    )
+    .bind(order_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_day_that_matches_tosspayments_raises_nothing(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (_, headers) = billed_customer(&pool).await;
+    let view = subscribe(&state, &headers).await;
+    let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+    settled_on_the_checked_day(&pool, &order_id).await;
+    toss.lists_transaction(&order_id, "DONE", 9900);
+    assert_eq!(
+        billing_check::check_day(&state, "2026-11-04")
+            .await
+            .unwrap(),
+        1
+    );
+    assert!(mismatches(&pool).await.is_empty());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn money_with_no_matching_record_is_raised_once_for_an_operator(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    let view = subscribe(&state, &headers).await;
+    let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+    // Closed here as never recorded, and approved after all.
+    sqlx::query("UPDATE subscription_payments SET status='expired' WHERE order_id=$1")
+        .bind(&order_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    toss.lists_transaction(&order_id, "DONE", 9900);
+    toss.lists_transaction("2026-11-04-0000-0001", "DONE", 5900);
+    toss.lists_transaction("2026-11-04-0000-0002", "READY", 5900);
+    for _ in 0..2 {
+        assert_eq!(
+            billing_check::check_day(&state, "2026-11-04")
+                .await
+                .unwrap(),
+            2
+        );
+    }
+    assert_eq!(
+        mismatches(&pool).await,
+        vec![
+            (
+                "2026-11-04-0000-0001".to_owned(),
+                "unknown_order".to_owned()
+            ),
+            (order_id.clone(), "approved_not_recorded".to_owned()),
+        ]
+    );
+    // Reported, not acted on: an operator decides.
+    assert_eq!(subscription_status(&pool, user_id).await, "active");
+    let id: Uuid = sqlx::query_scalar("SELECT id FROM toss_mismatches WHERE kind='unknown_order'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let (_, admin) = fixture(&pool).await;
+    billing_admin::resolve_mismatch(State(state.clone()), admin, Path(id))
+        .await
+        .unwrap();
+    billing_check::check_day(&state, "2026-11-04")
+        .await
+        .unwrap();
+    assert_eq!(mismatches(&pool).await.len(), 1);
+
+    // Cancelled in full since, nothing is owed.
+    sqlx::query("DELETE FROM toss_mismatches")
+        .execute(&pool)
+        .await
+        .unwrap();
+    toss.cancel_in_dashboard(&order_id);
+    toss.transactions.lock().unwrap().remove(1);
+    billing_check::check_day(&state, "2026-11-04")
+        .await
+        .unwrap();
+    assert!(mismatches(&pool).await.is_empty());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_cancel_whose_webhook_never_came_is_recorded(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (_, headers) = billed_customer(&pool).await;
+    let view = subscribe(&state, &headers).await;
+    let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+    toss.cancel_part_in_dashboard(&order_id, 1000);
+    toss.lists_transaction(&order_id, "PARTIAL_CANCELED", 1000);
+    billing_check::check_day(&state, "2026-11-04")
+        .await
+        .unwrap();
+    let refunded: i64 =
+        sqlx::query_scalar("SELECT refunded_amount FROM subscription_payments WHERE order_id=$1")
+            .bind(&order_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(refunded, 1000);
+    assert!(mismatches(&pool).await.is_empty());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_payment_tosspayments_has_no_record_of_is_raised(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (_, headers) = billed_customer(&pool).await;
+    let view = subscribe(&state, &headers).await;
+    let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+    settled_on_the_checked_day(&pool, &order_id).await;
+    toss.orders.lock().unwrap().remove(&order_id);
+    billing_check::check_day(&state, "2026-11-04")
+        .await
+        .unwrap();
+    assert_eq!(
+        mismatches(&pool).await,
+        vec![(order_id, "not_at_toss".to_owned())]
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_webhook_is_kept_with_its_headers_and_without_secrets(pool: PgPool) {
+    let (_toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "tosspayments-webhook-transmission-id",
+        "whtrans_1".parse().unwrap(),
+    );
+    headers.insert("cookie", "private".parse().unwrap());
+    headers.insert("authorization", "private".parse().unwrap());
+    let body = axum::body::Bytes::from(
+        serde_json::json!({"eventType":"BILLING_DELETED","data":{"billingKey":"key-that-charges-a-card"}}).to_string(),
+    );
+    assert_eq!(
+        billing_sync::webhook(State(state.clone()), headers.clone(), body).await,
+        StatusCode::OK
+    );
+    let (event, signed, kept, payload, status): (
+        Option<String>,
+        bool,
+        serde_json::Value,
+        Option<String>,
+        i32,
+    ) = sqlx::query_as(
+        "SELECT event_type,signed,headers,payload,http_status FROM toss_webhook_deliveries",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(event.as_deref(), Some("BILLING_DELETED"));
+    assert!(!signed);
+    assert_eq!(status, 200);
+    assert_eq!(
+        kept,
+        serde_json::json!({"tosspayments-webhook-transmission-id":"whtrans_1"})
+    );
+    assert!(!payload.unwrap().contains("key-that-charges-a-card"));
+
+    headers.insert("tosspayments-webhook-signature", "v1:abc".parse().unwrap());
+    billing_sync::webhook(
+        State(state.clone()),
+        headers,
+        axum::body::Bytes::from_static(b"not json"),
+    )
+    .await;
+    let (signed, payload): (bool, Option<String>) = sqlx::query_as(
+        "SELECT signed,payload FROM toss_webhook_deliveries ORDER BY received_at DESC LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(signed);
+    assert!(payload.is_none());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn renewals_are_charged_at_nine_in_korea_and_nothing_else_waits(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    subscribe(&state, &headers).await;
+    let charges = toss.charges().len();
+    const LATEST_NINE: &str = "((date_trunc('day',now() AT TIME ZONE 'Asia/Seoul'-interval '9 hours')+interval '9 hours') AT TIME ZONE 'Asia/Seoul')";
+    let due_at = |at: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(&format!(
+                "UPDATE subscriptions SET next_attempt_at={at} WHERE user_id=$1"
+            ))
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    // Due since the last 09:00: it waits for the next. One second in, so this
+    // also holds right after 09:00, when that time has yet to come.
+    due_at(format!("{LATEST_NINE}+interval '1 second'")).await;
+    assert!(!billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(toss.charges().len(), charges);
+    // Due by the last 09:00: it is charged.
+    due_at(LATEST_NINE.to_owned()).await;
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(toss.charges().len(), charges + 1);
+
+    // A decline comes back at 09:00, however late in the day it was.
+    toss.answer(&[TossScript::Decline]);
+    make_due(&pool, user_id).await;
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    let (hour, minute, status): (f64, f64, String) = sqlx::query_as(
+        "SELECT extract(hour FROM next_attempt_at AT TIME ZONE 'Asia/Seoul')::float8,extract(minute FROM next_attempt_at AT TIME ZONE 'Asia/Seoul')::float8,status FROM subscriptions WHERE user_id=$1",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((hour, minute, status.as_str()), (9.0, 0.0, "past_due"));
+
+    // An operator's retry doesn't wait.
+    due_at("now()".to_owned()).await;
+    assert!(billing::charge_due(&state, Some(user_id)).await.unwrap());
+    assert_eq!(subscription_status(&pool, user_id).await, "active");
+
+    // A cancelled subscription ends with its period, not at the next 09:00.
+    sqlx::query(
+        "UPDATE subscriptions SET cancel_at_period_end=true,next_attempt_at=now() WHERE user_id=$1",
+    )
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(subscription_status(&pool, user_id).await, "canceled");
+}
+
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
 async fn a_charge_canceled_before_its_approval_was_recorded_is_not_paid(pool: PgPool) {
@@ -2099,7 +2375,7 @@ async fn a_charge_canceled_before_its_approval_was_recorded_is_not_paid(pool: Pg
             .to_string(),
     );
     assert_eq!(
-        billing_sync::webhook(State(state.clone()), event).await,
+        billing_sync::webhook(State(state.clone()), HeaderMap::new(), event).await,
         StatusCode::OK
     );
     assert!(billing::charge_due(&state, None).await.unwrap());
@@ -2357,7 +2633,7 @@ async fn a_partial_refund_leaves_the_subscription_alone_until_it_is_whole(pool: 
 
     toss.cancel_part_in_dashboard(&order_id, 1000);
     assert_eq!(
-        billing_sync::webhook(State(state.clone()), event.clone()).await,
+        billing_sync::webhook(State(state.clone()), HeaderMap::new(), event.clone()).await,
         StatusCode::OK
     );
     let Json(view) = billing::get(State(state.clone()), headers.clone())
@@ -2383,7 +2659,7 @@ async fn a_partial_refund_leaves_the_subscription_alone_until_it_is_whole(pool: 
     // Giving back the rest of it, in the dashboard, changes nothing either.
     toss.cancel_in_dashboard(&order_id);
     assert_eq!(
-        billing_sync::webhook(State(state.clone()), event).await,
+        billing_sync::webhook(State(state.clone()), HeaderMap::new(), event).await,
         StatusCode::OK
     );
     let Json(view) = billing::get(State(state.clone()), headers.clone())
@@ -2526,14 +2802,14 @@ async fn a_refund_made_in_the_dashboard_is_learned_from_the_webhook(pool: PgPool
         )
     };
     assert_eq!(
-        billing_sync::webhook(State(state.clone()), event(&order_id)).await,
+        billing_sync::webhook(State(state.clone()), HeaderMap::new(), event(&order_id)).await,
         StatusCode::OK
     );
     assert_eq!(subscription_status(&pool, user_id).await, "active");
 
     toss.cancel_in_dashboard(&order_id);
     assert_eq!(
-        billing_sync::webhook(State(state.clone()), event(&order_id)).await,
+        billing_sync::webhook(State(state.clone()), HeaderMap::new(), event(&order_id)).await,
         StatusCode::OK
     );
     // A refund made there is an operator's, and leaves everything running.
@@ -2549,11 +2825,16 @@ async fn a_refund_made_in_the_dashboard_is_learned_from_the_webhook(pool: PgPool
     assert!(renews);
     // Delivered again, it changes nothing more.
     assert_eq!(
-        billing_sync::webhook(State(state.clone()), event(&order_id)).await,
+        billing_sync::webhook(State(state.clone()), HeaderMap::new(), event(&order_id)).await,
         StatusCode::OK
     );
     assert_eq!(
-        billing_sync::webhook(State(state.clone()), event("eunha-unknown")).await,
+        billing_sync::webhook(
+            State(state.clone()),
+            HeaderMap::new(),
+            event("eunha-unknown")
+        )
+        .await,
         StatusCode::OK
     );
 }
@@ -2570,7 +2851,7 @@ async fn a_card_removed_at_tosspayments_ends_with_the_period_unless_replaced(poo
             .to_string(),
     );
     assert_eq!(
-        billing_sync::webhook(State(state.clone()), deleted).await,
+        billing_sync::webhook(State(state.clone()), HeaderMap::new(), deleted).await,
         StatusCode::OK
     );
     let (status, has_key, ending): (String, bool, bool) = sqlx::query_as(

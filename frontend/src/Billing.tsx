@@ -81,9 +81,153 @@ type Overview = {
     unbilled: number;
     refunds_open: number;
     keys_waiting: number;
+    mismatches: number;
   };
   accounts: Account[];
+  mismatches: Mismatch[];
+  last_check: { day: string; transactions: number | null; error: string | null } | null;
+  webhooks: Webhook[];
 };
+
+type Mismatch = {
+  id: string;
+  order_id: string;
+  kind: string;
+  detail: string;
+  found_at: string;
+};
+
+type Webhook = {
+  id: string;
+  received_at: string;
+  event_type: string | null;
+  order_id: string | null;
+  signed: boolean;
+  headers: Record<string, string>;
+  payload: string | null;
+  http_status: number;
+};
+
+const MISMATCH_LABELS: Record<string, string> = {
+  approved_not_recorded: "Approved, but closed here",
+  unknown_order: "Not in our records",
+  amount_differs: "Amount differs",
+  not_at_toss: "Not at TossPayments",
+  still_pending: "No outcome after a day",
+};
+
+function TossRecords({ overview, onChanged }: { overview: Overview; onChanged: () => Promise<void> }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const check = overview.last_check;
+  const resolve = async (id: string) => {
+    setBusy(id);
+    try {
+      await api(`/billing/mismatches/${id}/resolve`, { method: "POST" });
+      setError("");
+      await onChanged();
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(null);
+    }
+  };
+  return (
+    <Card className="gap-0 overflow-hidden p-0">
+      <CardHeader className="px-4 py-3">
+        <CardTitle className="text-base">TossPayments records</CardTitle>
+        <CardDescription className="text-xs">
+          {check
+            ? check.error
+              ? `Comparing ${check.day} failed and is tried again hourly: ${check.error}`
+              : `Last day compared: ${check.day}, ${check.transactions ?? 0} transactions.`
+            : "No day has been compared yet. Each day is compared after 04:00 in Korea."}
+        </CardDescription>
+      </CardHeader>
+      {error && (
+        <Alert variant="destructive" className="mx-4 mb-3 w-auto">
+          <CircleAlert />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      {overview.mismatches.length > 0 && (
+        <Table>
+          <TableCaption className="sr-only">Mismatches to look at</TableCaption>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Mismatch</TableHead>
+              <TableHead>Order</TableHead>
+              <TableHead>Detail</TableHead>
+              <TableHead>Found</TableHead>
+              <TableHead />
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {overview.mismatches.map((mismatch) => (
+              <TableRow key={mismatch.id}>
+                <TableCell className="text-destructive font-medium">
+                  {MISMATCH_LABELS[mismatch.kind] ?? mismatch.kind}
+                </TableCell>
+                <TableCell className="font-mono text-xs">{mismatch.order_id}</TableCell>
+                <TableCell className="text-xs">{mismatch.detail}</TableCell>
+                <TableCell className="text-xs">{relativeTime(mismatch.found_at)}</TableCell>
+                <TableCell className="text-right">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busy === mismatch.id}
+                    onClick={() => void resolve(mismatch.id)}
+                  >
+                    Mark resolved
+                  </Button>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+      <Table>
+        <TableCaption className="sr-only">Recent webhooks</TableCaption>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Webhook</TableHead>
+            <TableHead>Order</TableHead>
+            <TableHead>Signature</TableHead>
+            <TableHead>Answered</TableHead>
+            <TableHead>Received</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {overview.webhooks.length === 0 && (
+            <TableRow>
+              <TableCell colSpan={5} className="text-muted-foreground text-xs">
+                No webhooks yet.
+              </TableCell>
+            </TableRow>
+          )}
+          {overview.webhooks.map((webhook) => (
+            <TableRow key={webhook.id}>
+              <TableCell className="align-top text-xs">
+                <details>
+                  <summary className="cursor-pointer">{webhook.event_type ?? "Unreadable"}</summary>
+                  <pre className="mt-2 max-w-xl overflow-x-auto text-xs whitespace-pre-wrap">
+                    {JSON.stringify(webhook.headers, null, 2)}
+                    {"\n"}
+                    {webhook.payload}
+                  </pre>
+                </details>
+              </TableCell>
+              <TableCell className="align-top font-mono text-xs">{webhook.order_id}</TableCell>
+              <TableCell className="align-top text-xs">{webhook.signed ? "Signed" : "None"}</TableCell>
+              <TableCell className="align-top text-xs">{webhook.http_status}</TableCell>
+              <TableCell className="align-top text-xs">{relativeTime(webhook.received_at)}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
+    </Card>
+  );
+}
 
 type Payment = {
   order_id: string;
@@ -387,6 +531,7 @@ export function Billing() {
     ["Unbilled with instances", String(summary.unbilled), false],
     ["Refunds open", String(summary.refunds_open), summary.refunds_open > 0],
     ["Keys to delete", String(summary.keys_waiting), summary.keys_waiting > 0],
+    ["TossPayments mismatches", String(summary.mismatches), summary.mismatches > 0],
   ];
 
   return (
@@ -407,7 +552,7 @@ export function Billing() {
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
-      <Card className="grid grid-cols-2 gap-0 overflow-hidden p-0 md:grid-cols-4 xl:grid-cols-7">
+      <Card className="grid grid-cols-2 gap-0 overflow-hidden p-0 md:grid-cols-4 xl:grid-cols-8">
         {tiles.map(([label, value, alarming], index) => (
           <div
             key={label}
@@ -430,6 +575,8 @@ export function Billing() {
       </Card>
 
       <Plans plans={overview.plans} onChanged={load} />
+
+      <TossRecords overview={overview} onChanged={load} />
 
       <Card className="gap-0 overflow-hidden p-0">
         <CardHeader className="flex flex-col gap-3 px-4 py-3">

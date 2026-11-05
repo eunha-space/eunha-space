@@ -39,6 +39,7 @@ use uuid::Uuid;
 mod auth;
 mod billing;
 mod billing_admin;
+mod billing_check;
 mod billing_mail;
 mod billing_sync;
 mod ci_release;
@@ -983,6 +984,10 @@ async fn main() -> Result<()> {
         .route(
             "/billing/payments/{order_id}/refund",
             post(billing_admin::refund),
+        )
+        .route(
+            "/billing/mismatches/{id}/resolve",
+            post(billing_admin::resolve_mismatch),
         )
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),

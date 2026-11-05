@@ -31,6 +31,7 @@ pub(crate) struct Summary {
     /// Retired billing keys TossPayments has not confirmed deleting after
     /// several tries.
     keys_waiting: i64,
+    mismatches: i64,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -85,6 +86,42 @@ pub(crate) struct Overview {
     plans: Vec<Plan>,
     summary: Summary,
     accounts: Vec<Account>,
+    mismatches: Vec<Mismatch>,
+    /// The last day compared with TossPayments, and any failure since.
+    last_check: Option<LastCheck>,
+    webhooks: Vec<Webhook>,
+}
+
+/// What the daily comparison found that an operator has to decide.
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct Mismatch {
+    id: Uuid,
+    order_id: String,
+    kind: String,
+    detail: String,
+    #[serde(with = "time::serde::rfc3339")]
+    found_at: OffsetDateTime,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct LastCheck {
+    day: String,
+    transactions: Option<i32>,
+    error: Option<String>,
+}
+
+/// A webhook as received. Billing keys were removed before it was kept.
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct Webhook {
+    id: Uuid,
+    #[serde(with = "time::serde::rfc3339")]
+    received_at: OffsetDateTime,
+    event_type: Option<String>,
+    order_id: Option<String>,
+    signed: bool,
+    headers: serde_json::Value,
+    payload: Option<String>,
+    http_status: i32,
 }
 
 pub(crate) async fn overview(
@@ -103,7 +140,8 @@ pub(crate) async fn overview(
                 AND EXISTS(SELECT 1 FROM tenants t WHERE t.user_id=u.id AND t.lifecycle_state IN ('provisioning','ready','failed'))
                 AND NOT EXISTS(SELECT 1 FROM subscriptions s WHERE s.user_id=u.id AND s.status IN ('active','past_due'))) unbilled,
             (SELECT count(*) FROM subscription_payments WHERE refund_requested_at IS NOT NULL AND refunded_at IS NULL) refunds_open,
-            (SELECT count(*) FROM retired_billing_keys WHERE deleted_at IS NULL AND attempts>=3) keys_waiting",
+            (SELECT count(*) FROM retired_billing_keys WHERE deleted_at IS NULL AND attempts>=3) keys_waiting,
+            (SELECT count(*) FROM toss_mismatches WHERE resolved_at IS NULL) mismatches",
     )
     .fetch_one(&s.db)
     .await?;
@@ -131,11 +169,29 @@ pub(crate) async fn overview(
     ))
     .fetch_all(&s.db)
     .await?;
+    let mismatches = sqlx::query_as::<_, Mismatch>(
+        "SELECT id,order_id,kind,detail,found_at FROM toss_mismatches WHERE resolved_at IS NULL ORDER BY found_at DESC LIMIT 100",
+    )
+    .fetch_all(&s.db)
+    .await?;
+    let last_check = sqlx::query_as::<_, LastCheck>(
+        "SELECT to_char(day,'YYYY-MM-DD') AS day,transactions,error FROM toss_transaction_checks ORDER BY day DESC LIMIT 1",
+    )
+    .fetch_optional(&s.db)
+    .await?;
+    let webhooks = sqlx::query_as::<_, Webhook>(
+        "SELECT id,received_at,event_type,order_id,signed,headers,payload,http_status FROM toss_webhook_deliveries ORDER BY received_at DESC LIMIT 20",
+    )
+    .fetch_all(&s.db)
+    .await?;
     Ok(Json(Overview {
         enabled: s.billing.is_some(),
         plans,
         summary,
         accounts,
+        mismatches,
+        last_check,
+        webhooks,
     }))
 }
 
@@ -207,6 +263,20 @@ pub(crate) async fn account(
 
 /// Charge a declined renewal, or a first charge that failed, again now, on
 /// the card on file. It counts as one of the retries.
+/// An operator has dealt with a mismatch. It is kept, and not raised again.
+pub(crate) async fn resolve_mismatch(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    admin_user(&headers, &s.db).await?;
+    sqlx::query("UPDATE toss_mismatches SET resolved_at=now() WHERE id=$1 AND resolved_at IS NULL")
+        .bind(id)
+        .execute(&s.db)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub(crate) async fn retry(
     State(s): State<Shared>,
     headers: HeaderMap,
