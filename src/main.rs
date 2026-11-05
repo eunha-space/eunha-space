@@ -49,6 +49,7 @@ mod health;
 mod integration_tests;
 mod jobs;
 mod locale;
+mod masquerade;
 mod service_usage;
 mod smtp;
 mod usage;
@@ -885,6 +886,10 @@ async fn main() -> Result<()> {
         .route("/customer/locale", get(locale::get).post(locale::set))
         .route("/customer/password", post(customer_set_password))
         .route(
+            "/customer/masquerade",
+            axum::routing::delete(masquerade::stop),
+        )
+        .route(
             "/customer/tenants",
             get(customer_tenants).post(customer_create_tenant),
         )
@@ -926,7 +931,11 @@ async fn main() -> Result<()> {
             "/customer/billing/payments/{order_id}/refund",
             post(billing_sync::request_refund),
         )
-        .route("/webhooks/tosspayments", post(billing_sync::webhook));
+        .route("/webhooks/tosspayments", post(billing_sync::webhook))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            masquerade::guard,
+        ));
     let admin_api = Router::new()
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/usage", get(usage::usage))
@@ -966,6 +975,7 @@ async fn main() -> Result<()> {
         )
         .route("/operations/{id}/events", get(operation_events))
         .route("/operations", get(operations))
+        .route("/users/{id}/masquerade", post(masquerade::start))
         .route("/billing", get(billing_admin::overview))
         .route("/billing/plans", post(billing_admin::create_plan))
         .route(
@@ -1083,9 +1093,10 @@ fn token_hash(token: &str) -> Vec<u8> {
     Sha256::digest(token.as_bytes()).to_vec()
 }
 async fn admin_user(headers: &HeaderMap, db: &PgPool) -> Result<(Uuid, String), ApiError> {
-    let (id, _) = customer(headers, db).await?;
-    sqlx::query_as("SELECT id,email FROM users WHERE id=$1 AND is_admin")
-        .bind(id)
+    customer(headers, db).await?;
+    // A masquerade is never an administrator, whoever started it.
+    sqlx::query_as("SELECT u.id,u.email FROM user_sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=$1 AND s.masquerading_admin_id IS NULL AND u.is_admin")
+        .bind(token_hash(customer_token(headers).unwrap_or_default()))
         .fetch_optional(db)
         .await?
         .ok_or_else(|| {
@@ -1109,7 +1120,7 @@ fn customer_token(headers: &HeaderMap) -> Option<&str> {
 async fn customer(headers: &HeaderMap, db: &PgPool) -> Result<(Uuid, String), ApiError> {
     let token = customer_token(headers)
         .ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "Sign in required".into()))?;
-    sqlx::query_as("SELECT c.id,c.email FROM user_sessions s JOIN users c ON c.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND c.email_verified_at IS NOT NULL")
+    sqlx::query_as("SELECT c.id,c.email FROM user_sessions s JOIN users c ON c.id=s.user_id WHERE s.token_hash=$1 AND s.expires_at>now() AND c.email_verified_at IS NOT NULL AND (s.masquerading_admin_id IS NULL OR EXISTS(SELECT 1 FROM users a WHERE a.id=s.masquerading_admin_id AND a.is_admin))")
         .bind(token_hash(token)).fetch_optional(db).await?.ok_or_else(|| ApiError(StatusCode::UNAUTHORIZED, "Session expired".into()))
 }
 
@@ -1383,6 +1394,10 @@ async fn customer_logout(
     State(s): State<Shared>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    // Signing out of a masquerade goes back to the administrator.
+    if masquerade::admin_of(&headers, &s.db).await?.is_some() {
+        return masquerade::stop(State(s), headers).await;
+    }
     if let Some(token) = customer_token(&headers) {
         sqlx::query("DELETE FROM user_sessions WHERE token_hash=$1")
             .bind(token_hash(token))
@@ -1424,8 +1439,11 @@ async fn customer_me(
     .fetch_one(&s.db)
     .await?;
     let subscription_required = billing::subscription_required(&s, id).await?;
+    let masquerading_admin = masquerade::admin_of(&headers, &s.db)
+        .await?
+        .map(|(_, email)| email);
     Ok(Json(
-        serde_json::json!({"email":email,"is_admin":is_admin,"instance_limit":instance_limit,"has_password":has_password,"requires_current_password":requires_current_password,"subscription_required":subscription_required,"locale":language}),
+        serde_json::json!({"email":email,"is_admin":is_admin,"masquerading_admin":masquerading_admin,"instance_limit":instance_limit,"has_password":has_password,"requires_current_password":requires_current_password,"subscription_required":subscription_required,"locale":language}),
     ))
 }
 async fn customer_tenants(

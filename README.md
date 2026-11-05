@@ -219,6 +219,13 @@ subscription to create or restore an instance. Operators manage plans on
 their data, and schedules no purge. Subscribing again serves them again. See
 [docs/billing.md](docs/billing.md).
 
+## Signing in as a customer
+
+**Sign in as** on a customer's account in `/admin/billing` shows the customer
+pages as that customer sees them, for an hour. Their password and billing stay
+theirs, and the operations log records the masquerade. See
+[docs/masquerade.md](docs/masquerade.md).
+
 ## Importing an existing Mastodon instance
 
 **Import instance** in `/admin` takes over a server that already exists, rather

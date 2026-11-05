@@ -6,6 +6,7 @@ import {
   CircleAlert,
   CreditCard,
   ExternalLink,
+  LogIn,
   RotateCcw,
 } from "lucide-react";
 import { api, errorMessage } from "@/api";
@@ -769,6 +770,18 @@ function AccountPanel(
     }
   }
 
+  async function signInAs() {
+    setBusy("masquerade");
+    setError("");
+    try {
+      await api(`/users/${account.user_id}/masquerade`, { method: "POST" });
+      location.assign("/instances");
+    } catch (failure) {
+      setError(errorMessage(failure));
+      setBusy("");
+    }
+  }
+
   const retryable = (account.status === "past_due" || account.status === "incomplete") &&
     account.has_card;
 
@@ -789,6 +802,23 @@ function AccountPanel(
             }}
           >
             Charge again now
+          </ActionButton>
+        )}
+        {!account.is_admin && account.email && (
+          <ActionButton
+            icon={<LogIn />}
+            size="sm"
+            variant="outline"
+            busy={busy === "masquerade"}
+            onClick={() => void signInAs()}
+            confirm={{
+              title: `Sign in as ${account.email}?`,
+              description:
+                "You see their instances and can act on them for an hour, or until you come back. Their password, billing and language stay theirs. The operations log records that you signed in as them.",
+              action: "Sign in as them",
+            }}
+          >
+            Sign in as
           </ActionButton>
         )}
         {!account.is_admin && (

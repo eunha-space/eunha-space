@@ -110,6 +110,11 @@ export type CustomerProvisioningStep = {
 /** The signed-in customer, as /customer/session/me reports them. */
 export type Customer = {
   is_admin: boolean;
+  /**
+   * The administrator signed in as this customer, when this session is theirs.
+   * Their password, billing and language stay the customer's to change.
+   */
+  masquerading_admin: string | null;
   email: string;
   instance_limit: number | null;
   has_password: boolean;

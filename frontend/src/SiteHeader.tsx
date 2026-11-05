@@ -1,6 +1,7 @@
 import { useLingui } from "@lingui/react";
-import { LogOut, Server, Shield, UserRound } from "lucide-react";
+import { Eye, LogOut, Server, Shield, UserRound } from "lucide-react";
 import type { Customer } from "@/api";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -28,10 +29,21 @@ export function SiteHeader(
   },
 ) {
   const { i18n } = useLingui();
-  const t = (message: string) => i18n._(message);
+  const t = (message: string, values?: Record<string, string>) => i18n._(message, values);
   const path = location.pathname;
   return (
     <div className={siteColumn}>
+      {customer?.masquerading_admin && (
+        <Alert className="mt-4 flex flex-wrap items-center justify-between gap-2">
+          <AlertDescription className="flex items-center gap-2">
+            <Eye className="size-4 shrink-0" />
+            {t("You are signed in as {email}.", { email: customer.email })}
+          </AlertDescription>
+          <Button size="sm" variant="outline" onClick={() => void onSignOut()}>
+            {t("Back to the control plane")}
+          </Button>
+        </Alert>
+      )}
       <header className="flex items-center justify-between gap-3 py-5">
         <a
           href="/"

@@ -1073,6 +1073,10 @@ async fn users_migration_preserves_sessions_roles_and_historical_actors(pool: Pg
             .await
             .unwrap();
     assert_eq!(link_owner, customer_id);
+    // The sessions still sign in once the schema has caught up with today's.
+    for migration in migrations.iter().filter(|m| m.version > 48) {
+        sqlx::raw_sql(&migration.sql).execute(&pool).await.unwrap();
+    }
     let mut headers = HeaderMap::new();
     headers.insert(
         header::COOKIE,
@@ -3652,4 +3656,153 @@ async fn the_migration_puts_running_subscriptions_on_a_plan_at_their_price(pool:
         .await
         .unwrap();
     assert_eq!(plan_amount, 5900);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn an_administrator_signs_in_as_a_customer_and_comes_back(pool: PgPool) {
+    let (_, admin) = fixture(&pool).await;
+    let (customer_id, _) = billed_customer(&pool).await;
+    let shared = state(pool.clone());
+    // Set-Cookie values, by cookie name.
+    fn cookies(response: &Response) -> HashMap<String, String> {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| {
+                let value = value.to_str().unwrap();
+                let (pair, _) = value.split_once(';').unwrap();
+                let (name, token) = pair.split_once('=').unwrap();
+                (name.to_owned(), token.to_owned())
+            })
+            .collect()
+    }
+    let started = masquerade::start(State(shared.clone()), admin.clone(), Path(customer_id))
+        .await
+        .unwrap();
+    let set = cookies(&started);
+    assert_eq!(set["eunha_space_admin_session"], "test-session");
+    let mut masked = HeaderMap::new();
+    masked.insert(
+        header::COOKIE,
+        format!(
+            "eunha_space_customer_session={}; eunha_space_admin_session=test-session",
+            set["eunha_space_customer_session"]
+        )
+        .parse()
+        .unwrap(),
+    );
+    // The customer's pages show the customer, and who is looking.
+    let Json(me) = customer_me(State(shared.clone()), masked.clone())
+        .await
+        .unwrap();
+    assert_eq!(me["email"], "customer@example.com");
+    assert_eq!(me["masquerading_admin"], "admin@example.com");
+    // The console is out of reach, and so is masquerading further.
+    assert_eq!(
+        admin_user(&masked, &pool).await.unwrap_err().0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        masquerade::start(State(shared.clone()), masked.clone(), Path(customer_id))
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    // Another administrator cannot be signed in as.
+    let other_admin = Uuid::new_v4();
+    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,is_admin) VALUES($1,'other-admin@example.com','unused',now(),true)")
+        .bind(other_admin).execute(&pool).await.unwrap();
+    assert_eq!(
+        masquerade::start(State(shared.clone()), admin.clone(), Path(other_admin))
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    // The password and billing are the customer's alone.
+    let app = Router::new()
+        .route("/customer/password", post(customer_set_password))
+        .route("/customer/billing/cancel", post(billing::cancel))
+        .route_layer(axum::middleware::from_fn_with_state(
+            shared.clone(),
+            masquerade::guard,
+        ))
+        .with_state(shared.clone());
+    for path in ["/customer/password", "/customer/billing/cancel"] {
+        let mut request = axum::http::Request::post(path)
+            .body(axum::body::Body::from(
+                r#"{"password":"a sufficiently long password"}"#,
+            ))
+            .unwrap();
+        *request.headers_mut() = masked.clone();
+        request
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        let response = tower::ServiceExt::oneshot(app.clone(), request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+    }
+    // The language the administrator reads in is not chosen for the customer.
+    locale::set(
+        State(shared.clone()),
+        masked.clone(),
+        Json(serde_json::from_value(serde_json::json!({"locale":"ko"})).unwrap()),
+    )
+    .await
+    .unwrap();
+    assert!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT locale FROM users WHERE id=$1")
+            .bind(customer_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            != Some("ko".into())
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT detail FROM operations WHERE kind='masquerade'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap()["email"],
+        "customer@example.com"
+    );
+    // Signing out returns to the administrator's own session.
+    let ended = customer_logout(State(shared.clone()), masked.clone())
+        .await
+        .unwrap();
+    let set = cookies(&ended);
+    assert_eq!(set["eunha_space_customer_session"], "test-session");
+    assert_eq!(set["eunha_space_admin_session"], "");
+    assert_eq!(
+        customer(&masked, &pool).await.unwrap_err().0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(admin_user(&admin, &pool).await.is_ok());
+    // A masquerade ends with its administrator's role.
+    let started = masquerade::start(State(shared.clone()), admin.clone(), Path(customer_id))
+        .await
+        .unwrap();
+    let mut masked = HeaderMap::new();
+    masked.insert(
+        header::COOKIE,
+        format!(
+            "eunha_space_customer_session={}",
+            cookies(&started)["eunha_space_customer_session"]
+        )
+        .parse()
+        .unwrap(),
+    );
+    sqlx::query("UPDATE users SET is_admin=false WHERE email='admin@example.com'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        customer(&masked, &pool).await.unwrap_err().0,
+        StatusCode::UNAUTHORIZED
+    );
 }

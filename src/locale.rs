@@ -132,6 +132,14 @@ pub(crate) async fn set(
     let (user_id, _) = customer(&headers, &s.db).await?;
     let locale = Locale::parse(&body.locale)
         .ok_or_else(|| ApiError(StatusCode::BAD_REQUEST, "Choose English or Korean.".into()))?;
+    // An administrator signed in as the user reads the site in their own
+    // language without choosing the user's.
+    if crate::masquerade::admin_of(&headers, &s.db)
+        .await?
+        .is_some()
+    {
+        return Ok(StatusCode::NO_CONTENT);
+    }
     sqlx::query("UPDATE users SET locale=$2 WHERE id=$1")
         .bind(user_id)
         .bind(locale.code())

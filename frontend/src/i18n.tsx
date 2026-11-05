@@ -110,6 +110,8 @@ const ko: Record<string, string> = {
   Account: "계정",
   "Sign out": "로그아웃",
   "Control plane": "컨트롤 플레인",
+  "You are signed in as {email}.": "{email} 계정으로 로그인한 상태입니다.",
+  "Back to the control plane": "컨트롤 플레인으로 돌아가기",
   "Set your password": "비밀번호 설정",
   "Set password": "비밀번호 설정",
   "Change your password": "비밀번호 변경",
