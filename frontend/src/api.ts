@@ -1,3 +1,5 @@
+import { trackRequest } from "@/navigation";
+
 export type TenantState = "healthy" | "unhealthy" | "disabled" | "unknown";
 
 export type Tenant = {
@@ -291,7 +293,11 @@ export class ApiError extends Error {
   }
 }
 
-export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+export function api<T>(path: string, init?: RequestInit): Promise<T> {
+  return trackRequest(request<T>(path, init));
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers || {}) },

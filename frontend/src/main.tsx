@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { CustomerApp } from "./CustomerApp";
 import { initLocale, LocalizationProvider } from "./i18n";
+import { NavigationProgress } from "./NavigationProgress";
 import { SiteFooter } from "./SiteFooter";
 import "./styles.css";
 
@@ -14,6 +15,7 @@ void initLocale().then(() =>
       <LocalizationProvider>
         {location.pathname.startsWith("/admin") ? <App /> : (
           <div className="flex min-h-screen flex-col">
+            <NavigationProgress />
             <CustomerApp />
             <SiteFooter />
           </div>

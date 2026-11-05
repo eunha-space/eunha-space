@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CircleAlert, CreditCard, Plus } from "lucide-react";
 import {
   api,
+  ApiError,
   countsTowardInstanceLimit,
   type Customer,
   errorMessage,
@@ -30,19 +31,19 @@ import { CustomerCreateInstance } from "@/CustomerCreateInstance";
 import { Landing } from "@/Landing";
 import { Pricing } from "@/Pricing";
 import { SiteHeader } from "@/SiteHeader";
+import { navigate, useCustomerNavigation } from "@/navigation";
 
 export function CustomerApp() {
   const { i18n } = useLingui();
   const t = (message: string, values?: Record<string, string | number>) =>
     i18n._(message, values);
+  const page = useCustomerNavigation();
+  const signup = location.pathname === "/signup";
+  const verified = new URLSearchParams(location.search).get("verified") === "1";
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [sessionLoaded, setSessionLoaded] = useState(false);
   const [tenants, setTenants] = useState<Tenant[]>([]);
-  const [signup, setSignup] = useState(location.pathname === "/signup");
   const [sent, setSent] = useState(false);
-  const [verified] = useState(
-    () => new URLSearchParams(location.search).get("verified") === "1",
-  );
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -54,9 +55,24 @@ export function CustomerApp() {
     setTenants(nextTenants);
     // Signed in, these paths have nothing to show.
     if (["/signin", "/signup"].includes(location.pathname)) {
-      history.replaceState(null, "", "/instances");
+      navigate("/instances", { replace: true });
     }
   }
+  // Each page is shown with what is known and then brought up to date, as a
+  // fresh load of it would be. A session that has ended shows the sign-in form.
+  const loadedPage = useRef(page);
+  useEffect(() => {
+    if (loadedPage.current === page) return;
+    loadedPage.current = page;
+    setSent(false);
+    setError("");
+    load().catch((e) => {
+      if (e instanceof ApiError && e.status === 401) {
+        setCustomer(null);
+        setTenants([]);
+      }
+    });
+  }, [page]);
   useEffect(() => {
     const token = new URLSearchParams(location.search).get("token");
     if (location.pathname === "/verify" && token) {
@@ -84,6 +100,7 @@ export function CustomerApp() {
           body: JSON.stringify({ email, password }),
         });
         await load();
+        setPassword("");
       }
     } catch (e) {
       setError(errorMessage(e));
@@ -219,10 +236,7 @@ export function CustomerApp() {
                 <Button
                   type="button"
                   variant="ghost"
-                  onClick={() => {
-                    history.replaceState(null, "", signup ? "/signin" : "/signup");
-                    setSignup(!signup);
-                  }}
+                  onClick={() => navigate(signup ? "/signin" : "/signup", { replace: true })}
                 >
                   {signup
                     ? t("Already have an account? Sign in")
@@ -251,7 +265,7 @@ export function CustomerApp() {
   }
   const instanceId = location.pathname.match(/^\/instances\/([^/]+)$/)?.[1];
   if (instanceId) {
-    return portal(<CustomerInstanceDetail id={instanceId} />);
+    return portal(<CustomerInstanceDetail key={instanceId} id={instanceId} />);
   }
   return portal(
     <>

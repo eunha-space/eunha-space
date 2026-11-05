@@ -3,6 +3,7 @@ import { ArrowLeft, CircleAlert } from "lucide-react";
 import { useLingui } from "@lingui/react";
 import { api, type Customer, errorMessage } from "@/api";
 import { instanceUsage } from "@/format";
+import { navigate } from "@/navigation";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -46,8 +47,8 @@ export function CustomerCreateInstance(
         }),
       });
       // A new instance is not usable yet, and its detail page is where the
-      // setup it needs is followed; stay busy until the browser gets there.
-      location.assign(`/instances/${created.id}`);
+      // setup it needs is followed.
+      navigate(`/instances/${created.id}`);
     } catch (e) {
       setError(errorMessage(e));
       setBusy(false);

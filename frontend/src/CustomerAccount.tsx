@@ -2,6 +2,7 @@ import { useState } from "react";
 import { ArrowLeft, CircleAlert } from "lucide-react";
 import { useLingui } from "@lingui/react";
 import { api, type Customer, errorMessage } from "@/api";
+import { navigate } from "@/navigation";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -102,7 +103,8 @@ function PasswordCard(
       if (first) {
         // A first password is what the instance list was waiting on, so hand
         // the customer straight back to it rather than leave them here.
-        location.assign("/instances");
+        await onChanged().catch(() => {});
+        navigate("/instances");
         return;
       }
       setCurrent("");

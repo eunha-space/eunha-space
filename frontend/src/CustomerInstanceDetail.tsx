@@ -20,6 +20,7 @@ import {
   instanceStatus,
 } from "@/api";
 import { absoluteTime } from "@/format";
+import { navigate } from "@/navigation";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -470,7 +471,7 @@ function DeleteInstance(
       });
       if (path === "/purge") {
         // A purged instance is gone from the customer's list.
-        location.assign("/instances");
+        navigate("/instances");
         return;
       }
       onChanged();
