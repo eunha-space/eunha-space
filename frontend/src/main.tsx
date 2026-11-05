@@ -14,7 +14,7 @@ void initLocale().then(() =>
     <React.StrictMode>
       <LocalizationProvider>
         {location.pathname.startsWith("/admin") ? <App /> : (
-          <div className="flex min-h-screen flex-col break-keep">
+          <div className="flex min-h-screen flex-col">
             <NavigationProgress />
             <CustomerApp />
             <SiteFooter />

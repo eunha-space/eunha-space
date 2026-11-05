@@ -157,7 +157,7 @@ export function CustomerApp() {
       </Page>,
     );
   }
-  if (location.pathname === "/") return withHeader(<Landing signedIn={customer !== null} />);
+  if (location.pathname === "/") return withHeader(<Landing />);
   if (location.pathname === "/pricing") return withHeader(<Pricing customer={customer} />);
   if (location.pathname === "/refund-policy") return withHeader(<RefundPolicy />);
   if (location.pathname === "/community-guidelines") return withHeader(<CommunityGuidelines />);

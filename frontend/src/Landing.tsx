@@ -1,5 +1,4 @@
 import { useLingui } from "@lingui/react";
-import { Button } from "@/components/ui/button";
 import { ProseSection, siteColumn } from "@/components/customer/page";
 
 const EXPLANATIONS = [
@@ -65,12 +64,9 @@ const STEPS = [
 ];
 
 /** The front page, at `/`, for anyone. */
-export function Landing({ signedIn }: { signedIn: boolean }) {
+export function Landing() {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
-  const start = signedIn
-    ? { href: "/instances", label: t("Your instances") }
-    : { href: "/signup", label: t("Create account") };
   return (
     <main className={`${siteColumn} flex-1`}>
       <section className="grid items-center gap-10 py-12 md:py-20 lg:grid-cols-[3fr_2fr]">
@@ -86,14 +82,6 @@ export function Landing({ signedIn }: { signedIn: boolean }) {
               "eunha space hosts Eunha, a Mastodon-compatible fediverse server. Choose an address and you have a server of your own, where you can follow and be followed by people on Mastodon and across the fediverse.",
             )}
           </p>
-          <div className="mt-8 flex flex-wrap gap-3">
-            <Button size="lg" render={<a href={start.href} />}>
-              {start.label}
-            </Button>
-            <Button size="lg" variant="outline" render={<a href="#how-it-works" />}>
-              {t("How it works")}
-            </Button>
-          </div>
         </div>
         <Constellation label={t("Your server")} />
       </section>
@@ -136,22 +124,6 @@ export function Landing({ signedIn }: { signedIn: boolean }) {
         </ol>
       </ProseSection>
 
-      <section className="border-t py-12 md:py-16">
-        <h2 className="text-2xl font-semibold tracking-tight text-balance md:text-3xl">
-          {t("Start your own server.")}
-        </h2>
-        <div className="mt-6 flex flex-wrap items-center gap-x-5 gap-y-3">
-          <Button size="lg" render={<a href={start.href} />}>
-            {start.label}
-          </Button>
-          <a
-            href="/pricing"
-            className="text-muted-foreground hover:text-foreground text-sm underline underline-offset-4"
-          >
-            {t("Pricing")}
-          </a>
-        </div>
-      </section>
     </main>
   );
 }
