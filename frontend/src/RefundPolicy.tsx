@@ -1,8 +1,27 @@
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
+
 // The refund policy as written, in Korean whatever the interface language.
+// The rates state what `REFUND_WINDOW` in src/billing_sync.rs enforces.
+const REFUND_RATES = [
+  ["결제 후 7일 이내", "결제 금액의 100%"],
+  ["결제 후 7일 경과", "환불 불가"],
+];
+
 const REFUND_POLICY = [
   [
-    "7일 이내 전액 환불",
-    "결제일로부터 7일 이내라면 이유를 묻지 않고 전액 환불해 드립니다. 유료 기능을 이미 쓰셨더라도 괜찮습니다. 결제 내역에서 직접 신청하세요.",
+    "기간 계산",
+    "환불 기간은 결제가 완료된 시각부터 계산하며, 정기 결제와 요금제 업그레이드 결제에 각각 적용됩니다. 비율은 서비스 이용 여부와 관계없이 같습니다.",
+  ],
+  [
+    "신청 방법",
+    "계정 페이지의 결제 내역에서 직접 신청합니다. 환불 금액은 결제한 카드로 돌아가며, 카드사에 따라 영업일 기준 3~7일이 걸릴 수 있습니다.",
   ],
   [
     "환불 후 이용",
@@ -22,6 +41,22 @@ export function RefundPolicy() {
   return (
     <section lang="ko" className="grid gap-2">
       <h3 className="text-sm font-medium">환불정책</h3>
+      <Table className="text-xs">
+        <TableHeader>
+          <TableRow>
+            <TableHead>환불 신청 시점</TableHead>
+            <TableHead>환불 가능 금액</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {REFUND_RATES.map(([period, rate]) => (
+            <TableRow key={period}>
+              <TableCell>{period}</TableCell>
+              <TableCell>{rate}</TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
       <ul className="text-muted-foreground grid list-disc gap-1.5 pl-5 text-xs">
         {REFUND_POLICY.map(([title, body]) => (
           <li key={title}>

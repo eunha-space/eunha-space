@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Mark, ThemeToggle } from "@/components/console/brand";
 import { won } from "@/format";
 import { LanguageToggle } from "@/i18n";
+import { RefundPolicy } from "./RefundPolicy";
 import { planLimits } from "@/planLimits";
 
 const EXPLANATIONS = [
@@ -81,7 +82,7 @@ const STEPS = [
 
 const TERMS = [
   "Every plan is charged monthly.",
-  "Get a full refund within 7 days of a payment, with no reason needed.",
+  "A payment can be refunded in full for 7 days after it is made, and not after that.",
   "Cancel any time and keep the period you already paid for.",
   "If a subscription ends, your instances go offline and their data is kept. Subscribing again brings them back.",
   "A deleted instance can be restored for seven days.",
@@ -202,6 +203,9 @@ export function Landing() {
         <ul className="text-muted-foreground grid list-disc gap-2 pl-5">
           {TERMS.map((term) => <li key={term}>{t(term)}</li>)}
         </ul>
+        <div className="mt-8">
+          <RefundPolicy />
+        </div>
       </Section>
 
       <section className="border-t py-12 md:py-16">
