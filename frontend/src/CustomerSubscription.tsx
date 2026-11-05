@@ -185,11 +185,10 @@ export function SubscriptionCard(
 
   const subscription = billing.subscription;
   const status = subscription?.status;
-  const inGrace = subscription?.refund_grace_until != null;
-  const subscribed = (status === "active" || status === "past_due") && !inGrace;
+  const subscribed = status === "active" || status === "past_due";
   const pending = billing.payments.some((payment) => payment.status === "pending");
   const selectable = billing.plans.filter((plan) => plan.active);
-  const choosing = (!subscribed || subscription?.refund_grace_until != null) && !pending;
+  const choosing = !subscribed && !pending;
   const chosenPlan = selectable.find((plan) => plan.id === selectedPlan) ?? selectable[0] ?? null;
   const planName = (plan: Plan) => (i18n.locale === "ko" ? plan.name_ko : plan.name_en);
   const currentPlan = billing.plans.find((plan) => plan.id === subscription?.plan_id) ?? null;
@@ -200,11 +199,7 @@ export function SubscriptionCard(
   const limitLabel = (plan: Plan) => planLimits(plan, i18n.locale === "ko").join(" · ");
 
   let description: string;
-  if (inGrace && !pending) {
-    description = t(
-      "Your payment was refunded. Your instances keep running until the date below, then go offline with their data kept. Subscribe again to keep them running.",
-    );
-  } else if (status === "active" && subscription?.cancel_at_period_end) {
+  if (status === "active" && subscription?.cancel_at_period_end) {
     description = t(
       "Your subscription is cancelled. Your instances keep running until the end of the paid period, then go offline with their data kept.",
     );
@@ -277,7 +272,7 @@ export function SubscriptionCard(
                 {subscription.cancel_at_period_end ? t("Ends on") : t("Renews on")}
               </dt>
               <dd className="font-medium">
-                {day(subscription.refund_grace_until ?? subscription.current_period_end)}
+                {day(subscription.current_period_end)}
               </dd>
             </div>
           )}
@@ -289,7 +284,7 @@ export function SubscriptionCard(
           )}
         </dl>
         {subscription?.last_error &&
-          (status === "past_due" || status === "incomplete" || inGrace) &&
+          (status === "past_due" || status === "incomplete") &&
           !pending && (
           <Alert variant="destructive">
             <CircleAlert />
@@ -462,9 +457,7 @@ export function SubscriptionCard(
                 {refunding ? `${t("Refund this payment?")} ${won(refunding.amount)}` : ""}
               </AlertDialogTitle>
               <AlertDialogDescription>
-                {refunding?.kind === "upgrade" ? t("The full amount goes back to your card, you return to the plan you had, and your subscription is cancelled. It keeps running until the end of the paid period.") : t(
-                  "The full amount goes back to your card and your subscription is cancelled. Refunding the period you are in leaves your instances running for four more days, then they go offline. Their data is kept, and subscribing again serves them again.",
-                )}
+                {t("The full amount goes back to your card. Your subscription is cancelled and your instances go offline immediately. Their data is kept, and subscribing again serves them again.")}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>

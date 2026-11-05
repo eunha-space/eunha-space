@@ -176,8 +176,8 @@ async fn cancel_payment(s: &Shared, payment_key: &str) -> Cancel {
     cancel_outcome(status, &body)
 }
 
-/// Ask for a payment back. Allowed within `REFUND_WINDOW` of paying; it stops
-/// the subscription renewing.
+/// Ask for a payment back. Allowed within `REFUND_WINDOW` of paying; once it is
+/// given back, the subscription ends and its instances go offline.
 pub(crate) async fn request_refund(
     State(s): State<Shared>,
     headers: HeaderMap,
@@ -364,12 +364,11 @@ async fn withdraw_refund(s: &Shared, due: &DueRefund, reason: &str) -> anyhow::R
 }
 
 /// Record what TossPayments has given back of a payment, from its own record:
-/// a refund asked for here, or one made in the TossPayments dashboard. A full
-/// refund stops the subscription renewing, and one of the period being served
-/// also takes back the paid time. A partial one, an operator's goodwill, changes
-/// nothing else. A full refund of an upgrade for the period being served returns
-/// to the plan it left, whose paid time still stands; a full refund of the
-/// renewal for that period takes the upgrade back with it.
+/// a refund asked for here, or one made in the TossPayments dashboard. A
+/// customer's own full refund ends the subscription and takes its instances
+/// offline at once, and one of the period being served takes that period's
+/// upgrades back with it. What an operator gives back, here or in the dashboard,
+/// returns the money and changes nothing else.
 async fn apply_cancellation(
     s: &Shared,
     order_id: &str,
@@ -377,8 +376,8 @@ async fn apply_cancellation(
 ) -> anyhow::Result<()> {
     let refunded = payment.refunded();
     let mut tx = s.db.begin().await?;
-    let Some((user_id, amount, previously, current_period, running, kind, plan_id, from_plan_id, from_amount, requested_by, period_end)) = sqlx::query_as::<_, (Uuid, i64, i64, bool, bool, String, Option<Uuid>, Option<Uuid>, Option<i64>, Option<Uuid>, OffsetDateTime)>(
-        "SELECT p.user_id,p.amount,p.refunded_amount,p.period_end=s.current_period_end,s.status IN ('active','past_due'),p.kind,p.plan_id,p.from_plan_id,p.from_amount,p.refund_requested_by,p.period_end FROM subscription_payments p JOIN subscriptions s ON s.user_id=p.user_id JOIN users u ON u.id=p.user_id WHERE p.order_id=$1 AND p.status IN ('paid','refunded') FOR UPDATE OF p,s",
+    let Some((user_id, amount, previously, current_period, running, kind, requested_by, period_end)) = sqlx::query_as::<_, (Uuid, i64, i64, bool, bool, String, Option<Uuid>, OffsetDateTime)>(
+        "SELECT p.user_id,p.amount,p.refunded_amount,p.period_end=s.current_period_end,s.status IN ('active','past_due'),p.kind,p.refund_requested_by,p.period_end FROM subscription_payments p JOIN subscriptions s ON s.user_id=p.user_id JOIN users u ON u.id=p.user_id WHERE p.order_id=$1 AND p.status IN ('paid','refunded') FOR UPDATE OF p,s",
     )
     .bind(order_id)
     .fetch_optional(&mut *tx)
@@ -405,17 +404,10 @@ async fn apply_cancellation(
         None,
     )
     .await?;
-    let upgrade = kind == "upgrade";
-    if full && current_period && running {
-        if upgrade {
-            sqlx::query("UPDATE subscriptions SET plan_id=$2,amount=COALESCE($3,amount),pending_plan_id=NULL,updated_at=now() WHERE user_id=$1 AND plan_id IS NOT DISTINCT FROM $4")
-                .bind(user_id)
-                .bind(from_plan_id)
-                .bind(from_amount)
-                .bind(plan_id)
-                .execute(&mut *tx)
-                .await?;
-        } else {
+    let ends = full && running && requested_by == Some(user_id);
+    let mut suspended = Vec::new();
+    if ends {
+        if current_period && kind != "upgrade" {
             // The renewer carries these through like any other refund.
             sqlx::query("UPDATE subscription_payments SET refund_requested_at=now(),refund_requested_by=$3,refund_next_attempt_at=now(),refund_error=NULL WHERE user_id=$1 AND kind='upgrade' AND period_end=$2 AND status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND payment_key IS NOT NULL")
                 .bind(user_id)
@@ -424,17 +416,19 @@ async fn apply_cancellation(
                 .execute(&mut *tx)
                 .await?;
         }
+        suspended = billing::end_subscription(&mut tx, user_id, "canceled").await?;
     }
-    let ends_on = if full && running {
-        Some(
-            billing::stop_renewing_after_refund(&mut tx, user_id, current_period && !upgrade)
-                .await?,
-        )
-    } else {
-        None
-    };
-    crate::billing_mail::refund(&mut tx, user_id, order_id, refunded, ends_on.as_deref()).await?;
+    crate::billing_mail::refund(
+        &mut tx,
+        user_id,
+        order_id,
+        refunded,
+        ends,
+        !suspended.is_empty(),
+    )
+    .await?;
     tx.commit().await?;
+    billing::wake(s, &suspended).await;
     Ok(())
 }
 

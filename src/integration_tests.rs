@@ -2203,7 +2203,7 @@ async fn lifecycle(pool: &PgPool, id: Uuid) -> (String, bool) {
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
-async fn a_refund_gives_the_period_back_and_its_key_is_deleted(pool: PgPool) {
+async fn a_customers_refund_ends_the_subscription_at_once_and_its_key_is_deleted(pool: PgPool) {
     let (toss, base) = toss_stand_in().await;
     let state = billed_state(pool.clone(), &base);
     let (user_id, headers) = billed_customer(&pool).await;
@@ -2215,20 +2215,13 @@ async fn a_refund_gives_the_period_back_and_its_key_is_deleted(pool: PgPool) {
     let view = refund(&state, &headers, &order_id).await.unwrap();
     assert_eq!(view["payments"][0]["status"], "refunded");
     assert_eq!(view["payments"][0]["refunded_amount"], 9900);
-    // Not charged again, but the instance has its grace.
-    assert_eq!(view["subscription"]["status"], "active");
+    // Offline now, with its data, and nothing scheduled to destroy it.
+    assert_eq!(view["subscription"]["status"], "canceled");
     assert_eq!(view["subscription"]["has_card"], false);
-    assert_eq!(view["subscription"]["cancel_at_period_end"], true);
-    assert_eq!(grace_days_left(&pool, user_id).await, Some(4));
-    assert_eq!(lifecycle(&pool, id).await.0, "ready");
-    assert!(!billing::charge_due(&state, None).await.unwrap());
-    // Then offline with its data, and nothing scheduled to destroy it.
-    make_due(&pool, user_id).await;
-    assert!(billing::charge_due(&state, None).await.unwrap());
-    assert_eq!(subscription_status(&pool, user_id).await, "canceled");
-    assert_eq!(grace_days_left(&pool, user_id).await, None);
-    assert_eq!(toss.charges().len(), 1);
     assert_eq!(lifecycle(&pool, id).await, ("deprovisioning".into(), true));
+    // Not charged again.
+    assert!(!billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(toss.charges().len(), 1);
     // Asking twice gives nothing back twice.
     assert_eq!(
         refund(&state, &headers, &order_id).await.unwrap_err(),
@@ -2251,16 +2244,6 @@ async fn a_refund_gives_the_period_back_and_its_key_is_deleted(pool: PgPool) {
     assert!(!billing_sync::delete_retired_key(&state).await.unwrap());
 }
 
-async fn grace_days_left(pool: &PgPool, user_id: Uuid) -> Option<i32> {
-    sqlx::query_scalar::<_, Option<i32>>(
-        "SELECT ceil(extract(epoch FROM refund_grace_until-now())/86400)::int FROM subscriptions WHERE user_id=$1",
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await
-    .unwrap()
-}
-
 /// Paid for two periods, the second of them being served.
 async fn renewed(pool: &PgPool, state: &Shared, user_id: Uuid) -> Vec<String> {
     make_due(pool, user_id).await;
@@ -2276,50 +2259,27 @@ async fn renewed(pool: &PgPool, state: &Shared, user_id: Uuid) -> Vec<String> {
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
-async fn refunding_an_earlier_period_stops_renewal_and_keeps_the_paid_time(pool: PgPool) {
+async fn a_customer_refunding_an_earlier_period_ends_the_subscription_too(pool: PgPool) {
     let (toss, base) = toss_stand_in().await;
     let state = billed_state(pool.clone(), &base);
     let (user_id, headers) = billed_customer(&pool).await;
     subscribe(&state, &headers).await;
     let id = ready_instance(&pool, user_id).await;
     let orders = renewed(&pool, &state, user_id).await;
-    let period_end: OffsetDateTime =
-        sqlx::query_scalar("SELECT current_period_end FROM subscriptions WHERE user_id=$1")
-            .bind(user_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
 
     let view = refund(&state, &headers, &orders[0]).await.unwrap();
-    assert_eq!(view["subscription"]["status"], "active");
-    assert_eq!(view["subscription"]["cancel_at_period_end"], true);
+    assert_eq!(view["subscription"]["status"], "canceled");
     assert_eq!(view["subscription"]["has_card"], false);
-    assert_eq!(grace_days_left(&pool, user_id).await, None);
-    let next: OffsetDateTime =
-        sqlx::query_scalar("SELECT next_attempt_at FROM subscriptions WHERE user_id=$1")
-            .bind(user_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(next, period_end);
-    // With no card, keeping the subscription takes a new one.
-    assert_eq!(
-        billing::resume(State(state.clone()), headers.clone())
-            .await
-            .err()
+    assert_eq!(lifecycle(&pool, id).await.0, "deprovisioning");
+    // The other payment can still be given back, and ends nothing more.
+    let view = refund(&state, &headers, &orders[1]).await.unwrap();
+    assert!(
+        view["payments"]
+            .as_array()
             .unwrap()
-            .0,
-        StatusCode::CONFLICT
+            .iter()
+            .all(|payment| payment["status"] == "refunded")
     );
-
-    // Refunding the period being served as well takes the paid time back.
-    refund(&state, &headers, &orders[1]).await.unwrap();
-    assert_eq!(grace_days_left(&pool, user_id).await, Some(4));
-    assert_eq!(lifecycle(&pool, id).await.0, "ready");
-
-    make_due(&pool, user_id).await;
-    assert!(billing::charge_due(&state, None).await.unwrap());
-    assert_eq!(subscription_status(&pool, user_id).await, "canceled");
     assert_eq!(toss.charges().len(), 2);
 }
 
@@ -2349,7 +2309,6 @@ async fn a_partial_refund_leaves_the_subscription_alone_until_it_is_whole(pool: 
     assert_eq!(view["subscription"]["status"], "active");
     assert_eq!(view["subscription"]["cancel_at_period_end"], false);
     assert_eq!(view["subscription"]["has_card"], true);
-    assert_eq!(grace_days_left(&pool, user_id).await, None);
     let email = emails(&pool, user_id)
         .await
         .into_iter()
@@ -2362,7 +2321,7 @@ async fn a_partial_refund_leaves_the_subscription_alone_until_it_is_whole(pool: 
     assert!(billing::charge_due(&state, None).await.unwrap());
     assert_eq!(toss.charges().len(), 2);
 
-    // The rest of it given back is a full refund, of a period no longer served.
+    // Giving back the rest of it, in the dashboard, changes nothing either.
     toss.cancel_in_dashboard(&order_id);
     assert_eq!(
         billing_sync::webhook(State(state.clone()), event).await,
@@ -2372,46 +2331,17 @@ async fn a_partial_refund_leaves_the_subscription_alone_until_it_is_whole(pool: 
         .await
         .unwrap();
     let view = serde_json::to_value(view).unwrap();
-    assert_eq!(view["subscription"]["cancel_at_period_end"], true);
-    assert_eq!(view["subscription"]["has_card"], false);
-    assert_eq!(grace_days_left(&pool, user_id).await, None);
+    assert_eq!(view["subscription"]["cancel_at_period_end"], false);
+    assert_eq!(view["subscription"]["has_card"], true);
 }
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
-async fn a_later_refund_does_not_move_the_grace_deadline(pool: PgPool) {
-    let (_toss, base) = toss_stand_in().await;
-    let state = billed_state(pool.clone(), &base);
-    let (user_id, headers) = billed_customer(&pool).await;
-    subscribe(&state, &headers).await;
-    let orders = renewed(&pool, &state, user_id).await;
-    refund(&state, &headers, &orders[1]).await.unwrap();
-    sqlx::query(
-        "UPDATE subscriptions SET refund_grace_until=now()+interval '1 hour' WHERE user_id=$1",
-    )
-    .bind(user_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-    let view = refund(&state, &headers, &orders[0]).await.unwrap();
-    assert!(
-        view["payments"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|payment| payment["status"] == "refunded")
-    );
-    assert_eq!(grace_days_left(&pool, user_id).await, Some(1));
-}
-
-#[sqlx::test(migrations = "./migrations")]
-#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
-async fn subscribing_during_a_refunds_grace_starts_a_new_period(pool: PgPool) {
+async fn subscribing_after_a_refund_starts_a_new_period(pool: PgPool) {
     let (toss, base) = toss_stand_in().await;
     let state = billed_state(pool.clone(), &base);
     let (user_id, headers) = billed_customer(&pool).await;
     let view = subscribe(&state, &headers).await;
-    let id = ready_instance(&pool, user_id).await;
     let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
     refund(&state, &headers, &order_id).await.unwrap();
     // The refunded period cannot simply be picked up again.
@@ -2424,39 +2354,11 @@ async fn subscribing_during_a_refunds_grace_starts_a_new_period(pool: PgPool) {
         StatusCode::CONFLICT
     );
 
-    // A declined card leaves the deadline where it was.
-    let deadline = || async {
-        sqlx::query_scalar::<_, Option<OffsetDateTime>>(
-            "SELECT refund_grace_until FROM subscriptions WHERE user_id=$1",
-        )
-        .bind(user_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap()
-    };
-    let before = deadline().await.unwrap();
-    toss.answer(&[TossScript::Decline]);
-    let view = subscribe(&state, &headers).await;
-    assert_eq!(view["subscription"]["status"], "active");
-    assert_eq!(view["subscription"]["cancel_at_period_end"], true);
-    assert!(view["subscription"]["last_error"].is_string());
-    assert_eq!(deadline().await, Some(before));
-    let next: OffsetDateTime =
-        sqlx::query_scalar("SELECT next_attempt_at FROM subscriptions WHERE user_id=$1")
-            .bind(user_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(next, before);
-
-    // A card that pays clears it and starts a month from today.
     let view = subscribe(&state, &headers).await;
     assert_eq!(view["subscription"]["status"], "active");
     assert_eq!(view["subscription"]["cancel_at_period_end"], false);
     assert_eq!(view["subscription"]["has_card"], true);
-    assert_eq!(view["subscription"]["last_error"], serde_json::Value::Null);
-    assert_eq!(grace_days_left(&pool, user_id).await, None);
-    assert_eq!(toss.charges().len(), 3);
+    assert_eq!(toss.charges().len(), 2);
     let (days, periods): (i32, i32) = sqlx::query_as(
         "SELECT ceil(extract(epoch FROM current_period_end-now())/86400)::int,periods_paid FROM subscriptions WHERE user_id=$1",
     )
@@ -2466,7 +2368,6 @@ async fn subscribing_during_a_refunds_grace_starts_a_new_period(pool: PgPool) {
     .unwrap();
     assert!((28..=31).contains(&days), "{days}");
     assert_eq!(periods, 1);
-    assert_eq!(lifecycle(&pool, id).await.0, "ready");
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -2576,10 +2477,17 @@ async fn a_refund_made_in_the_dashboard_is_learned_from_the_webhook(pool: PgPool
         billing_sync::webhook(State(state.clone()), event(&order_id)).await,
         StatusCode::OK
     );
-    // A refund made there gets the same grace.
+    // A refund made there is an operator's, and leaves everything running.
     assert_eq!(subscription_status(&pool, user_id).await, "active");
-    assert_eq!(grace_days_left(&pool, user_id).await, Some(4));
     assert_eq!(lifecycle(&pool, id).await.0, "ready");
+    let renews: bool = sqlx::query_scalar(
+        "SELECT billing_key IS NOT NULL AND NOT cancel_at_period_end FROM subscriptions WHERE user_id=$1",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(renews);
     // Delivered again, it changes nothing more.
     assert_eq!(
         billing_sync::webhook(State(state.clone()), event(&order_id)).await,
@@ -2688,8 +2596,19 @@ async fn operators_see_billing_and_customers_do_not(pool: PgPool) {
             .unwrap(),
         StatusCode::NO_CONTENT
     );
-    assert_eq!(subscription_status(&pool, user_id).await, "active");
-    assert_eq!(grace_days_left(&pool, user_id).await, Some(4));
+    while billing_sync::refund_due(&state, None).await.unwrap() {}
+    // The money goes back; the subscription goes on as it was.
+    let (status, has_card, ending, refunded): (String, bool, bool, String) = sqlx::query_as(
+        "SELECT s.status,s.billing_key IS NOT NULL,s.cancel_at_period_end,p.status FROM subscriptions s JOIN subscription_payments p ON p.user_id=s.user_id WHERE p.order_id=$1",
+    )
+    .bind(&order_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        (status.as_str(), has_card, ending, refunded.as_str()),
+        ("active", true, false, "refunded")
+    );
     assert_eq!(
         sqlx::query_scalar::<_, Option<Uuid>>(
             "SELECT refund_requested_by FROM subscription_payments WHERE order_id=$1"
@@ -2928,8 +2847,9 @@ async fn a_refund_is_confirmed_by_email(pool: PgPool) {
         .find(|email| email.0 == "refund")
         .unwrap();
     assert_eq!(refund.1, "Your eunha space refund: ₩9,900");
-    assert!(refund.2.contains("your subscription is cancelled"));
-    assert!(refund.2.contains("keep running until"));
+    assert!(refund.2.contains("Your subscription is cancelled"));
+    // This customer has no instance to take offline.
+    assert!(!refund.2.contains("offline"));
 }
 
 fn with_language(mut headers: HeaderMap, accept: &str) -> HeaderMap {
@@ -3261,25 +3181,41 @@ async fn a_plan_limits_instances_and_a_downgrade_must_fit(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
-async fn refunding_an_upgrade_returns_to_the_plan_it_left(pool: PgPool) {
+async fn a_customer_refunding_an_upgrade_ends_the_subscription_and_an_operator_does_not(
+    pool: PgPool,
+) {
     let (_toss, base) = toss_stand_in().await;
     let state = billed_state(pool.clone(), &base);
+    let (runtime, admin) = fixture(&pool).await;
     let (user_id, headers) = billed_customer(&pool).await;
     subscribe(&state, &headers).await;
-    let before = on_plan(&pool, user_id).await;
+    let id = tenant(&pool, runtime).await;
+    sqlx::query("UPDATE tenants SET user_id=$2,lifecycle_state='ready' WHERE id=$1")
+        .bind(id)
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let big = plan(&pool, 19900, None).await;
     let view = change_plan(&state, &headers, big).await.unwrap();
     let upgrade = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
 
+    // An operator gives it back: the plan and the instance stay as they are.
+    billing_admin::refund(State(state.clone()), admin, Path(upgrade.clone()))
+        .await
+        .unwrap();
+    while billing_sync::refund_due(&state, None).await.unwrap() {}
+    assert_eq!(on_plan(&pool, user_id).await, (Some(big), 19900, None));
+    assert_eq!(subscription_status(&pool, user_id).await, "active");
+    assert_eq!(lifecycle(&pool, id).await.0, "ready");
+
+    // The customer's own refund of another upgrade ends it all.
+    let bigger = plan(&pool, 29900, None).await;
+    let view = change_plan(&state, &headers, bigger).await.unwrap();
+    let upgrade = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
     let view = refund(&state, &headers, &upgrade).await.unwrap();
-    // Back on the plan still paid for, which now ends with its period.
-    assert_eq!(on_plan(&pool, user_id).await, before);
-    assert_eq!(view["subscription"]["status"], "active");
-    assert_eq!(view["subscription"]["cancel_at_period_end"], true);
-    assert_eq!(
-        view["subscription"]["refund_grace_until"],
-        serde_json::Value::Null
-    );
+    assert_eq!(view["subscription"]["status"], "canceled");
+    assert_eq!(lifecycle(&pool, id).await.0, "deprovisioning");
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -3294,7 +3230,7 @@ async fn refunding_the_period_also_refunds_its_upgrade(pool: PgPool) {
     change_plan(&state, &headers, big).await.unwrap();
 
     let view = refund(&state, &headers, &first).await.unwrap();
-    assert!(view["subscription"]["refund_grace_until"].is_string());
+    assert_eq!(view["subscription"]["status"], "canceled");
     while billing_sync::refund_due(&state, None).await.unwrap() {}
     let unrefunded: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM subscription_payments WHERE user_id=$1 AND status<>'refunded'",

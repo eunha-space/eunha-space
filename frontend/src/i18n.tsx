@@ -245,8 +245,6 @@ const ko: Record<string, string> = {
     "카드를 등록하지 못했습니다.",
   "Your subscription is cancelled. Your instances keep running until the end of the paid period, then go offline with their data kept.":
     "구독이 해지되었습니다. 결제한 기간이 끝날 때까지 인스턴스가 계속 운영되며, 이후 데이터는 보관된 채 오프라인으로 전환됩니다.",
-  "Your payment was refunded. Your instances keep running until the date below, then go offline with their data kept. Subscribe again to keep them running.":
-    "결제가 환불되었습니다. 아래 날짜까지 인스턴스가 계속 운영된 뒤 오프라인으로 전환되며, 데이터는 보관됩니다. 계속 이용하려면 다시 구독하세요.",
   "Your card is charged automatically each month.":
     "매달 등록된 카드로 자동 결제됩니다.",
   "Your last payment was declined. We'll try again, and your instances keep running meanwhile. Use another card to pay now.":
@@ -336,8 +334,6 @@ const ko: Record<string, string> = {
     "다음 갱신일부터 적용됩니다. 그때까지는 달라지는 것이 없으며, 언제든 되돌릴 수 있습니다.",
   "You stay on your current plan, and the change waiting for your next renewal is dropped.":
     "현재 요금제를 유지하며, 다음 갱신일에 예정된 변경은 취소됩니다.",
-  "The full amount goes back to your card, you return to the plan you had, and your subscription is cancelled. It keeps running until the end of the paid period.":
-    "전액이 카드로 환불되고 이전 요금제로 돌아가며 구독이 해지됩니다. 결제한 기간이 끝날 때까지는 계속 이용할 수 있습니다.",
   "This plan is not available.": "이 요금제는 선택할 수 없습니다.",
   "Only an active subscription can change plans.": "이용 중인 구독만 요금제를 변경할 수 있습니다.",
   "Keep your subscription before changing plans.": "요금제를 변경하려면 먼저 구독을 유지해 주세요.",
@@ -354,8 +350,8 @@ const ko: Record<string, string> = {
     "환불 거절",
   "Refund this payment?":
     "이 결제를 환불할까요?",
-  "The full amount goes back to your card and your subscription is cancelled. Refunding the period you are in leaves your instances running for four more days, then they go offline. Their data is kept, and subscribing again serves them again.":
-    "전액이 카드로 환불되고 구독이 해지됩니다. 지금 이용 중인 기간을 환불하면 인스턴스는 4일 더 운영된 뒤 오프라인으로 전환됩니다. 데이터는 보관되며, 다시 구독하면 다시 서비스됩니다.",
+  "The full amount goes back to your card. Your subscription is cancelled and your instances go offline immediately. Their data is kept, and subscribing again serves them again.":
+    "전액이 카드로 환불되고 구독이 해지되며 인스턴스는 즉시 오프라인으로 전환됩니다. 데이터는 보관되며, 다시 구독하면 다시 서비스됩니다.",
   "This payment can no longer be refunded.":
     "이 결제는 더 이상 환불할 수 없습니다.",
   "A payment is being confirmed. Try again shortly.":

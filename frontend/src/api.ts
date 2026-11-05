@@ -178,8 +178,6 @@ export type Billing = {
     next_attempt_at: string | null;
     /** TossPayments' or the card company's reason for the last decline. */
     last_error: string | null;
-    /** When instances go offline after a refund took back the paid time. */
-    refund_grace_until: string | null;
   } | null;
   payments: {
     order_id: string;

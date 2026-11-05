@@ -712,7 +712,7 @@ function AccountPanel(
                           confirm={{
                             title: `Refund ${won(payment.amount)} to ${account.email}?`,
                             description:
-                              "The full amount goes back to the card. If this paid for the period being served, the subscription ends now and the account's instances go offline with their data kept.",
+                              "The full amount goes back to the card. The subscription carries on and renews as before, and the account's instances stay online.",
                             action: "Refund",
                           }}
                         >

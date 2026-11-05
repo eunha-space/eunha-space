@@ -170,31 +170,18 @@ never asked for twice:
 While a refund is open the subscription is not charged, and a refund cannot be
 asked for while a charge is being confirmed.
 
-Every full refund stops a running subscription renewing and retires its card.
-A partial one, an operator's goodwill made in the dashboard, is recorded without
-changing the subscription, until further refunds bring the payment to its full
-amount. What happens to the instances depends on the paid time left:
+What a refund does depends on who gave it back, which is
+`refund_requested_by`:
 
-- A refund of an earlier period leaves the paid time alone. The subscription
-  ends when that time does.
-- A refund of the period being served takes the paid time back, as does any
-  refund while a renewal is `past_due`. The subscription stays `active` with
-  `refund_grace_until` set four days ahead, then ends. A later refund does not
-  move that deadline.
-
-Subscribing during the grace starts a new period that day at today's price, and
-a paid charge clears the deadline. A declined card leaves the deadline standing,
-with no retries, and the customer can try another card until then.
-
-A full refund of an upgrade charge for the current period returns the
-subscription to the plan and price it left. Like any refund it also stops
-renewing, but the old plan's paid time still stands, so there is no grace and
-the subscription ends with its period. Instances over the old limit keep
-running, but no more can be added. A full refund of the renewal for the period
-being served also requests a refund of any upgrade charged for that period.
-
-Operators refund in the TossPayments dashboard. The webhook below brings each
-cancellation into the ledger by the same rules.
+- **A customer's own** full refund ends a running subscription at once
+  (`canceled`), retires its card and takes its instances offline with their data
+  kept, whichever payment it was. Subscribing again starts a new period that day
+  at today's price and serves them again. Refunding the renewal for the period
+  being served also requests a refund of any upgrade charged for that period.
+- **An operator's**, from `/admin/billing` or the TossPayments dashboard, whose
+  webhook below brings it into the ledger, returns the money and changes nothing
+  else. The plan, the renewal and the instances all stay as they were, so the
+  subscription charges again at its next renewal.
 
 ## Webhooks
 
