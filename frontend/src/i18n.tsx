@@ -401,6 +401,8 @@ export async function initLocale(): Promise<void> {
     const response = await fetch("/api/customer/locale", {
       signal: AbortSignal.timeout(2000),
     });
+    // An error's body has no locale to activate, and activating none renders nothing.
+    if (!response.ok) throw new Error(`Request failed (${response.status})`);
     const { locale, saved } = (await response.json()) as { locale: Locale; saved: boolean };
     const picked = readPicked();
     apply(!saved && picked ? picked : locale);
