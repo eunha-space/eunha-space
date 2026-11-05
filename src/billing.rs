@@ -575,6 +575,10 @@ pub(crate) struct PlanView {
     name_ko: String,
     amount: i64,
     instance_limit: Option<i64>,
+    user_limit: Option<i64>,
+    media_gb: Option<i64>,
+    database_gb: Option<i64>,
+    monthly_activities: Option<i64>,
     /// Whether it can be chosen. A retired plan is listed only for those on it.
     active: bool,
     /// What moving to this plan charges now, for an upgrade.
@@ -628,7 +632,7 @@ pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiEr
     .fetch_all(&s.db)
     .await?;
     let mut plans = sqlx::query_as::<_, PlanView>(
-        "SELECT id,name_en,name_ko,amount,instance_limit,active FROM plans WHERE active OR id IN (SELECT plan_id FROM subscriptions WHERE user_id=$1 UNION SELECT pending_plan_id FROM subscriptions WHERE user_id=$1) ORDER BY amount,created_at",
+        "SELECT id,name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,active FROM plans WHERE active OR id IN (SELECT plan_id FROM subscriptions WHERE user_id=$1 UNION SELECT pending_plan_id FROM subscriptions WHERE user_id=$1) ORDER BY amount,created_at",
     )
     .bind(user_id)
     .fetch_all(&s.db)
@@ -665,6 +669,10 @@ pub(crate) struct PublicPlan {
     name_ko: String,
     amount: i64,
     instance_limit: Option<i64>,
+    user_limit: Option<i64>,
+    media_gb: Option<i64>,
+    database_gb: Option<i64>,
+    monthly_activities: Option<i64>,
 }
 
 /// The plans on offer, cheapest first, for visitors who have no account yet.
@@ -676,7 +684,7 @@ pub(crate) async fn public_plans(
         return Ok(Json(vec![]));
     }
     let plans = sqlx::query_as::<_, PublicPlan>(
-        "SELECT name_en,name_ko,amount,instance_limit FROM plans WHERE active ORDER BY amount,created_at",
+        "SELECT name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities FROM plans WHERE active ORDER BY amount,created_at",
     )
     .fetch_all(&s.db)
     .await?;

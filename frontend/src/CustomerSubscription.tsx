@@ -35,6 +35,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Spinner } from "@/components/console/status";
+import { planLimits } from "./planLimits";
 import { RefundPolicy } from "./RefundPolicy";
 
 /** Where TossPayments' billing window sends the customer back, either way. */
@@ -196,12 +197,7 @@ export function SubscriptionCard(
   const amount = subscription && subscribed && !choosing
     ? subscription.amount
     : chosenPlan?.amount ?? null;
-  const limitLabel = (plan: Plan) =>
-    plan.instance_limit == null
-      ? null
-      : i18n.locale === "ko"
-      ? `인스턴스 ${plan.instance_limit}개`
-      : `${plan.instance_limit} instance${plan.instance_limit === 1 ? "" : "s"}`;
+  const limitLabel = (plan: Plan) => planLimits(plan, i18n.locale === "ko").join(" · ");
 
   let description: string;
   if (inGrace && !pending) {

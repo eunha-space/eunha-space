@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Mark, ThemeToggle } from "@/components/console/brand";
 import { won } from "@/format";
 import { LanguageToggle } from "@/i18n";
+import { planLimits } from "@/planLimits";
 
 const EXPLANATIONS = [
   {
@@ -184,11 +185,9 @@ export function Landing() {
                   <h3 className="font-medium">
                     {korean ? plan.name_ko : plan.name_en}
                   </h3>
-                  {plan.instance_limit != null && (
+                  {planLimits(plan, korean).length > 0 && (
                     <p className="text-muted-foreground text-sm">
-                      {korean
-                        ? `인스턴스 ${plan.instance_limit}개`
-                        : `${plan.instance_limit} instance${plan.instance_limit === 1 ? "" : "s"}`}
+                      {planLimits(plan, korean).join(" · ")}
                     </p>
                   )}
                 </div>

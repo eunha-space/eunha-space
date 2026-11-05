@@ -112,6 +112,10 @@ a monthly price and an instance limit. With no limit, the account's own
 `instance_limit` applies. Administrators and exempt accounts always use their
 account's limit.
 
+A plan also states limits on registered users, media and database storage, and
+ActivityPub activities a month, shown to customers as a fair-use limit. These are
+only displayed so far: nothing measures or enforces them.
+
 A plan's price never changes, because subscriptions and upgrade charges are
 worked out from it. To change a price, add a plan and stop offering the old one.
 Those on a retired plan stay on it, at their price, until they move.

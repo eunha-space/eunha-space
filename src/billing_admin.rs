@@ -68,12 +68,16 @@ pub(crate) struct Plan {
     name_ko: String,
     amount: i64,
     instance_limit: Option<i64>,
+    user_limit: Option<i64>,
+    media_gb: Option<i64>,
+    database_gb: Option<i64>,
+    monthly_activities: Option<i64>,
     active: bool,
     /// Running subscriptions on it, or moving to it at their next renewal.
     subscribers: i64,
 }
 
-const PLAN_COLUMNS: &str = "id,name_en,name_ko,amount,instance_limit,active,(SELECT count(*) FROM subscriptions s WHERE s.status IN ('active','past_due') AND plans.id IN (s.plan_id,s.pending_plan_id)) subscribers";
+const PLAN_COLUMNS: &str = "id,name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,active,(SELECT count(*) FROM subscriptions s WHERE s.status IN ('active','past_due') AND plans.id IN (s.plan_id,s.pending_plan_id)) subscribers";
 
 #[derive(Serialize)]
 pub(crate) struct Overview {
@@ -259,6 +263,10 @@ pub(crate) struct NewPlan {
     name_ko: String,
     amount: i64,
     instance_limit: Option<i64>,
+    user_limit: Option<i64>,
+    media_gb: Option<i64>,
+    database_gb: Option<i64>,
+    monthly_activities: Option<i64>,
 }
 
 /// Offer a new plan. Its price is fixed from here on.
@@ -268,7 +276,14 @@ pub(crate) async fn create_plan(
     Json(body): Json<NewPlan>,
 ) -> Result<Json<Plan>, ApiError> {
     let (admin_id, _) = admin_user(&headers, &s.db).await?;
-    if body.amount < 100 || body.instance_limit.is_some_and(|limit| limit < 0) {
+    let limits = [
+        body.instance_limit,
+        body.user_limit,
+        body.media_gb,
+        body.database_gb,
+        body.monthly_activities,
+    ];
+    if body.amount < 100 || limits.iter().flatten().any(|limit| *limit < 0) {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "A plan costs at least 100 won and cannot have a negative limit.".into(),
@@ -276,12 +291,16 @@ pub(crate) async fn create_plan(
     }
     let mut tx = s.db.begin().await?;
     let plan = sqlx::query_as::<_, Plan>(&format!(
-        "INSERT INTO plans(name_en,name_ko,amount,instance_limit) VALUES($1,$2,$3,$4) RETURNING {PLAN_COLUMNS}"
+        "INSERT INTO plans(name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING {PLAN_COLUMNS}"
     ))
     .bind(plan_name(&body.name_en)?)
     .bind(plan_name(&body.name_ko)?)
     .bind(body.amount)
     .bind(body.instance_limit)
+    .bind(body.user_limit)
+    .bind(body.media_gb)
+    .bind(body.database_gb)
+    .bind(body.monthly_activities)
     .fetch_one(&mut *tx)
     .await?;
     billing::record(
@@ -302,10 +321,15 @@ pub(crate) struct PlanUpdate {
     name_en: String,
     name_ko: String,
     instance_limit: Option<i64>,
+    user_limit: Option<i64>,
+    media_gb: Option<i64>,
+    database_gb: Option<i64>,
+    monthly_activities: Option<i64>,
     active: bool,
 }
 
-/// Rename a plan, change its limit, or retire or bring it back. Retiring leaves
+/// Rename a plan, change its limits, or retire or bring it back. A displayed
+/// limit left out of the request stays as it is. Retiring leaves
 /// those on it where they are; it only stops anyone new choosing it.
 pub(crate) async fn update_plan(
     State(s): State<Shared>,
@@ -314,7 +338,14 @@ pub(crate) async fn update_plan(
     Json(body): Json<PlanUpdate>,
 ) -> Result<Json<Plan>, ApiError> {
     let (admin_id, _) = admin_user(&headers, &s.db).await?;
-    if body.instance_limit.is_some_and(|limit| limit < 0) {
+    let limits = [
+        body.instance_limit,
+        body.user_limit,
+        body.media_gb,
+        body.database_gb,
+        body.monthly_activities,
+    ];
+    if limits.iter().flatten().any(|limit| *limit < 0) {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "A plan cannot have a negative limit.".into(),
@@ -322,13 +353,17 @@ pub(crate) async fn update_plan(
     }
     let mut tx = s.db.begin().await?;
     let plan = sqlx::query_as::<_, Plan>(&format!(
-        "UPDATE plans SET name_en=$2,name_ko=$3,instance_limit=$4,active=$5 WHERE id=$1 RETURNING {PLAN_COLUMNS}"
+        "UPDATE plans SET name_en=$2,name_ko=$3,instance_limit=$4,active=$5,user_limit=coalesce($6,user_limit),media_gb=coalesce($7,media_gb),database_gb=coalesce($8,database_gb),monthly_activities=coalesce($9,monthly_activities) WHERE id=$1 RETURNING {PLAN_COLUMNS}"
     ))
     .bind(id)
     .bind(plan_name(&body.name_en)?)
     .bind(plan_name(&body.name_ko)?)
     .bind(body.instance_limit)
     .bind(body.active)
+    .bind(body.user_limit)
+    .bind(body.media_gb)
+    .bind(body.database_gb)
+    .bind(body.monthly_activities)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Plan not found.".into()))?;

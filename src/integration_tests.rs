@@ -3218,14 +3218,18 @@ async fn visitors_see_the_plans_on_offer_only_when_billing_is_on(pool: PgPool) {
     assert_eq!(serde_json::to_value(plans).unwrap(), serde_json::json!([]));
 
     let (_toss, base) = toss_stand_in().await;
+    sqlx::query("UPDATE plans SET user_limit=50,media_gb=10,database_gb=5,monthly_activities=100000 WHERE amount=9900")
+        .execute(&pool)
+        .await
+        .unwrap();
     let Json(plans) = billing::public_plans(State(billed_state(pool, &base)))
         .await
         .unwrap();
     assert_eq!(
         serde_json::to_value(plans).unwrap(),
         serde_json::json!([
-            {"name_en":"plan 9900","name_ko":"plan 9900","amount":9900,"instance_limit":null},
-            {"name_en":"plan 19900","name_ko":"plan 19900","amount":19900,"instance_limit":5},
+            {"name_en":"plan 9900","name_ko":"plan 9900","amount":9900,"instance_limit":null,"user_limit":50,"media_gb":10,"database_gb":5,"monthly_activities":100000},
+            {"name_en":"plan 19900","name_ko":"plan 19900","amount":19900,"instance_limit":5,"user_limit":null,"media_gb":null,"database_gb":null,"monthly_activities":null},
         ])
     );
 }

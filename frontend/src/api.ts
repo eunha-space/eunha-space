@@ -135,6 +135,11 @@ export type Plan = {
   amount: number;
   /** Null leaves the account's own limit in force. */
   instance_limit: number | null;
+  /** Shown to customers. Null states no limit; none is enforced yet. */
+  user_limit: number | null;
+  media_gb: number | null;
+  database_gb: number | null;
+  monthly_activities: number | null;
   /** False for a retired plan, listed only for those on it. */
   active: boolean;
   /** What moving to this plan charges now, for an upgrade. */
@@ -142,7 +147,17 @@ export type Plan = {
 };
 
 /** A plan as shown to visitors, who have no account yet. */
-export type PublicPlan = Pick<Plan, "name_en" | "name_ko" | "amount" | "instance_limit">;
+export type PublicPlan = Pick<
+  Plan,
+  | "name_en"
+  | "name_ko"
+  | "amount"
+  | "instance_limit"
+  | "user_limit"
+  | "media_gb"
+  | "database_gb"
+  | "monthly_activities"
+>;
 
 export type Billing = {
   enabled: boolean;

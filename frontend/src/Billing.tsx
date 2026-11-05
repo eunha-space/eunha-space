@@ -61,6 +61,10 @@ type Plan = {
   name_ko: string;
   amount: number;
   instance_limit: number | null;
+  user_limit: number | null;
+  media_gb: number | null;
+  database_gb: number | null;
+  monthly_activities: number | null;
   active: boolean;
   subscribers: number;
 };
@@ -164,6 +168,10 @@ function Plans({ plans, onChanged }: { plans: Plan[]; onChanged: () => Promise<v
   const [nameKo, setNameKo] = useState("");
   const [amount, setAmount] = useState("");
   const [limit, setLimit] = useState("");
+  const [userLimit, setUserLimit] = useState("");
+  const [mediaGb, setMediaGb] = useState("");
+  const [databaseGb, setDatabaseGb] = useState("");
+  const [activities, setActivities] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -189,12 +197,20 @@ function Plans({ plans, onChanged }: { plans: Plan[]; onChanged: () => Promise<v
           name_ko: nameKo,
           amount: Number(amount),
           instance_limit: limit.trim() === "" ? null : Number(limit),
+          user_limit: userLimit.trim() === "" ? null : Number(userLimit),
+          media_gb: mediaGb.trim() === "" ? null : Number(mediaGb),
+          database_gb: databaseGb.trim() === "" ? null : Number(databaseGb),
+          monthly_activities: activities.trim() === "" ? null : Number(activities),
         }),
       });
       setNameEn("");
       setNameKo("");
       setAmount("");
       setLimit("");
+      setUserLimit("");
+      setMediaGb("");
+      setDatabaseGb("");
+      setActivities("");
     });
 
   const setActive = (plan: Plan, active: boolean) =>
@@ -231,6 +247,7 @@ function Plans({ plans, onChanged }: { plans: Plan[]; onChanged: () => Promise<v
             <TableHead>Name</TableHead>
             <TableHead className="text-right">Monthly</TableHead>
             <TableHead className="text-right">Instances</TableHead>
+            <TableHead>Shown limits</TableHead>
             <TableHead className="text-right">Subscribers</TableHead>
             <TableHead>Offered</TableHead>
           </TableRow>
@@ -242,6 +259,14 @@ function Plans({ plans, onChanged }: { plans: Plan[]; onChanged: () => Promise<v
               <TableCell className="text-right tabular-nums">{won(plan.amount)}</TableCell>
               <TableCell className="text-right tabular-nums">
                 {plan.instance_limit ?? "Account's limit"}
+              </TableCell>
+              <TableCell className="text-muted-foreground text-xs">
+                {[
+                  plan.user_limit != null && `${plan.user_limit} users`,
+                  plan.media_gb != null && `${plan.media_gb} GB media`,
+                  plan.database_gb != null && `${plan.database_gb} GB database`,
+                  plan.monthly_activities != null && `${plan.monthly_activities} activities`,
+                ].filter(Boolean).join(" · ")}
               </TableCell>
               <TableCell className="text-right tabular-nums">{plan.subscribers}</TableCell>
               <TableCell>
@@ -257,7 +282,7 @@ function Plans({ plans, onChanged }: { plans: Plan[]; onChanged: () => Promise<v
         </TableBody>
       </Table>
       <form
-        className="grid items-end gap-3 border-t p-4 md:grid-cols-[1fr_1fr_8rem_8rem_auto]"
+        className="grid items-end gap-3 border-t p-4 md:grid-cols-4"
         onSubmit={(event) => {
           event.preventDefault();
           void create();
@@ -279,7 +304,23 @@ function Plans({ plans, onChanged }: { plans: Plan[]; onChanged: () => Promise<v
           <Label htmlFor="plan-limit">Instance limit</Label>
           <Input id="plan-limit" type="number" min={0} placeholder="Account's" value={limit} onChange={(event) => setLimit(event.target.value)} />
         </div>
-        <Button type="submit" disabled={busy}>Add plan</Button>
+        <div className="grid gap-1">
+          <Label htmlFor="plan-users">Users shown</Label>
+          <Input id="plan-users" type="number" min={0} value={userLimit} onChange={(event) => setUserLimit(event.target.value)} />
+        </div>
+        <div className="grid gap-1">
+          <Label htmlFor="plan-media">Media GB shown</Label>
+          <Input id="plan-media" type="number" min={0} value={mediaGb} onChange={(event) => setMediaGb(event.target.value)} />
+        </div>
+        <div className="grid gap-1">
+          <Label htmlFor="plan-database">Database GB shown</Label>
+          <Input id="plan-database" type="number" min={0} value={databaseGb} onChange={(event) => setDatabaseGb(event.target.value)} />
+        </div>
+        <div className="grid gap-1">
+          <Label htmlFor="plan-activities">Activities a month shown</Label>
+          <Input id="plan-activities" type="number" min={0} value={activities} onChange={(event) => setActivities(event.target.value)} />
+        </div>
+        <Button type="submit" disabled={busy} className="md:col-span-4 md:justify-self-end">Add plan</Button>
       </form>
     </Card>
   );
