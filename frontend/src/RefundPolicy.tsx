@@ -9,14 +9,14 @@ import {
 } from "@/components/ui/table";
 import { Page, PageHeader, SectionCard } from "@/components/customer/page";
 
-// The refund policy as written, in Korean whatever the interface language.
-// The rates state what `REFUND_WINDOW` in src/billing_sync.rs enforces.
-const REFUND_RATES = [
+// The refund policy as written in Korean, and its English translation. The
+// rates state what `REFUND_WINDOW` in src/billing_sync.rs enforces.
+const REFUND_RATES_KO = [
   ["결제 후 7일 이내", "결제 금액의 100%"],
   ["결제 후 7일 경과", "환불 불가"],
 ];
 
-const REFUND_POLICY = [
+const REFUND_POLICY_KO = [
   [
     "기간 계산",
     "환불 기간은 결제가 완료된 시각부터 계산하며, 정기 결제와 요금제 업그레이드 결제에 각각 적용됩니다. 비율은 서비스 이용 여부와 관계없이 같습니다.",
@@ -39,23 +39,54 @@ const REFUND_POLICY = [
   ],
 ];
 
+const REFUND_RATES_EN = [
+  ["Within 7 days of payment", "100% of the amount paid"],
+  ["More than 7 days after payment", "No refund"],
+];
+
+const REFUND_POLICY_EN = [
+  [
+    "How the period is counted",
+    "The refund period runs from the moment a payment completes, and applies separately to each recurring payment and each plan upgrade payment. The rate is the same whether or not you have used the service.",
+  ],
+  [
+    "How to ask",
+    "Ask for a refund yourself from the payment history on your account page. The money goes back to the card you paid with, which can take 3 to 7 business days depending on the card company.",
+  ],
+  [
+    "After a refund",
+    "A refund cancels your subscription and takes your instances offline at once. Their data is kept, and subscribing again lets you carry on.",
+  ],
+  [
+    "Cancelling",
+    "You can cancel a recurring payment at any time. You are not charged again, and you keep the period you already paid for until it ends. Cancelling alone is not a refund, and a period that has already begun is not refunded pro rata.",
+  ],
+  [
+    "Refunds for outages",
+    "If an outage or interruption of eunha space kept you from using what you paid for, we refund you however long ago you paid. Write to hello@eunha.space.",
+  ],
+];
+
 /** The refund policy, at `/refund-policy`, for anyone. */
 export function RefundPolicy() {
   const { i18n } = useLingui();
+  const korean = i18n.locale === "ko";
+  const rates = korean ? REFUND_RATES_KO : REFUND_RATES_EN;
+  const policy = korean ? REFUND_POLICY_KO : REFUND_POLICY_EN;
   return (
     <Page>
       <PageHeader title={i18n._("Refund policy")} />
-      <div lang="ko" className="grid gap-6">
-        <SectionCard title="환불 가능 금액">
+      <div className="grid gap-6">
+        <SectionCard title={i18n._("Refund amounts")}>
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>환불 신청 시점</TableHead>
-                <TableHead>환불 가능 금액</TableHead>
+                <TableHead>{i18n._("When you ask")}</TableHead>
+                <TableHead>{i18n._("Amount refunded")}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {REFUND_RATES.map(([period, rate]) => (
+              {rates.map(([period, rate]) => (
                 <TableRow key={period}>
                   <TableCell>{period}</TableCell>
                   <TableCell>{rate}</TableCell>
@@ -65,7 +96,7 @@ export function RefundPolicy() {
           </Table>
         </SectionCard>
         <dl className="grid gap-5">
-          {REFUND_POLICY.map(([title, body]) => (
+          {policy.map(([title, body]) => (
             <div key={title}>
               <dt className="font-medium">{title}</dt>
               <dd className="text-muted-foreground mt-1">{body}</dd>

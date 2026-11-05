@@ -1,12 +1,13 @@
 import { i18n } from "@lingui/core";
 import { I18nProvider, useLingui } from "@lingui/react";
-import { Button } from "@/components/ui/button";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 const en: Record<string, string> = {};
 const ko: Record<string, string> = {
   "Port 465 uses TLS; port 587 requires STARTTLS.": "포트 465는 TLS를, 포트 587은 STARTTLS를 사용합니다.",
   "Enter both credentials whenever you save; saved credentials are never displayed.": "저장할 때마다 사용자 이름과 비밀번호를 입력하세요. 저장된 인증 정보는 표시되지 않습니다.",
-  "Refund policy": "환불정책",
+  "Refund policy": "환불 정책",
+  "Community guidelines": "커뮤니티 가이드라인",
   "Billing terms": "결제 안내",
   "Open instance": "인스턴스 열기",
   "No payments yet.": "아직 결제 내역이 없습니다.",
@@ -26,7 +27,7 @@ const ko: Record<string, string> = {
   "Saved. Your instance will apply these settings shortly.": "저장되었습니다. 곧 인스턴스에 설정이 적용됩니다.",
   "eunha space": "은하공간",
   "Your own Mastodon-compatible server, run for you.":
-    "마스토돈과 호환되는 나만의 서버, 운영은 저희가 맡습니다.",
+    "마스토돈 호환 서버: 은하 호스팅은 은하공간에 맡기세요",
   "eunha space hosts Eunha, a Mastodon-compatible fediverse server. Choose an address and you have a server of your own, where you can follow and be followed by people on Mastodon and across the fediverse.":
     "은하공간은 마스토돈과 호환되는 연합우주(페디버스) 서버 은하를 호스팅하는 서비스입니다. 주소만 정하면 나만의 서버가 생기고, 마스토돈을 비롯한 연합우주 곳곳의 사람들과 서로 팔로우할 수 있습니다.",
   "How it works": "이용 방법",
@@ -50,12 +51,6 @@ const ko: Record<string, string> = {
   "The Mastodon apps you know": "익숙한 마스토돈 앱 그대로",
   "Eunha speaks Mastodon's API, so you can keep using the Mastodon apps and clients you like.":
     "은하는 마스토돈 API를 제공하므로, 좋아하는 마스토돈 앱과 클라이언트를 계속 쓸 수 있습니다.",
-  "Nothing to install": "설치할 것 없음",
-  "New Eunha releases and their database migrations are rolled out for you. Media storage is ready from the start.":
-    "은하의 새 릴리스와 데이터베이스 마이그레이션은 저희가 적용합니다. 미디어 저장소도 처음부터 준비되어 있습니다.",
-  "Email that works": "바로 쓰는 이메일",
-  "On an eunha.space address, your server's email is already set up. On your own domain, add your SMTP provider on the instance page.":
-    "eunha.space 주소에서는 서버 이메일이 이미 설정되어 있습니다. 내 도메인을 쓴다면 인스턴스 페이지에서 SMTP 서비스를 추가하세요.",
   "Free to leave": "언제든 떠날 자유",
   "Members can export their data and move their accounts, followers included, to another server. Eunha itself is open source under the AGPL.":
     "회원은 데이터를 내보내고, 팔로워와 함께 계정을 다른 서버로 옮길 수 있습니다. 은하는 AGPL 라이선스의 오픈 소스입니다.",
@@ -376,6 +371,81 @@ const ko: Record<string, string> = {
     "이 사이트와 보내 드리는 이메일의 언어를 선택하세요.",
   "Choose English or Korean.":
     "영어나 한국어를 선택하세요.",
+  // Messages the server answers customers with; ErrorAlert looks them up.
+  "Too many attempts. Try again in 15 minutes.":
+    "시도 횟수가 너무 많습니다. 15분 뒤에 다시 시도하세요.",
+  "Password is too long.": "비밀번호가 너무 깁니다.",
+  "Password service is busy. Try again shortly.":
+    "비밀번호 확인이 지연되고 있습니다. 잠시 뒤에 다시 시도하세요.",
+  "Client address unavailable.": "접속 주소를 확인할 수 없습니다.",
+  "Sign in required": "로그인이 필요합니다.",
+  "Session expired": "세션이 만료되었습니다. 다시 로그인하세요.",
+  "Enter a valid email address.": "올바른 이메일 주소를 입력하세요.",
+  "Invalid email address.": "올바르지 않은 이메일 주소입니다.",
+  "An account with that email already exists.": "이미 그 이메일로 만든 계정이 있습니다.",
+  "Customer email verification is not configured.":
+    "이메일 인증이 설정되어 있지 않습니다. 문의해 주세요.",
+  "Could not build the email link.": "이메일 링크를 만들지 못했습니다.",
+  "Could not send the email link.": "이메일 링크를 보내지 못했습니다.",
+  "That verification link is invalid or expired.":
+    "인증 링크가 올바르지 않거나 만료되었습니다.",
+  "Invalid credentials": "이메일 주소나 비밀번호가 올바르지 않습니다.",
+  "Set a password after signing in with an email link.":
+    "이메일 링크로 로그인한 뒤 비밀번호를 설정하세요.",
+  "Verify your email before signing in.": "로그인하기 전에 이메일 인증을 완료하세요.",
+  "Instance not found": "인스턴스를 찾을 수 없습니다.",
+  "Set a password before creating an instance.":
+    "인스턴스를 만들기 전에 비밀번호를 설정하세요.",
+  "Use up to 30 letters, numbers, and underscores for the admin username.":
+    "관리자 사용자 이름은 영문자, 숫자, 밑줄(_)로 30자까지 쓸 수 있습니다.",
+  "No runtime is currently available.":
+    "지금은 인스턴스를 만들 수 없습니다. 잠시 뒤에 다시 시도하세요.",
+  "Enter a valid externally owned custom domain.":
+    "직접 소유한 올바른 커스텀 도메인을 입력하세요.",
+  "Enter a valid domain.": "올바른 도메인을 입력하세요.",
+  "No provided domain suffix is configured.":
+    "eunha.space 주소를 지금은 쓸 수 없습니다. 문의해 주세요.",
+  "That subdomain is reserved.": "예약된 하위 주소입니다.",
+  "Cloudflare for SaaS is not configured.":
+    "커스텀 도메인을 지금은 쓸 수 없습니다. 문의해 주세요.",
+  "You have reached your instance limit.": "만들 수 있는 인스턴스 수에 도달했습니다.",
+  "That domain is already managed.": "이미 사용 중인 도메인입니다.",
+  "Could not generate tenant keys.": "인스턴스 키를 만들지 못했습니다.",
+  "This instance is already deleted.": "이미 삭제된 인스턴스입니다.",
+  "Only a deleted instance can be deleted permanently.":
+    "삭제된 인스턴스만 영구 삭제할 수 있습니다.",
+  "Type the instance's address to confirm.": "확인을 위해 인스턴스 주소를 입력하세요.",
+  "Only a deleted instance can be restored.": "삭제된 인스턴스만 복원할 수 있습니다.",
+  "Delete another instance before restoring this one.":
+    "이 인스턴스를 복원하려면 먼저 다른 인스턴스를 삭제하세요.",
+  "Its custom domain is now used by another instance, so it cannot be restored.":
+    "커스텀 도메인을 다른 인스턴스가 쓰고 있어 복원할 수 없습니다.",
+  "Only failed provisioning can be retried.": "설정에 실패한 인스턴스만 다시 시도할 수 있습니다.",
+  "The admin account is not ready yet.": "관리자 계정이 아직 준비되지 않았습니다.",
+  "Only a running instance can change its domain.":
+    "운영 중인 인스턴스만 도메인을 바꿀 수 있습니다.",
+  "The instance already has that domain.": "인스턴스가 이미 그 도메인을 쓰고 있습니다.",
+  "The instance is already changing its domain.": "인스턴스의 도메인을 이미 바꾸고 있습니다.",
+  "Another domain change is running.": "다른 도메인 변경이 진행 중입니다.",
+  "No part-way domain change to retry.": "다시 시도할 중단된 도메인 변경이 없습니다.",
+  "No domain change is running.": "진행 중인 도메인 변경이 없습니다.",
+  "The instance has begun moving and can no longer stop.":
+    "인스턴스 이동이 시작되어 더 이상 멈출 수 없습니다.",
+  "The domain change was cancelled; the instance stays where it was.":
+    "도메인 변경이 취소되었습니다. 인스턴스는 그대로 있습니다.",
+  "Enter an SMTP hostname, port 465 or 587, credentials, and a sender email address.":
+    "SMTP 호스트 이름, 포트(465 또는 587), 인증 정보, 발신 이메일 주소를 입력하세요.",
+  "SMTP settings require a ready instance with an active custom primary domain.":
+    "SMTP 설정은 커스텀 도메인이 기본 도메인으로 연결된, 준비된 인스턴스에서만 할 수 있습니다.",
+  "The card was declined.": "카드 결제가 거절되었습니다.",
+  "Only the account's owner can do that, not an administrator signed in as them.":
+    "계정 소유자만 할 수 있습니다. 관리자가 대신 로그인한 상태에서는 할 수 없습니다.",
+  "Request could not be completed. Reference: {id}":
+    "요청을 처리하지 못했습니다. 참조 번호: {id}",
+  "Request failed ({status})": "요청에 실패했습니다 ({status})",
+  "Refund amounts": "환불 가능 금액",
+  "When you ask": "환불 신청 시점",
+  "Amount refunded": "환불 가능 금액",
 };
 i18n.load("en", en);
 i18n.load("ko", ko);
@@ -448,20 +518,32 @@ export function LocalizationProvider(
 ) {
   return <I18nProvider i18n={i18n}>{children}</I18nProvider>;
 }
+/** Both languages in one pill, each named in itself, the one in use pressed. */
 export function LanguageToggle() {
   const { i18n } = useLingui();
-  const korean = i18n.locale === "ko";
   return (
-    <Button
-      variant="outline"
-      size="icon"
-      onClick={() => void setLocale(korean ? "en" : "ko")}
-      aria-label={korean ? "Switch to English" : "한국어로 전환"}
-      title={korean ? "English" : "한국어"}
+    <ToggleGroup
+      aria-label="Language · 언어"
+      spacing={0}
+      value={[i18n.locale]}
+      onValueChange={(value) => {
+        const next = value[0] as Locale | undefined;
+        if (next && next !== i18n.locale) void setLocale(next);
+      }}
+      className="border-border h-9 rounded-full border p-0.5"
     >
-      <span className="text-xs font-semibold" aria-hidden="true">
-        {korean ? "EN" : "KO"}
-      </span>
-    </Button>
+      {(["ko", "en"] as const).map((locale) => (
+        <ToggleGroupItem
+          key={locale}
+          value={locale}
+          lang={locale}
+          aria-label={locale === "ko" ? "한국어" : "English"}
+          title={locale === "ko" ? "한국어" : "English"}
+          className="h-full min-w-0 rounded-full! px-2.5 text-xs font-semibold"
+        >
+          {locale.toUpperCase()}
+        </ToggleGroupItem>
+      ))}
+    </ToggleGroup>
   );
 }

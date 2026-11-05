@@ -37,16 +37,6 @@ const FEATURES = [
       "Eunha speaks Mastodon's API, so you can keep using the Mastodon apps and clients you like.",
   },
   {
-    title: "Nothing to install",
-    body:
-      "New Eunha releases and their database migrations are rolled out for you. Media storage is ready from the start.",
-  },
-  {
-    title: "Email that works",
-    body:
-      "On an eunha.space address, your server's email is already set up. On your own domain, add your SMTP provider on the instance page.",
-  },
-  {
     title: "Free to leave",
     body:
       "Members can export their data and move their accounts, followers included, to another server. Eunha itself is open source under the AGPL.",
@@ -83,10 +73,13 @@ export function Landing({ signedIn }: { signedIn: boolean }) {
     : { href: "/signup", label: t("Create account") };
   return (
     <main className={`${siteColumn} flex-1`}>
-      <section className="grid items-center gap-10 py-12 md:grid-cols-[3fr_2fr] md:py-20">
+      <section className="grid items-center gap-10 py-12 md:py-20 lg:grid-cols-[3fr_2fr]">
         <div>
           <h1 className="text-4xl font-semibold tracking-tight text-balance md:text-6xl">
-            {t("Your own Mastodon-compatible server, run for you.")}
+            {/* A colon ends a line: the Korean headline names the server, then says what we do. */}
+            {t("Your own Mastodon-compatible server, run for you.")
+              .split(/(?<=:)\s+/)
+              .map((line) => <span key={line} className="block">{line}</span>)}
           </h1>
           <p className="text-muted-foreground mt-6 max-w-xl text-lg text-pretty">
             {t(
@@ -179,7 +172,7 @@ function Constellation({ label }: { label: string }) {
   return (
     <svg
       viewBox="0 0 430 360"
-      className="mx-auto w-full max-w-sm md:max-w-none"
+      className="mx-auto w-full max-w-sm lg:max-w-none"
       aria-hidden="true"
     >
       <g className="stroke-border" strokeWidth="1.5">

@@ -15,7 +15,7 @@ export function planLimits(plan: PublicPlan, korean: boolean): string[] {
       plan.database_gb == null ? null : `데이터베이스 ${plan.database_gb}GB`,
       plan.monthly_activities == null
         ? null
-        : `월 ActivityPub 활동 ${compact(plan.monthly_activities)}건(공정 사용 기준)`,
+        : `월 ActivityPub 활동 ${compact(plan.monthly_activities)}건 (공정 사용 기준)`,
     ]
     : [
       plan.instance_limit == null

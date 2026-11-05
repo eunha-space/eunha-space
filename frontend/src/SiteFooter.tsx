@@ -19,20 +19,22 @@ export function SiteFooter() {
   const links = [
     { href: "/pricing", label: t("Pricing") },
     { href: "/refund-policy", label: t("Refund policy") },
+    { href: "/community-guidelines", label: t("Community guidelines") },
     { href: "https://eunha.social", label: t("About Eunha") },
     { href: "https://github.com/eunha-space/eunha", label: t("Source code") },
   ];
   return (
     <footer className="text-muted-foreground border-t py-6 text-xs">
-      <div className={cn(siteColumn, "grid gap-4")}>
-        <nav aria-label={t("Site")} className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+      {/* The site's links beside the business details, above them on a phone. */}
+      <div className={cn(siteColumn, "grid gap-x-16 gap-y-6 sm:grid-cols-[auto_1fr]")}>
+        <nav aria-label={t("Site")} className="grid content-start gap-y-1.5 text-sm">
           {links.map(({ href, label }) => (
-            <a key={href} href={href} className="hover:text-foreground underline-offset-4 hover:underline">
+            <a key={href} href={href} className="hover:text-foreground w-fit underline-offset-4 hover:underline">
               {label}
             </a>
           ))}
         </nav>
-        <dl lang="ko" className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+        <dl lang="ko" className="grid content-start grid-cols-[auto_1fr] gap-x-4 gap-y-1">
           {BUSINESS_DETAILS.map(([label, value]) => (
             <div key={label} className="col-span-2 grid grid-cols-subgrid">
               <dt>{label}</dt>

@@ -128,10 +128,18 @@ export function Loading({ inline = false }: { inline?: boolean }) {
 /** A failure. Server messages are catalog keys too, so they localize here. */
 export function ErrorAlert({ message }: { message: string }) {
   const { i18n } = useLingui();
+  // Two messages carry a value, so they are looked up by their pattern.
+  const reference = /^Request could not be completed\. Reference: (\S+)$/.exec(message);
+  const failed = /^Request failed \((\d+)\)$/.exec(message);
+  const text = reference
+    ? i18n._("Request could not be completed. Reference: {id}", { id: reference[1] })
+    : failed
+      ? i18n._("Request failed ({status})", { status: failed[1] })
+      : i18n._(message);
   return (
     <Alert variant="destructive">
       <CircleAlert />
-      <AlertDescription>{i18n._(message)}</AlertDescription>
+      <AlertDescription>{text}</AlertDescription>
     </Alert>
   );
 }
@@ -155,15 +163,16 @@ export function ActionAlert(
     action: string;
   },
 ) {
+  // Laid out like the cards beside it, highlighted like a section to act on.
   return (
-    <Alert role="status">
+    <div
+      role="status"
+      className="bg-card ring-primary/40 flex flex-wrap items-center gap-x-3 gap-y-3 rounded-xl px-4 py-3 text-sm ring-1 [&>svg]:size-4 [&>svg]:shrink-0"
+    >
       {icon}
-      <AlertDescription>{children}</AlertDescription>
-      {/* Not in the description, which underlines every link in it. */}
-      <div className="col-start-2 mt-2.5">
-        <Button size="sm" render={<a href={href} />}>{action}</Button>
-      </div>
-    </Alert>
+      <p className="min-w-0 flex-1 basis-48">{children}</p>
+      <Button size="sm" render={<a href={href} />}>{action}</Button>
+    </div>
   );
 }
 
