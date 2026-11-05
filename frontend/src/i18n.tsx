@@ -7,6 +7,7 @@ const ko: Record<string, string> = {
   "Port 465 uses TLS; port 587 requires STARTTLS.": "포트 465는 TLS를, 포트 587은 STARTTLS를 사용합니다.",
   "Enter both credentials whenever you save; saved credentials are never displayed.": "저장할 때마다 사용자 이름과 비밀번호를 입력하세요. 저장된 인증 정보는 표시되지 않습니다.",
   "Refund policy": "환불 정책",
+  "Community guidelines": "커뮤니티 가이드라인",
   "Billing terms": "결제 안내",
   "Open instance": "인스턴스 열기",
   "No payments yet.": "아직 결제 내역이 없습니다.",
@@ -50,12 +51,6 @@ const ko: Record<string, string> = {
   "The Mastodon apps you know": "익숙한 마스토돈 앱 그대로",
   "Eunha speaks Mastodon's API, so you can keep using the Mastodon apps and clients you like.":
     "은하는 마스토돈 API를 제공하므로, 좋아하는 마스토돈 앱과 클라이언트를 계속 쓸 수 있습니다.",
-  "Nothing to install": "설치할 것 없음",
-  "New Eunha releases and their database migrations are rolled out for you. Media storage is ready from the start.":
-    "은하의 새 릴리스와 데이터베이스 마이그레이션은 저희가 적용합니다. 미디어 저장소도 처음부터 준비되어 있습니다.",
-  "Email that works": "바로 쓰는 이메일",
-  "On an eunha.space address, your server's email is already set up. On your own domain, add your SMTP provider on the instance page.":
-    "eunha.space 주소에서는 서버 이메일이 이미 설정되어 있습니다. 내 도메인을 쓴다면 인스턴스 페이지에서 SMTP 서비스를 추가하세요.",
   "Free to leave": "언제든 떠날 자유",
   "Members can export their data and move their accounts, followers included, to another server. Eunha itself is open source under the AGPL.":
     "회원은 데이터를 내보내고, 팔로워와 함께 계정을 다른 서버로 옮길 수 있습니다. 은하는 AGPL 라이선스의 오픈 소스입니다.",

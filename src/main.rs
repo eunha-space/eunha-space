@@ -1035,6 +1035,7 @@ async fn main() -> Result<()> {
         .route_service("/", index.clone())
         .route_service("/pricing", index.clone())
         .route_service("/refund-policy", index.clone())
+        .route_service("/community-guidelines", index.clone())
         .route_service("/signin", index.clone())
         .route_service("/signup", index.clone())
         .route_service("/verify", index.clone())

@@ -38,6 +38,7 @@ import { CustomerCreateInstance } from "@/CustomerCreateInstance";
 import { Landing } from "@/Landing";
 import { Pricing } from "@/Pricing";
 import { RefundPolicy } from "@/RefundPolicy";
+import { CommunityGuidelines } from "@/CommunityGuidelines";
 import { SiteHeader } from "@/SiteHeader";
 import { navigate, useCustomerNavigation } from "@/navigation";
 
@@ -159,6 +160,7 @@ export function CustomerApp() {
   if (location.pathname === "/") return withHeader(<Landing signedIn={customer !== null} />);
   if (location.pathname === "/pricing") return withHeader(<Pricing customer={customer} />);
   if (location.pathname === "/refund-policy") return withHeader(<RefundPolicy />);
+  if (location.pathname === "/community-guidelines") return withHeader(<CommunityGuidelines />);
   if (!customer) {
     return withHeader(
       // A form on its own, centred; at a fixed height, so that it stays put
