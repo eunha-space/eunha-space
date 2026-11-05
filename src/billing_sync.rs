@@ -365,7 +365,8 @@ async fn withdraw_refund(s: &Shared, due: &DueRefund, reason: &str) -> anyhow::R
 /// Record what TossPayments has given back of a payment, from its own record:
 /// a refund asked for here, or one made in the TossPayments dashboard. A full
 /// refund stops the subscription renewing, and one of the period being served
-/// also takes back the paid time.
+/// also takes back the paid time. A partial one, an operator's goodwill, changes
+/// nothing else.
 async fn apply_cancellation(
     s: &Shared,
     order_id: &str,
@@ -401,8 +402,8 @@ async fn apply_cancellation(
         None,
     )
     .await?;
-    let ends_on = if running {
-        Some(billing::stop_renewing_after_refund(&mut tx, user_id, full && current_period).await?)
+    let ends_on = if full && running {
+        Some(billing::stop_renewing_after_refund(&mut tx, user_id, current_period).await?)
     } else {
         None
     };

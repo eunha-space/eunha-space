@@ -129,13 +129,14 @@ never asked for twice:
 While a refund is open the subscription is not charged, and a refund cannot be
 asked for while a charge is being confirmed.
 
-Every refund recorded, partial ones made in the dashboard included, stops a
-running subscription renewing and retires its card. What happens to the
-instances depends on the paid time left:
+Every full refund stops a running subscription renewing and retires its card.
+A partial one, an operator's goodwill made in the dashboard, is recorded without
+changing the subscription, until further refunds bring the payment to its full
+amount. What happens to the instances depends on the paid time left:
 
-- A refund of an earlier period, or a partial one, leaves the paid time alone.
-  The subscription ends when that time does.
-- A full refund of the period being served takes the paid time back, as does any
+- A refund of an earlier period leaves the paid time alone. The subscription
+  ends when that time does.
+- A refund of the period being served takes the paid time back, as does any
   refund while a renewal is `past_due`. The subscription stays `active` with
   `refund_grace_until` set four days ahead, then ends. A later refund does not
   move that deadline.
@@ -212,8 +213,9 @@ configured, nothing is sent.
 - **Renewal reminder**, seven days before a subscription renews: the date, the
   amount and the card, and how to cancel or change the card. Not sent for a
   subscription set to end, or one renewing within a day.
-- **Refund confirmation**, for every refund recorded, saying that the
-  subscription will not be charged again and the day its instances go offline.
+- **Refund confirmation**, for every refund recorded. After a full refund it says
+  that the subscription will not be charged again and the day its instances go
+  offline.
 
 Every billing email is written in the account's language and sent under the
 service's name in it: 은하공간 for Korean, eunha space for English, from the

@@ -1600,6 +1600,14 @@ impl TossStandIn {
     fn charges(&self) -> Vec<(String, String)> {
         self.charges.lock().unwrap().clone()
     }
+    /// Give part of an order back as the TossPayments dashboard would.
+    fn cancel_part_in_dashboard(&self, order_id: &str, refunded: i64) {
+        let mut orders = self.orders.lock().unwrap();
+        let order = orders.get_mut(order_id).unwrap();
+        let balance = order["totalAmount"].as_i64().unwrap() - refunded;
+        order["status"] = "PARTIAL_CANCELED".into();
+        order["balanceAmount"] = balance.into();
+    }
     /// Cancel an order as the TossPayments dashboard would.
     fn cancel_in_dashboard(&self, order_id: &str) {
         let mut orders = self.orders.lock().unwrap();
@@ -2304,6 +2312,60 @@ async fn refunding_an_earlier_period_stops_renewal_and_keeps_the_paid_time(pool:
     assert!(billing::charge_due(&state, None).await.unwrap());
     assert_eq!(subscription_status(&pool, user_id).await, "canceled");
     assert_eq!(toss.charges().len(), 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_partial_refund_leaves_the_subscription_alone_until_it_is_whole(pool: PgPool) {
+    let (toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    let view = subscribe(&state, &headers).await;
+    let order_id = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+    let event = axum::body::Bytes::from(
+        serde_json::json!({"eventType":"PAYMENT_STATUS_CHANGED","data":{"orderId":order_id,"status":"PARTIAL_CANCELED"}})
+            .to_string(),
+    );
+
+    toss.cancel_part_in_dashboard(&order_id, 1000);
+    assert_eq!(
+        billing_sync::webhook(State(state.clone()), event.clone()).await,
+        StatusCode::OK
+    );
+    let Json(view) = billing::get(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    let view = serde_json::to_value(view).unwrap();
+    assert_eq!(view["payments"][0]["refunded_amount"], 1000);
+    assert_eq!(view["subscription"]["status"], "active");
+    assert_eq!(view["subscription"]["cancel_at_period_end"], false);
+    assert_eq!(view["subscription"]["has_card"], true);
+    assert_eq!(grace_days_left(&pool, user_id).await, None);
+    let email = emails(&pool, user_id)
+        .await
+        .into_iter()
+        .find(|email| email.0 == "refund")
+        .unwrap();
+    assert!(!email.2.contains("cancelled"));
+
+    // It still renews.
+    make_due(&pool, user_id).await;
+    assert!(billing::charge_due(&state, None).await.unwrap());
+    assert_eq!(toss.charges().len(), 2);
+
+    // The rest of it given back is a full refund, of a period no longer served.
+    toss.cancel_in_dashboard(&order_id);
+    assert_eq!(
+        billing_sync::webhook(State(state.clone()), event).await,
+        StatusCode::OK
+    );
+    let Json(view) = billing::get(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    let view = serde_json::to_value(view).unwrap();
+    assert_eq!(view["subscription"]["cancel_at_period_end"], true);
+    assert_eq!(view["subscription"]["has_card"], false);
+    assert_eq!(grace_days_left(&pool, user_id).await, None);
 }
 
 #[sqlx::test(migrations = "./migrations")]
