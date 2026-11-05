@@ -2,6 +2,15 @@ import { useLingui } from "@lingui/react";
 import { LogOut, Server, Shield, UserRound } from "lucide-react";
 import type { Customer } from "@/api";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Mark, ThemeToggle } from "@/components/console/brand";
 import { siteColumn } from "@/components/customer/page";
 import { LanguageToggle } from "@/i18n";
@@ -9,8 +18,8 @@ import { cn } from "cn";
 
 /**
  * The top of every page but the console: where to go, then the site's settings,
- * then the session. `customer` is undefined until the session is known, when the
- * header offers neither signing in nor an account.
+ * then the account and its session. `customer` is undefined until the session
+ * is known, when the header offers neither signing in nor an account.
  */
 export function SiteHeader(
   { customer, onSignOut }: {
@@ -38,20 +47,12 @@ export function SiteHeader(
             {/* There is no room on a phone; the footer links here on every page. */}
             <NavLink href="/pricing" label={t("Pricing")} current={path === "/pricing"} hideOnPhone />
             {customer && (
-              <>
-                <NavLink
-                  href="/instances"
-                  label={t("Your instances")}
-                  icon={<Server />}
-                  current={path === "/instances" || path.startsWith("/instances/")}
-                />
-                <NavLink
-                  href="/account"
-                  label={t("Account")}
-                  icon={<UserRound />}
-                  current={path === "/account" || path === "/account/billing"}
-                />
-              </>
+              <NavLink
+                href="/instances"
+                label={t("Your instances")}
+                icon={<Server />}
+                current={path === "/instances" || path.startsWith("/instances/")}
+              />
             )}
             {customer?.is_admin && (
               <NavLink href="/admin" label={t("Control plane")} icon={<Shield />} />
@@ -65,15 +66,11 @@ export function SiteHeader(
             </Button>
           )}
           {customer && (
-            <Button
-              variant="outline"
-              size="icon"
-              aria-label={t("Sign out")}
-              title={t("Sign out")}
-              onClick={() => void onSignOut()}
-            >
-              <LogOut />
-            </Button>
+            <AccountMenu
+              email={customer.email}
+              current={path === "/account" || path === "/account/billing"}
+              onSignOut={onSignOut}
+            />
           )}
         </div>
       </header>
@@ -107,5 +104,47 @@ function NavLink(
       {icon}
       <span className={icon ? "max-md:hidden" : undefined}>{label}</span>
     </Button>
+  );
+}
+
+/** The account page and signing out, behind the account's button. */
+function AccountMenu(
+  { email, current, onSignOut }: {
+    email: string;
+    current: boolean;
+    onSignOut: () => Promise<void>;
+  },
+) {
+  const { i18n } = useLingui();
+  const t = (message: string) => i18n._(message);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="outline"
+            className={cn("max-md:aspect-square max-md:px-0", current && "bg-muted")}
+            aria-label={t("Account")}
+            title={email}
+          />
+        }
+      >
+        <UserRound />
+        <span className="max-md:hidden">{t("Account")}</span>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="min-w-56">
+        <DropdownMenuGroup>
+          <DropdownMenuLabel className="truncate">{email}</DropdownMenuLabel>
+          {/* A plain link, so that it changes the page in place like the others. */}
+          <DropdownMenuItem render={<a href="/account" />}>
+            <UserRound /> {t("Account")}
+          </DropdownMenuItem>
+        </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onClick={() => void onSignOut()}>
+          <LogOut /> {t("Sign out")}
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
