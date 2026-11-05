@@ -1,12 +1,12 @@
 import { i18n } from "@lingui/core";
 import { I18nProvider, useLingui } from "@lingui/react";
-import { Button } from "@/components/ui/button";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 const en: Record<string, string> = {};
 const ko: Record<string, string> = {
   "Port 465 uses TLS; port 587 requires STARTTLS.": "포트 465는 TLS를, 포트 587은 STARTTLS를 사용합니다.",
   "Enter both credentials whenever you save; saved credentials are never displayed.": "저장할 때마다 사용자 이름과 비밀번호를 입력하세요. 저장된 인증 정보는 표시되지 않습니다.",
-  "Refund policy": "환불정책",
+  "Refund policy": "환불 정책",
   "Billing terms": "결제 안내",
   "Open instance": "인스턴스 열기",
   "No payments yet.": "아직 결제 내역이 없습니다.",
@@ -26,7 +26,7 @@ const ko: Record<string, string> = {
   "Saved. Your instance will apply these settings shortly.": "저장되었습니다. 곧 인스턴스에 설정이 적용됩니다.",
   "eunha space": "은하공간",
   "Your own Mastodon-compatible server, run for you.":
-    "마스토돈과 호환되는 나만의 서버, 운영은 저희가 맡습니다.",
+    "마스토돈 호환 서버: 은하, 호스팅은 은하공간에 맡기세요",
   "eunha space hosts Eunha, a Mastodon-compatible fediverse server. Choose an address and you have a server of your own, where you can follow and be followed by people on Mastodon and across the fediverse.":
     "은하공간은 마스토돈과 호환되는 연합우주(페디버스) 서버 은하를 호스팅하는 서비스입니다. 주소만 정하면 나만의 서버가 생기고, 마스토돈을 비롯한 연합우주 곳곳의 사람들과 서로 팔로우할 수 있습니다.",
   "How it works": "이용 방법",
@@ -448,20 +448,32 @@ export function LocalizationProvider(
 ) {
   return <I18nProvider i18n={i18n}>{children}</I18nProvider>;
 }
+/** Both languages in one pill, each named in itself, the one in use pressed. */
 export function LanguageToggle() {
   const { i18n } = useLingui();
-  const korean = i18n.locale === "ko";
   return (
-    <Button
-      variant="outline"
-      size="icon"
-      onClick={() => void setLocale(korean ? "en" : "ko")}
-      aria-label={korean ? "Switch to English" : "한국어로 전환"}
-      title={korean ? "English" : "한국어"}
+    <ToggleGroup
+      aria-label="Language · 언어"
+      spacing={0}
+      value={[i18n.locale]}
+      onValueChange={(value) => {
+        const next = value[0] as Locale | undefined;
+        if (next && next !== i18n.locale) void setLocale(next);
+      }}
+      className="border-border h-9 rounded-full border p-0.5"
     >
-      <span className="text-xs font-semibold" aria-hidden="true">
-        {korean ? "EN" : "KO"}
-      </span>
-    </Button>
+      {(["ko", "en"] as const).map((locale) => (
+        <ToggleGroupItem
+          key={locale}
+          value={locale}
+          lang={locale}
+          aria-label={locale === "ko" ? "한국어" : "English"}
+          title={locale === "ko" ? "한국어" : "English"}
+          className="h-full min-w-0 rounded-full! px-2.5 text-xs font-semibold"
+        >
+          {locale.toUpperCase()}
+        </ToggleGroupItem>
+      ))}
+    </ToggleGroup>
   );
 }
