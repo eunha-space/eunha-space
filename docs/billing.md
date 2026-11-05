@@ -127,10 +127,22 @@ never asked for twice:
   why, so they can ask again.
 
 While a refund is open the subscription is not charged, and a refund cannot be
-asked for while a charge is being confirmed. A full refund of the period being
-served ends the subscription the way a lapse does: its instances go offline
-with their data kept and no purge scheduled. A refund of an earlier period, or
-a partial one made in the dashboard, is recorded without ending anything.
+asked for while a charge is being confirmed.
+
+Every refund recorded, partial ones made in the dashboard included, stops a
+running subscription renewing and retires its card. What happens to the
+instances depends on the paid time left:
+
+- A refund of an earlier period, or a partial one, leaves the paid time alone.
+  The subscription ends when that time does.
+- A full refund of the period being served takes the paid time back, as does any
+  refund while a renewal is `past_due`. The subscription stays `active` with
+  `refund_grace_until` set four days ahead, then ends. A later refund does not
+  move that deadline.
+
+Subscribing during the grace starts a new period that day at today's price, and
+a paid charge clears the deadline. A declined card leaves the deadline standing,
+with no retries, and the customer can try another card until then.
 
 Operators refund in the TossPayments dashboard. The webhook below brings each
 cancellation into the ledger by the same rules.
@@ -200,8 +212,8 @@ configured, nothing is sent.
 - **Renewal reminder**, seven days before a subscription renews: the date, the
   amount and the card, and how to cancel or change the card. Not sent for a
   subscription set to end, or one renewing within a day.
-- **Refund confirmation**, for every refund recorded, saying whether the
-  subscription ended with it.
+- **Refund confirmation**, for every refund recorded, saying that the
+  subscription will not be charged again and the day its instances go offline.
 
 Every billing email is written in the account's language and sent under the
 service's name in it: 은하공간 for Korean, eunha space for English, from the

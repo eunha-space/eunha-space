@@ -156,30 +156,30 @@ pub(crate) async fn refund(
     user_id: Uuid,
     order_id: &str,
     refunded: i64,
-    ended: bool,
+    ends_on: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     let language = language(tx, user_id).await?;
     let amount = won(refunded);
-    let (subject, body) = match (language, ended) {
-        (Locale::En, true) => (
+    let (subject, body) = match (language, ends_on) {
+        (Locale::En, Some(ends_on)) => (
             format!("Your eunha space refund: {amount}"),
             format!(
-                "We refunded {amount} for order {order_id} to your card, and your subscription has ended, so your instances are offline. Their data is kept: subscribe again from your account page to serve them again.\n\nCard companies usually return the money within three to seven business days."
+                "We refunded {amount} for order {order_id} to your card, and your subscription is cancelled, so you will not be charged again. Your instances keep running until {ends_on}, then go offline with their data kept: subscribe again from your account page to keep serving them.\n\nCard companies usually return the money within three to seven business days."
             ),
         ),
-        (Locale::En, false) => (
+        (Locale::En, None) => (
             format!("Your eunha space refund: {amount}"),
             format!(
                 "We refunded {amount} for order {order_id} to your card.\n\nCard companies usually return the money within three to seven business days."
             ),
         ),
-        (Locale::Ko, true) => (
+        (Locale::Ko, Some(ends_on)) => (
             format!("은하공간 환불 안내: {amount}"),
             format!(
-                "주문 {order_id}의 {amount}을 카드로 환불했습니다. 구독이 종료되어 인스턴스가 오프라인으로 전환되었습니다. 데이터는 보관되며, 계정 페이지에서 다시 구독하면 다시 서비스됩니다.\n\n카드사에 따라 영업일 기준 3~7일 안에 환불됩니다."
+                "주문 {order_id}의 {amount}을 카드로 환불했습니다. 구독이 해지되어 더 이상 결제되지 않습니다. 인스턴스는 {ends_on}까지 계속 운영된 뒤 오프라인으로 전환되며, 데이터는 보관됩니다. 계정 페이지에서 다시 구독하면 계속 서비스됩니다.\n\n카드사에 따라 영업일 기준 3~7일 안에 환불됩니다."
             ),
         ),
-        (Locale::Ko, false) => (
+        (Locale::Ko, None) => (
             format!("은하공간 환불 안내: {amount}"),
             format!(
                 "주문 {order_id}의 {amount}을 카드로 환불했습니다.\n\n카드사에 따라 영업일 기준 3~7일 안에 환불됩니다."

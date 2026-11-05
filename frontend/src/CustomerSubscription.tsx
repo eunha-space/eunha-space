@@ -164,12 +164,17 @@ export function SubscriptionCard(
 
   const subscription = billing.subscription;
   const status = subscription?.status;
-  const subscribed = status === "active" || status === "past_due";
+  const inGrace = subscription?.refund_grace_until != null;
+  const subscribed = (status === "active" || status === "past_due") && !inGrace;
   const pending = billing.payments.some((payment) => payment.status === "pending");
   const amount = subscription && subscribed ? subscription.amount : billing.amount;
 
   let description: string;
-  if (status === "active" && subscription?.cancel_at_period_end) {
+  if (inGrace && !pending) {
+    description = t(
+      "Your payment was refunded. Your instances keep running until the date below, then go offline with their data kept. Subscribe again to keep them running.",
+    );
+  } else if (status === "active" && subscription?.cancel_at_period_end) {
     description = t(
       "Your subscription is cancelled. Your instances keep running until the end of the paid period, then go offline with their data kept.",
     );
@@ -229,7 +234,9 @@ export function SubscriptionCard(
               <dt className="text-muted-foreground text-xs">
                 {subscription.cancel_at_period_end ? t("Ends on") : t("Renews on")}
               </dt>
-              <dd className="font-medium">{day(subscription.current_period_end)}</dd>
+              <dd className="font-medium">
+                {day(subscription.refund_grace_until ?? subscription.current_period_end)}
+              </dd>
             </div>
           )}
           {status === "past_due" && subscription?.next_attempt_at && (
@@ -239,7 +246,8 @@ export function SubscriptionCard(
             </div>
           )}
         </dl>
-        {subscription?.last_error && (status === "past_due" || status === "incomplete") &&
+        {subscription?.last_error &&
+          (status === "past_due" || status === "incomplete" || inGrace) &&
           !pending && (
           <Alert variant="destructive">
             <CircleAlert />
@@ -278,7 +286,8 @@ export function SubscriptionCard(
               {t("Cancel subscription")}
             </Button>
           )}
-          {status === "active" && subscription?.cancel_at_period_end && (
+          {subscribed && status === "active" && subscription?.cancel_at_period_end &&
+            subscription.has_card && (
             <Button disabled={busy} onClick={() => void change("/resume")}>
               {t("Keep my subscription")}
             </Button>
@@ -368,7 +377,7 @@ export function SubscriptionCard(
               </AlertDialogTitle>
               <AlertDialogDescription>
                 {t(
-                  "The full amount goes back to your card. Refunding the period you are in ends your subscription now and takes your instances offline. Their data is kept, and subscribing again serves them again.",
+                  "The full amount goes back to your card and your subscription is cancelled. Refunding the period you are in leaves your instances running for four more days, then they go offline. Their data is kept, and subscribing again serves them again.",
                 )}
               </AlertDialogDescription>
             </AlertDialogHeader>

@@ -41,6 +41,10 @@ use crate::{
 /// it was paying for ended.
 const RETRY_AFTER_DECLINE: [&str; 3] = ["1 day", "2 days", "4 days"];
 
+/// How long instances keep running after a refund took back the paid time
+/// they were running on.
+const REFUND_GRACE: &str = "4 days";
+
 /// How long to wait before asking about a charge whose outcome is not known.
 const RETRY_UNKNOWN: &str = "5 minutes";
 
@@ -571,6 +575,8 @@ pub(crate) struct SubscriptionView {
     #[serde(with = "time::serde::rfc3339::option")]
     next_attempt_at: Option<OffsetDateTime>,
     last_error: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    refund_grace_until: Option<OffsetDateTime>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -606,7 +612,7 @@ pub(crate) struct BillingView {
 
 pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiError> {
     let subscription = sqlx::query_as::<_, SubscriptionView>(
-        "SELECT status,amount,card_company,card_number,billing_key IS NOT NULL has_card,current_period_end,cancel_at_period_end,next_attempt_at,last_error FROM subscriptions WHERE user_id=$1",
+        "SELECT status,amount,card_company,card_number,billing_key IS NOT NULL has_card,current_period_end,cancel_at_period_end,next_attempt_at,last_error,refund_grace_until FROM subscriptions WHERE user_id=$1",
     )
     .bind(user_id)
     .fetch_optional(&s.db)
@@ -718,8 +724,8 @@ pub(crate) async fn authorize(
         })
         .map(|company| company.chars().take(32).collect::<String>());
     let mut tx = s.db.begin().await?;
-    let (status, had_key) = sqlx::query_as::<_, (String, bool)>(
-        "SELECT status,billing_key IS NOT NULL FROM subscriptions WHERE user_id=$1 FOR UPDATE",
+    let (status, had_key, in_grace) = sqlx::query_as::<_, (String, bool, bool)>(
+        "SELECT status,billing_key IS NOT NULL,refund_grace_until IS NOT NULL FROM subscriptions WHERE user_id=$1 FOR UPDATE",
     )
     .bind(user_id)
     .fetch_one(&mut *tx)
@@ -755,6 +761,19 @@ pub(crate) async fn authorize(
     .await?
     .is_some();
     let detail = match status.as_str() {
+        // The refund took the paid time back, so this starts a new subscription
+        // today too. The deadline stays until a charge is paid: the instances
+        // are still running, and a declined card must not keep them so.
+        "active" if in_grace => {
+            if !pending {
+                sqlx::query("UPDATE subscriptions SET amount=$2,anchor_at=now(),periods_paid=0,failed_attempts=0,cancel_at_period_end=false,next_attempt_at=now() WHERE user_id=$1")
+                    .bind(user_id)
+                    .bind(billing.amount)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            "subscribe"
+        }
         // Nothing is paid for, so this starts a new subscription today, at
         // today's price. A charge already in flight keeps the period it was
         // for.
@@ -844,7 +863,7 @@ pub(crate) async fn resume(
     let (user_id, _) = customer(&headers, &s.db).await?;
     let mut tx = s.db.begin().await?;
     let resumed = sqlx::query_scalar::<_, bool>(
-        "UPDATE subscriptions SET cancel_at_period_end=false,updated_at=now() WHERE user_id=$1 AND status='active' AND cancel_at_period_end RETURNING true",
+        "UPDATE subscriptions SET cancel_at_period_end=false,updated_at=now() WHERE user_id=$1 AND status='active' AND cancel_at_period_end AND billing_key IS NOT NULL AND refund_grace_until IS NULL RETURNING true",
     )
     .bind(user_id)
     .fetch_optional(&mut *tx)
@@ -1145,7 +1164,7 @@ async fn settle(s: &Shared, due: &Due, pending: &PendingPayment, outcome: Charge
                 .await?;
             // A subscription cancelled while this charge was in flight is not
             // renewed again, but the period it paid for is still served.
-            sqlx::query("UPDATE subscriptions SET status='active',periods_paid=$2+1,current_period_end=$3,next_attempt_at=$3,failed_attempts=0,last_error=NULL,lease_until=NULL,updated_at=now() WHERE user_id=$1")
+            sqlx::query("UPDATE subscriptions SET status='active',periods_paid=$2+1,current_period_end=$3,next_attempt_at=$3,failed_attempts=0,last_error=NULL,lease_until=NULL,refund_grace_until=NULL,updated_at=now() WHERE user_id=$1")
                 .bind(due.user_id)
                 .bind(pending.period)
                 .bind(pending.period_end)
@@ -1180,6 +1199,20 @@ async fn settle(s: &Shared, due: &Due, pending: &PendingPayment, outcome: Charge
                 Some(&message),
             )
             .await?;
+            // A card tried during a refund's grace does not earn retries: the
+            // deadline stands, and the customer can try another card until then.
+            let in_grace = sqlx::query_scalar::<_, bool>(
+                "UPDATE subscriptions SET cancel_at_period_end=true,next_attempt_at=refund_grace_until,last_error=$2,lease_until=NULL,updated_at=now() WHERE user_id=$1 AND refund_grace_until IS NOT NULL RETURNING true",
+            )
+            .bind(due.user_id)
+            .bind(&message)
+            .fetch_optional(&mut *tx)
+            .await?
+            .is_some();
+            if in_grace {
+                tx.commit().await?;
+                return Ok(());
+            }
             if due.status == "incomplete" {
                 // Nothing was ever paid for, so there is nothing to retry: the
                 // customer is in the billing window and can try another card.
@@ -1226,6 +1259,37 @@ async fn settle(s: &Shared, due: &Due, pending: &PendingPayment, outcome: Charge
     Ok(())
 }
 
+/// Stop renewing a running subscription because a payment was refunded. Its
+/// card is retired now. With paid time left it ends with that time; with none,
+/// because the refund took it back or a renewal was already declined, it ends
+/// after `REFUND_GRACE`. Returns the day it ends, in Korean time.
+pub(crate) async fn stop_renewing_after_refund(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: Uuid,
+    took_back_paid_time: bool,
+) -> Result<String, sqlx::Error> {
+    sqlx::query("INSERT INTO retired_billing_keys(user_id,billing_key,toss_mid) SELECT user_id,billing_key,toss_mid FROM subscriptions WHERE user_id=$1 AND billing_key IS NOT NULL")
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await?;
+    // A later refund during the grace does not move its deadline.
+    sqlx::query(&format!(
+        "UPDATE subscriptions SET refund_grace_until=coalesce(refund_grace_until,now()+interval '{REFUND_GRACE}') WHERE user_id=$1 AND ($2 OR current_period_end<=now())"
+    ))
+    .bind(user_id)
+    .bind(took_back_paid_time)
+    .execute(&mut **tx)
+    .await?;
+    // The MID stays: another of this subscription's payments may be refunded
+    // yet, and only the MID that took it can give it back.
+    sqlx::query_scalar::<_, String>(
+        "UPDATE subscriptions SET status='active',billing_key=NULL,cancel_at_period_end=true,failed_attempts=0,last_error=NULL,next_attempt_at=coalesce(refund_grace_until,current_period_end),updated_at=now() WHERE user_id=$1 RETURNING to_char(coalesce(refund_grace_until,current_period_end) AT TIME ZONE 'Asia/Seoul','YYYY-MM-DD')",
+    )
+    .bind(user_id)
+    .fetch_one(&mut **tx)
+    .await
+}
+
 /// End a subscription and take its instances offline. Their data is kept and
 /// no purge is scheduled: nobody confirmed a deletion. Returns the tenants
 /// whose provisioning has to be woken to notice.
@@ -1238,7 +1302,7 @@ pub(crate) async fn end_subscription(
         .bind(user_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("UPDATE subscriptions SET status=$2,billing_key=NULL,toss_mid=NULL,next_attempt_at=NULL,cancel_at_period_end=false,lease_until=NULL,updated_at=now() WHERE user_id=$1")
+    sqlx::query("UPDATE subscriptions SET status=$2,billing_key=NULL,toss_mid=NULL,next_attempt_at=NULL,cancel_at_period_end=false,lease_until=NULL,refund_grace_until=NULL,updated_at=now() WHERE user_id=$1")
         .bind(user_id)
         .bind(status)
         .execute(&mut **tx)

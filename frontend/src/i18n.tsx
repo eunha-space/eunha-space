@@ -181,6 +181,8 @@ const ko: Record<string, string> = {
     "카드를 등록하지 못했습니다.",
   "Your subscription is cancelled. Your instances keep running until the end of the paid period, then go offline with their data kept.":
     "구독이 해지되었습니다. 결제한 기간이 끝날 때까지 인스턴스가 계속 운영되며, 이후 데이터는 보관된 채 오프라인으로 전환됩니다.",
+  "Your payment was refunded. Your instances keep running until the date below, then go offline with their data kept. Subscribe again to keep them running.":
+    "결제가 환불되었습니다. 아래 날짜까지 인스턴스가 계속 운영된 뒤 오프라인으로 전환되며, 데이터는 보관됩니다. 계속 이용하려면 다시 구독하세요.",
   "Your card is charged automatically each month.":
     "매달 등록된 카드로 자동 결제됩니다.",
   "Your last payment was declined. We'll try again, and your instances keep running meanwhile. Use another card to pay now.":
@@ -263,8 +265,8 @@ const ko: Record<string, string> = {
     "환불 거절",
   "Refund this payment?":
     "이 결제를 환불할까요?",
-  "The full amount goes back to your card. Refunding the period you are in ends your subscription now and takes your instances offline. Their data is kept, and subscribing again serves them again.":
-    "전액이 카드로 환불됩니다. 지금 이용 중인 기간을 환불하면 구독이 바로 종료되고 인스턴스가 오프라인으로 전환됩니다. 데이터는 보관되며, 다시 구독하면 다시 서비스됩니다.",
+  "The full amount goes back to your card and your subscription is cancelled. Refunding the period you are in leaves your instances running for four more days, then they go offline. Their data is kept, and subscribing again serves them again.":
+    "전액이 카드로 환불되고 구독이 해지됩니다. 지금 이용 중인 기간을 환불하면 인스턴스는 4일 더 운영된 뒤 오프라인으로 전환됩니다. 데이터는 보관되며, 다시 구독하면 다시 서비스됩니다.",
   "This payment can no longer be refunded.":
     "이 결제는 더 이상 환불할 수 없습니다.",
   "A payment is being confirmed. Try again shortly.":

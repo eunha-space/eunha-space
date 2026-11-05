@@ -23,8 +23,8 @@ use uuid::Uuid;
 use crate::{
     ApiError, Shared,
     billing::{
-        self, BillingView, TossError, customer_message, end_subscription, merchant_setup_error,
-        mid_problem, notify, record, urlencode, view, wake,
+        self, BillingView, TossError, customer_message, merchant_setup_error, mid_problem, notify,
+        record, urlencode, view,
     },
     customer,
 };
@@ -175,8 +175,8 @@ async fn cancel_payment(s: &Shared, payment_key: &str) -> Cancel {
     cancel_outcome(status, &body)
 }
 
-/// Ask for a payment back. Allowed within `REFUND_WINDOW` of paying; it ends
-/// the subscription when it gives back the period being served.
+/// Ask for a payment back. Allowed within `REFUND_WINDOW` of paying; it stops
+/// the subscription renewing.
 pub(crate) async fn request_refund(
     State(s): State<Shared>,
     headers: HeaderMap,
@@ -364,7 +364,8 @@ async fn withdraw_refund(s: &Shared, due: &DueRefund, reason: &str) -> anyhow::R
 
 /// Record what TossPayments has given back of a payment, from its own record:
 /// a refund asked for here, or one made in the TossPayments dashboard. A full
-/// refund of the period being served ends the subscription.
+/// refund stops the subscription renewing, and one of the period being served
+/// also takes back the paid time.
 async fn apply_cancellation(
     s: &Shared,
     order_id: &str,
@@ -372,8 +373,8 @@ async fn apply_cancellation(
 ) -> anyhow::Result<()> {
     let refunded = payment.refunded();
     let mut tx = s.db.begin().await?;
-    let Some((user_id, amount, previously, ends_period, _email)) = sqlx::query_as::<_, (Uuid, i64, i64, bool, Option<String>)>(
-        "SELECT p.user_id,p.amount,p.refunded_amount,(p.period_end=s.current_period_end AND s.status IN ('active','past_due')),u.email FROM subscription_payments p JOIN subscriptions s ON s.user_id=p.user_id JOIN users u ON u.id=p.user_id WHERE p.order_id=$1 AND p.status IN ('paid','refunded') FOR UPDATE OF p,s",
+    let Some((user_id, amount, previously, current_period, running)) = sqlx::query_as::<_, (Uuid, i64, i64, bool, bool)>(
+        "SELECT p.user_id,p.amount,p.refunded_amount,p.period_end=s.current_period_end,s.status IN ('active','past_due') FROM subscription_payments p JOIN subscriptions s ON s.user_id=p.user_id JOIN users u ON u.id=p.user_id WHERE p.order_id=$1 AND p.status IN ('paid','refunded') FOR UPDATE OF p,s",
     )
     .bind(order_id)
     .fetch_optional(&mut *tx)
@@ -400,15 +401,13 @@ async fn apply_cancellation(
         None,
     )
     .await?;
-    let ends = full && ends_period;
-    let tenants = if ends {
-        end_subscription(&mut tx, user_id, "canceled").await?
+    let ends_on = if running {
+        Some(billing::stop_renewing_after_refund(&mut tx, user_id, full && current_period).await?)
     } else {
-        Vec::new()
+        None
     };
-    crate::billing_mail::refund(&mut tx, user_id, order_id, refunded, ends).await?;
+    crate::billing_mail::refund(&mut tx, user_id, order_id, refunded, ends_on.as_deref()).await?;
     tx.commit().await?;
-    wake(s, &tenants).await;
     Ok(())
 }
 
