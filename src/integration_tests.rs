@@ -1748,7 +1748,6 @@ fn billed_state(pool: PgPool, toss_base: &str) -> Shared {
             "test_ck".into(),
             "test_sk_secret".into(),
             toss_base.into(),
-            Some(9900),
             "eunha space".into(),
             Some("tvivarepublica".into()),
         )
@@ -1772,7 +1771,16 @@ async fn billed_customer(pool: &PgPool) -> (Uuid, HeaderMap) {
     (user_id, headers)
 }
 
+/// The plan the billing tests subscribe to, unless they choose another.
+async fn offer_a_plan(pool: &PgPool) {
+    sqlx::query("INSERT INTO plans(name_en,name_ko,amount) SELECT 'Standard','기본',9900 WHERE NOT EXISTS(SELECT 1 FROM plans WHERE amount=9900)")
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 async fn subscribe(state: &Shared, headers: &HeaderMap) -> serde_json::Value {
+    offer_a_plan(&state.db).await;
     let Json(checkout) = billing::checkout(State(state.clone()), headers.clone(), None)
         .await
         .unwrap();
@@ -1827,6 +1835,7 @@ async fn a_charge_with_no_answer_is_asked_again_under_the_same_key(pool: PgPool)
     tx.rollback().await.unwrap();
 
     // A redirect carrying somebody else's customer key registers nothing.
+    offer_a_plan(&state.db).await;
     let _ = billing::checkout(State(state.clone()), headers.clone(), None)
         .await
         .unwrap();
@@ -3265,21 +3274,18 @@ async fn refunding_the_period_also_refunds_its_upgrade(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
-async fn checkout_subscribes_to_the_plan_chosen_and_an_old_subscription_gets_the_initial_plan(
-    pool: PgPool,
-) {
+async fn checkout_subscribes_to_the_plan_chosen(pool: PgPool) {
     let (_toss, base) = toss_stand_in().await;
     let state = billed_state(pool.clone(), &base);
     let (user_id, headers) = billed_customer(&pool).await;
-    sqlx::query("INSERT INTO subscriptions(user_id,customer_key,amount,status) VALUES($1,$2,5900,'canceled')")
-        .bind(user_id)
-        .bind(Uuid::new_v4())
-        .execute(&pool)
-        .await
-        .unwrap();
-    billing::ensure_initial_plan(&state).await.unwrap();
-    assert!(on_plan(&pool, user_id).await.0.is_some());
-    assert_eq!(on_plan(&pool, user_id).await.1, 5900);
+    assert_eq!(
+        billing::checkout(State(state.clone()), headers.clone(), None)
+            .await
+            .err()
+            .unwrap()
+            .0,
+        StatusCode::CONFLICT
+    );
 
     let chosen = plan(&pool, 19900, None).await;
     let Json(checkout) = billing::checkout(
@@ -3307,4 +3313,33 @@ async fn checkout_subscribes_to_the_plan_chosen_and_an_old_subscription_gets_the
     let view = serde_json::to_value(view).unwrap();
     assert_eq!(view["payments"][0]["amount"], 19900);
     assert_eq!(on_plan(&pool, user_id).await, (Some(chosen), 19900, None));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn the_migration_puts_running_subscriptions_on_a_plan_at_their_price(pool: PgPool) {
+    let (user_id, _) = billed_customer(&pool).await;
+    sqlx::query(
+        "INSERT INTO subscriptions(user_id,customer_key,amount,status) VALUES($1,$2,5900,'active')",
+    )
+    .bind(user_id)
+    .bind(Uuid::new_v4())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let migration = sqlx::migrate!("./migrations")
+        .iter()
+        .find(|m| m.version == 65)
+        .unwrap()
+        .sql
+        .to_string();
+    sqlx::raw_sql(&migration).execute(&pool).await.unwrap();
+    let (plan_id, amount, _) = on_plan(&pool, user_id).await;
+    assert_eq!(amount, 5900);
+    let plan_amount: i64 = sqlx::query_scalar("SELECT amount FROM plans WHERE id=$1 AND active")
+        .bind(plan_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(plan_amount, 5900);
 }

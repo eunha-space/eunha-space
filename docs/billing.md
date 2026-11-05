@@ -13,7 +13,6 @@ creating an instance needs no subscription.
 TOSSPAYMENTS_CLIENT_KEY=live_ck_...        # public; handed to the billing window
 TOSSPAYMENTS_SECRET_KEY=live_sk_...        # process-only
 TOSSPAYMENTS_MID=...                       # the secret key's merchant ID; required with a live key
-EUNHA_SPACE_SUBSCRIPTION_AMOUNT=9900       # optional; the price of the first plan if there are none
 EUNHA_SPACE_SUBSCRIPTION_NAME='은하공간 월간 구독'   # optional order name
 TOSSPAYMENTS_API_BASE=https://api.tosspayments.com    # optional; a stand-in for tests
 ```
@@ -116,9 +115,7 @@ account's limit.
 A plan's price never changes, because subscriptions and upgrade charges are
 worked out from it. To change a price, add a plan and stop offering the old one.
 Those on a retired plan stay on it, at their price, until they move.
-Without any plans, `EUNHA_SPACE_SUBSCRIPTION_AMOUNT` creates a "Standard" plan
-at that price and puts existing subscriptions on it. Without that variable or a
-plan, customers cannot subscribe.
+Without a plan on offer, customers cannot subscribe.
 
 Plans are monthly only: a period is always one month.
 

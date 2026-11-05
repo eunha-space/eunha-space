@@ -96,9 +96,6 @@ pub(crate) struct Config {
     /// `https://api.tosspayments.com` unless `TOSSPAYMENTS_API_BASE` points at
     /// a stand-in, which is how charging is tested.
     pub(crate) api_base: String,
-    /// The price of the plan created when there are none yet, in won, so that
-    /// an instance configured before plans keeps working.
-    pub initial_amount: Option<i64>,
     order_name: String,
     /// The merchant ID (MID) the secret key belongs to. A billing key can only
     /// be charged through the MID that issued it, so a subscription whose key
@@ -122,21 +119,6 @@ impl Config {
             !client_key.trim().is_empty() && !secret_key.trim().is_empty(),
             "TossPayments keys must not be empty"
         );
-        let initial_amount = std::env::var("EUNHA_SPACE_SUBSCRIPTION_AMOUNT")
-            .ok()
-            .map(|amount| {
-                amount
-                    .trim()
-                    .parse::<i64>()
-                    .ok()
-                    .filter(|amount| *amount > 0)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "EUNHA_SPACE_SUBSCRIPTION_AMOUNT must be a positive number of won"
-                        )
-                    })
-            })
-            .transpose()?;
         let mid = std::env::var("TOSSPAYMENTS_MID")
             .ok()
             .map(|mid| mid.trim().to_owned())
@@ -150,7 +132,6 @@ impl Config {
             secret_key.trim().into(),
             std::env::var("TOSSPAYMENTS_API_BASE")
                 .unwrap_or_else(|_| "https://api.tosspayments.com".into()),
-            initial_amount,
             std::env::var("EUNHA_SPACE_SUBSCRIPTION_NAME")
                 .unwrap_or_else(|_| "은하공간 월간 구독".into()),
             mid,
@@ -161,7 +142,6 @@ impl Config {
         client_key: String,
         secret_key: String,
         api_base: String,
-        initial_amount: Option<i64>,
         order_name: String,
         mid: Option<String>,
     ) -> Result<Self> {
@@ -169,7 +149,6 @@ impl Config {
             client_key,
             secret_key,
             api_base: api_base.trim_end_matches('/').into(),
-            initial_amount,
             order_name: order_name.chars().take(100).collect(),
             mid,
             client: reqwest::Client::builder()
@@ -636,7 +615,6 @@ pub(crate) struct BillingView {
 }
 
 pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiError> {
-    ensure_initial_plan(s).await?;
     let subscription = sqlx::query_as::<_, SubscriptionView>(
         "SELECT status,amount,plan_id,pending_plan_id,card_company,card_number,billing_key IS NOT NULL has_card,current_period_end,cancel_at_period_end,next_attempt_at,last_error,refund_grace_until,anchor_at+make_interval(months => GREATEST(periods_paid-1,0)) period_start FROM subscriptions WHERE user_id=$1",
     )
@@ -681,37 +659,9 @@ pub(crate) async fn get(
     Ok(Json(view(&s, user_id).await?))
 }
 
-/// The id of the plan made for an instance configured with one price. It is
-/// fixed so that two control planes starting together make only one.
-const INITIAL_PLAN: Uuid = Uuid::from_u128(1);
-
 /// Below this TossPayments will not charge a card, and it is not worth doing:
 /// an upgrade this close to renewal costs nothing.
 const SMALLEST_CHARGE: i64 = 100;
-
-/// An instance that has a price but no plans yet gets one plan at that price,
-/// and any subscription from before plans is put on it.
-pub(crate) async fn ensure_initial_plan(s: &Shared) -> Result<(), sqlx::Error> {
-    let Some(amount) = s
-        .billing
-        .as_ref()
-        .and_then(|billing| billing.initial_amount)
-    else {
-        return Ok(());
-    };
-    let created = sqlx::query("INSERT INTO plans(id,name_en,name_ko,amount) SELECT $1,'Standard','기본',$2 WHERE NOT EXISTS(SELECT 1 FROM plans) ON CONFLICT (id) DO NOTHING")
-        .bind(INITIAL_PLAN)
-        .bind(amount)
-        .execute(&s.db)
-        .await?;
-    if created.rows_affected() > 0 {
-        sqlx::query("UPDATE subscriptions SET plan_id=$1 WHERE plan_id IS NULL")
-            .bind(INITIAL_PLAN)
-            .execute(&s.db)
-            .await?;
-    }
-    Ok(())
-}
 
 /// The difference between two monthly prices for what is left of a period,
 /// rounded up to the won, or nothing when that is too little to charge.
@@ -751,7 +701,6 @@ pub(crate) async fn checkout(
 ) -> Result<Json<Checkout>, ApiError> {
     let (user_id, _) = customer(&headers, &s.db).await?;
     let billing = billing_config(&s)?;
-    ensure_initial_plan(&s).await?;
     let running = sqlx::query_as::<_, (Uuid, bool)>(
         "SELECT customer_key,(status IN ('active','past_due') AND refund_grace_until IS NULL) OR EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=s.user_id AND p.status='pending') FROM subscriptions s WHERE user_id=$1",
     )
@@ -1027,7 +976,6 @@ pub(crate) async fn change_plan(
 ) -> Result<Json<BillingView>, ApiError> {
     let (user_id, _) = customer(&headers, &s.db).await?;
     billing_config(&s)?;
-    ensure_initial_plan(&s).await?;
     let mut tx = s.db.begin().await?;
     let current = sqlx::query_as::<_, (String, i64, Option<Uuid>, bool, bool, Option<OffsetDateTime>, Option<OffsetDateTime>)>(
         "SELECT status,amount,plan_id,cancel_at_period_end,billing_key IS NOT NULL,anchor_at+make_interval(months => GREATEST(periods_paid-1,0)),current_period_end FROM subscriptions WHERE user_id=$1 FOR UPDATE",
@@ -1861,7 +1809,6 @@ mod tests {
             "ck".into(),
             "test_sk_secret".into(),
             "https://toss.example/".into(),
-            Some(9900),
             "plan".into(),
             None,
         )

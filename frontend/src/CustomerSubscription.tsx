@@ -346,7 +346,7 @@ export function SubscriptionCard(
         )}
         <div className="flex flex-wrap gap-2">
           {!subscribed && !pending && (
-            <Button disabled={busy} onClick={() => void openBillingWindow()}>
+            <Button disabled={busy || !chosenPlan} onClick={() => void openBillingWindow()}>
               {busy ? <Spinner label={t("Please wait…")} /> : <CreditCard />}
               {t("Subscribe with a card")}
             </Button>

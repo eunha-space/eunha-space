@@ -122,7 +122,6 @@ pub(crate) async fn overview(
     )
     .fetch_all(&s.db)
     .await?;
-    billing::ensure_initial_plan(&s).await?;
     let plans = sqlx::query_as::<_, Plan>(&format!(
         "SELECT {PLAN_COLUMNS} FROM plans ORDER BY active DESC,amount,created_at"
     ))
