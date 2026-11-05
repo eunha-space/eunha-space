@@ -135,7 +135,7 @@ export function CustomerApp() {
     // Signing out of a masquerade returns to the administrator's session.
     const masquerading = customer?.masquerading_admin;
     await api("/customer/session", { method: "DELETE" });
-    location.assign(masquerading ? "/admin/billing" : "/");
+    location.assign(masquerading ? "/admin/users" : "/");
   }
   const activeInstances = tenants.filter(countsTowardInstanceLimit).length;
   const reachedInstanceLimit = customer?.instance_limit != null &&

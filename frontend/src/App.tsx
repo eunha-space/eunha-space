@@ -8,6 +8,7 @@ import {
   RefreshCw,
   Rocket,
   Server,
+  UsersRound,
   X,
 } from "lucide-react";
 import {
@@ -26,6 +27,7 @@ import { Instances } from "@/Instances";
 import { Operations } from "@/Operations";
 import { Releases } from "@/Releases";
 import { Tenants } from "@/Tenants";
+import { Users } from "@/Users";
 import { pathFor, useRoute, type View } from "@/router";
 import { Alert, AlertAction, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -203,6 +205,7 @@ export function App() {
     { id: "usage", label: "Resource usage", icon: Activity },
     { id: "instances", label: "Instances", icon: HardDrive },
     { id: "releases", label: "Releases", icon: Rocket },
+    { id: "users", label: "Users", icon: UsersRound },
     { id: "billing", label: "Billing", icon: CreditCard },
     { id: "operations", label: "Operations", icon: Activity },
   ];
@@ -346,6 +349,7 @@ export function App() {
           {view === "releases" && (
             <Releases runtimes={runtimes} busy={busy} act={act} />
           )}
+          {view === "users" && <Users />}
           {view === "billing" && <Billing />}
           {view === "operations" && <Operations operations={operations} />}
         </main>

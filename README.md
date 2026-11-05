@@ -221,7 +221,7 @@ their data, and schedules no purge. Subscribing again serves them again. See
 
 ## Signing in as a customer
 
-**Sign in as** on a customer's account in `/admin/billing` shows the customer
+`/admin/users` lists every account. **Sign in as** on a customer shows the customer
 pages as that customer sees them, for an hour. Their password and billing stay
 theirs, and the operations log records the masquerade. See
 [docs/masquerade.md](docs/masquerade.md).

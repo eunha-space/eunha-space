@@ -1,9 +1,9 @@
 # Signing in as a customer
 
 An administrator can see the customer pages as a customer sees them: the
-console's Billing section has a **Sign in as** button on each customer's
-account. It is for support, such as following what a customer reports on
-their instance page.
+console's Users section (`/admin/users`), which lists every account apart from
+billing, has a **Sign in as** button on each verified customer. It is for
+support, such as following what a customer reports on their instance page.
 
 ## The session
 

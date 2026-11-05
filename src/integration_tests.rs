@@ -3678,6 +3678,13 @@ async fn an_administrator_signs_in_as_a_customer_and_comes_back(pool: PgPool) {
             })
             .collect()
     }
+    // The console lists every account, apart from billing.
+    let Json(users) = users::list(State(shared.clone()), admin.clone())
+        .await
+        .unwrap();
+    let users = serde_json::to_value(users).unwrap();
+    assert_eq!(users.as_array().unwrap().len(), 2);
+    assert!(users.to_string().contains("customer@example.com"));
     let started = masquerade::start(State(shared.clone()), admin.clone(), Path(customer_id))
         .await
         .unwrap();
@@ -3702,6 +3709,13 @@ async fn an_administrator_signs_in_as_a_customer_and_comes_back(pool: PgPool) {
     // The console is out of reach, and so is masquerading further.
     assert_eq!(
         admin_user(&masked, &pool).await.unwrap_err().0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        users::list(State(shared.clone()), masked.clone())
+            .await
+            .unwrap_err()
+            .0,
         StatusCode::FORBIDDEN
     );
     assert_eq!(

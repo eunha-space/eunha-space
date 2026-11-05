@@ -54,6 +54,7 @@ mod service_usage;
 mod smtp;
 mod usage;
 mod usage_range;
+mod users;
 
 // SQLx embeds the complete migration set in this binary at compile time.
 
@@ -975,6 +976,7 @@ async fn main() -> Result<()> {
         )
         .route("/operations/{id}/events", get(operation_events))
         .route("/operations", get(operations))
+        .route("/users", get(users::list))
         .route("/users/{id}/masquerade", post(masquerade::start))
         .route("/billing", get(billing_admin::overview))
         .route("/billing/plans", post(billing_admin::create_plan))
