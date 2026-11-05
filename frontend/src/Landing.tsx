@@ -251,7 +251,7 @@ function Section(
 
 const OTHER_SERVERS = [
   { x: 92, y: 62, name: "mastodon.social" },
-  { x: 346, y: 84, name: "pixelfed.social" },
+  { x: 346, y: 84, name: "hackers.pub" },
   { x: 356, y: 288, name: "misskey.io" },
   { x: 82, y: 276, name: "" },
   { x: 214, y: 32, name: "" },
