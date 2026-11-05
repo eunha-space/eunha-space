@@ -28,7 +28,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
-use time::OffsetDateTime;
+use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
 
 use crate::{
@@ -689,6 +689,43 @@ pub(crate) async fn public_plans(
 /// an upgrade this close to renewal costs nothing.
 const SMALLEST_CHARGE: i64 = 100;
 
+/// An order id is read out over the phone and shown in one line of a narrow
+/// payment history, so it is digits only: the payment's date in Korea, then
+/// eight random digits, as in `2026-11-05-0421-7730`. TossPayments takes this
+/// shape, and the hyphens stop a spreadsheet reading it as a number.
+fn order_id_at(now: OffsetDateTime, random: u32) -> String {
+    let day = now.to_offset(UtcOffset::from_whole_seconds(9 * 3600).expect("a valid offset"));
+    format!(
+        "{:04}-{:02}-{:02}-{:04}-{:04}",
+        day.year(),
+        u8::from(day.month()),
+        day.day(),
+        random / 10_000 % 10_000,
+        random % 10_000,
+    )
+}
+
+/// An order id no payment has used. TossPayments never takes one twice. Two
+/// charges drawing the same number at the same moment are stopped by the
+/// primary key before either reaches TossPayments, and the charge is tried
+/// again.
+async fn new_order_id(tx: &mut sqlx::PgConnection) -> sqlx::Result<String> {
+    loop {
+        // The folding bias is negligible with 122 random bits to fold.
+        let random = (Uuid::new_v4().as_u128() % 100_000_000) as u32;
+        let order_id = order_id_at(OffsetDateTime::now_utc(), random);
+        let taken: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM subscription_payments WHERE order_id=$1)",
+        )
+        .bind(&order_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !taken {
+            return Ok(order_id);
+        }
+    }
+}
+
 /// The difference between two monthly prices for what is left of a period,
 /// rounded up to the won, or nothing when that is too little to charge.
 pub(crate) fn upgrade_charge(
@@ -1107,7 +1144,7 @@ pub(crate) async fn change_plan(
             "Add a card before upgrading.".into(),
         ));
     }
-    let order_id = format!("eunha-{}", Uuid::new_v4().simple());
+    let order_id = new_order_id(&mut tx).await?;
     sqlx::query("INSERT INTO subscription_payments(order_id,user_id,amount,period,period_start,period_end,kind,plan_id,from_plan_id,from_amount,toss_mid) SELECT $1,user_id,$2,GREATEST(periods_paid-1,0),now(),current_period_end,'upgrade',$3,plan_id,amount,toss_mid FROM subscriptions WHERE user_id=$4")
         .bind(&order_id)
         .bind(charge)
@@ -1323,10 +1360,11 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
                 .bind(due.user_id)
                 .execute(&mut *tx)
                 .await?;
+            let order_id = new_order_id(&mut tx).await?;
             sqlx::query_as::<_, PendingPayment>(
                 "INSERT INTO subscription_payments(order_id,user_id,amount,period,period_start,period_end,plan_id,toss_mid) SELECT $1,user_id,amount,periods_paid,anchor_at+make_interval(months => periods_paid),anchor_at+make_interval(months => periods_paid+1),plan_id,toss_mid FROM subscriptions WHERE user_id=$2 RETURNING order_id,amount,kind,plan_id,period,period_end,charge_attempted_at,false abandonable",
             )
-            .bind(format!("eunha-{}", Uuid::new_v4().simple()))
+            .bind(order_id)
             .bind(due.user_id)
             .fetch_one(&mut *tx)
             .await?
@@ -1389,10 +1427,11 @@ async fn replace_unrecorded_order(
         .bind(order_id)
         .execute(&mut *tx)
         .await?;
+    let next_order_id = new_order_id(&mut tx).await?;
     let pending = sqlx::query_as::<_, PendingPayment>(
         "INSERT INTO subscription_payments(order_id,user_id,amount,period,period_start,period_end,kind,plan_id,from_plan_id,from_amount,toss_mid) SELECT $1,user_id,amount,period,period_start,period_end,kind,plan_id,from_plan_id,from_amount,toss_mid FROM subscription_payments WHERE order_id=$2 RETURNING order_id,amount,kind,plan_id,period,period_end,charge_attempted_at,false abandonable",
     )
-    .bind(format!("eunha-{}", Uuid::new_v4().simple()))
+    .bind(next_order_id)
     .bind(order_id)
     .fetch_one(&mut *tx)
     .await?;
@@ -1714,6 +1753,21 @@ pub(crate) async fn notify(s: &Shared, user_id: Uuid, notice: Notice<'_>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn order_ids_read_as_the_day_in_korea_and_eight_digits() {
+        let at = |day, hour| {
+            time::Date::from_calendar_date(2026, time::Month::November, day)
+                .unwrap()
+                .with_hms(hour, 30, 0)
+                .unwrap()
+                .assume_utc()
+        };
+        // Past midnight in Korea, still the day before in UTC.
+        assert_eq!(order_id_at(at(4, 15), 4_217_730), "2026-11-05-0421-7730");
+        assert_eq!(order_id_at(at(4, 14), 99_999_999), "2026-11-04-9999-9999");
+        assert_eq!(order_id_at(at(4, 14), 0), "2026-11-04-0000-0000");
+    }
 
     #[test]
     fn an_approval_counts_only_for_its_own_order_and_amount() {

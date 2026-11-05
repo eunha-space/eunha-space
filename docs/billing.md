@@ -63,6 +63,10 @@ the 31st after them. The renewer runs with the lifecycle jobs, which
 `CONTROL_JOBS_DISABLED` turns off, and checks every 30 seconds for subscriptions
 that are due.
 
+An order id is the payment's date in Korea and eight random digits, as in
+`2026-11-05-0421-7730`, so it can be read out over the phone. Orders made before
+this format keep their `eunha-…` ids.
+
 A charge is written to `subscription_payments` as `pending` before
 TossPayments is called. Its order id is also the `Idempotency-Key`, and
 `charge_attempted_at` records when it went out. TossPayments keeps a key's first
