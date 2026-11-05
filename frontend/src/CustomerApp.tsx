@@ -299,14 +299,15 @@ export function CustomerApp() {
             {customer.subscription_required && (
               <Alert>
                 <CreditCard />
-                <AlertDescription className="grid gap-3">
+                <AlertDescription>
                   {t("Subscribe to create and run instances.")}
-                  <div>
-                    <Button size="sm" render={<a href="/account" />}>
-                      {t("Subscribe")}
-                    </Button>
-                  </div>
                 </AlertDescription>
+                {/* Not in the description, which underlines every link in it. */}
+                <div className="col-start-2 mt-2.5">
+                  <Button size="sm" render={<a href="/account" />}>
+                    {t("Subscribe")}
+                  </Button>
+                </div>
               </Alert>
             )}
             {tenants.length === 0
