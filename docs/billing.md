@@ -347,7 +347,7 @@ version is treated as Polar being unreachable, not as a missing object.
 
 Set Polar up like this:
 
-- Add a webhook endpoint at `https://eunha.space/webhooks/polar` in Raw
+- Add a webhook endpoint at `https://eunha.space/api/webhooks/polar` in Raw
   format, pinned to API version 2026-10, and subscribe it to the
   `subscription.*`, `order.*` and `refund.*` events.
 - In the customer portal settings, turn off **Enable subscription plan
