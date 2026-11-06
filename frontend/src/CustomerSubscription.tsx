@@ -324,7 +324,21 @@ export function SubscriptionSections(
               {planName(nextPlan)} · {price(nextPlan)}
             </Detail>
           )}
-          {amount != null && <Detail label={t("Monthly price")}>{amount}</Detail>}
+          {amount != null && (
+            <Detail
+              label={choosing && canPayInternationally && billing.toss
+                ? t("With a Korean card")
+                : t("Monthly price")}
+            >
+              {amount}
+              {/* The Korean card's counterpart to a trial: REFUND_WINDOW. */}
+              {choosing && billing.toss && (
+                <span className="text-muted-foreground block text-sm">
+                  {t("Full refund within 7 days")}
+                </span>
+              )}
+            </Detail>
+          )}
           {choosing && chosenPlan && canPayInternationally && (
             <Detail label={t("With an international card")}>
               {internationalPrice(chosenPlan)}

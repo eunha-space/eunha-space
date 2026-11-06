@@ -55,6 +55,9 @@ export function Pricing({ customer }: { customer: Customer | null | undefined })
                   {won(plan.amount)}
                 </span>{" "}
                 <span className="text-muted-foreground text-sm">{t("/ month")}</span>
+                <span className="text-muted-foreground block text-sm">
+                  {t("Korean cards: full refund within 7 days")}
+                </span>
                 {plan.polar_amount != null && plan.polar_currency && (
                   <span className="text-muted-foreground block text-sm tabular-nums">
                     {t("International cards:")} {money(plan.polar_amount, plan.polar_currency)}{" "}
