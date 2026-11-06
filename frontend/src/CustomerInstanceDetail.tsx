@@ -40,6 +40,7 @@ import {
 import { InstanceStatusBadge } from "@/components/customer/instance";
 import { CustomerSmtp } from "@/CustomerSmtp";
 import { CustomerDomainChange } from "@/CustomerDomainChange";
+import { CustomerGettingStarted } from "@/CustomerGettingStarted";
 
 // Provisioning is tracked step by step, but a customer only needs the shape of
 // the wait, not the mechanics — and the routing step in particular reads as
@@ -71,9 +72,82 @@ function stepGroups(steps: CustomerProvisioningStep[]) {
   })).filter((group) => group.steps.length > 0);
 }
 
+// Setup can finish faster than anyone can read it, and a page that jumps from
+// "preparing" to a finished instance reads as though nothing happened. So the
+// steps are shown in order, each held long enough to be seen: a change is
+// drawn in about 300ms, the usual length of an interface transition, and the
+// next one waits until the last has been on screen for STEP_DWELL_MS. This
+// only ever lags what has really happened; a step is never shown done early.
+const STEP_DWELL_MS = 900;
+// How long the finished setup stays before the instance's own cards replace it.
+const READY_HOLD_MS = 1500;
+
+type StepStatus = CustomerProvisioningStep["status"];
+
+function prefersReducedMotion() {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+}
+
+/**
+ * The statuses to draw for `actual`, catching up one change at a time.
+ * `replay` starts every step as waiting, for a page opened right after the
+ * instance was created; otherwise what is already done is shown as done.
+ */
+function usePacedSteps(actual: StepStatus[] | null, replay: boolean) {
+  const [shown, setShown] = useState<StepStatus[] | null>(null);
+  const [settled, setSettled] = useState(false);
+  const key = actual?.join() ?? "";
+
+  useEffect(() => {
+    if (!actual) return;
+    if (shown === null || shown.length !== actual.length) {
+      const first = replay
+        ? actual.map((status): StepStatus => status === "failed" ? "failed" : "pending")
+        : actual;
+      setShown(first);
+      if (!replay && first.every((status) => status === "succeeded")) setSettled(true);
+      return;
+    }
+    const index = shown.findIndex((status, i) => status !== actual[i]);
+    if (index === -1) return;
+    // Something going wrong is news, not progress: it is shown at once.
+    const failed = actual[index] === "failed";
+    const next = shown.slice();
+    // A step that went straight from waiting to done still shows it ran.
+    next[index] = shown[index] === "pending" && actual[index] === "succeeded"
+      ? "running"
+      : actual[index];
+    const timer = window.setTimeout(
+      () => setShown(next),
+      failed || prefersReducedMotion() ? 0 : STEP_DWELL_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [key, shown, replay]);
+
+  const done = shown !== null &&
+    shown.every((status) => status === "succeeded");
+  useEffect(() => {
+    if (!done || settled) return;
+    const timer = window.setTimeout(
+      () => setSettled(true),
+      prefersReducedMotion() ? 0 : READY_HOLD_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [done, settled]);
+
+  return { shown, done, settled };
+}
+
 export function CustomerInstanceDetail({ id }: { id: string }) {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
+  // Read once: a reload of the page later shows the instance as it is.
+  const [replay] = useState(() => {
+    const params = new URLSearchParams(location.search);
+    if (!params.has("created")) return false;
+    history.replaceState(history.state, "", location.pathname);
+    return true;
+  });
   const [detail, setDetail] = useState<CustomerTenantDetail | null>(null);
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
@@ -99,6 +173,12 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
     };
   }, [id, revision]);
 
+  const groups = detail ? stepGroups(detail.provisioning_steps) : null;
+  const paced = usePacedSteps(
+    groups?.map((group) => groupStatus(group.steps)) ?? null,
+    replay,
+  );
+
   const back = { href: "/instances", label: t("Your instances") };
   if (!detail && !error) {
     return (
@@ -122,9 +202,10 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
   const ready = detail.tenant.lifecycle_state === "ready";
   // With setup done the admin account, which is what the customer came for,
   // takes the top of the page.
-  const setupDone = ready &&
+  // Done once it has also been seen to finish; until then the setup card stays.
+  const setupDone = ready && paced.settled &&
     detail.provisioning_steps.every((step) => step.status === "succeeded");
-  const accountReady = ready && detail.tenant.owner_ready;
+  const accountReady = ready && detail.tenant.owner_ready && paced.settled;
   // Nothing provisions until a pending custom domain resolves, so that card
   // holds the only useful thing to read while it is outstanding.
   const waitingForDomain = customDomains.some((domain) =>
@@ -138,8 +219,15 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
       <PageHeader
         back={back}
         title={instanceAddress(detail.tenant)}
-        badge={<InstanceStatusBadge tenant={detail.tenant} />}
-        action={!offline && ready && (
+        // Ready is announced once the setup card has shown it, not before.
+        badge={
+          <InstanceStatusBadge
+            tenant={ready && !paced.settled
+              ? { lifecycle_state: "provisioning" }
+              : detail.tenant}
+          />
+        }
+        action={!offline && ready && paced.settled && (
           <Button
             variant="outline"
             render={
@@ -154,11 +242,25 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
           </Button>
         )}
       />
-        {!offline && (() => {
+        {!offline && (
+          // Swapping the setup for the finished instance's cards fades them in,
+          // so the change of page reads as one.
+          <div
+            key={setupDone ? "ready" : "setup"}
+            className="animate-in fade-in slide-in-from-bottom-2 grid gap-6 duration-300 motion-reduce:animate-none"
+          >
+          {(() => {
           // Once every step has succeeded there is nothing left to follow.
           const setup = setupDone
             ? null
-            : <InstanceSetup key="setup" steps={detail.provisioning_steps} />;
+            : (
+              <InstanceSetup
+                key="setup"
+                labels={(groups ?? []).map((group) => group.label)}
+                statuses={paced.shown ?? []}
+                finished={paced.done}
+              />
+            );
           const domain = customDomains.length > 0
             ? (
               <CustomDomainSetup
@@ -197,12 +299,18 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
           if (detail.domain_change?.status === "running") {
             return [move, domain, account, setup];
           }
+          // Next to the account, what to do with it before inviting anyone.
+          const guide = account
+            ? <CustomerGettingStarted key="guide" domain={detail.tenant.domain} />
+            : null;
           return setupDone
-            ? [account, move, domain, setup]
+            ? [account, guide, move, domain, setup]
             : waitingForDomain
             ? [domain, setup, account]
             : [setup, domain, account];
-        })()}
+          })()}
+          </div>
+        )}
         {ready &&
           detail.domains.some((domain) =>
             domain.kind === "custom" && domain.status === "active" && domain.is_primary
@@ -215,18 +323,30 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
   );
 }
 
-function InstanceSetup({ steps }: { steps: CustomerProvisioningStep[] }) {
+function InstanceSetup(
+  { labels, statuses, finished }: {
+    labels: string[];
+    statuses: StepStatus[];
+    finished: boolean;
+  },
+) {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
   return (
     <SectionCard
       title={t("Instance setup")}
-      description={t("This page updates automatically while we set things up.")}
+      description={finished
+        ? (
+          <span className="text-success animate-in fade-in duration-300">
+            {t("Your instance is ready to use.")}
+          </span>
+        )
+        : t("This page updates automatically while we set things up.")}
     >
       <ProgressSteps
-        steps={stepGroups(steps).map((group) => ({
-          label: group.label,
-          status: groupStatus(group.steps),
+        steps={labels.map((label, index) => ({
+          label,
+          status: statuses[index] ?? "pending",
         }))}
       />
     </SectionCard>

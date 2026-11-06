@@ -53,7 +53,8 @@ export function CustomerCreateInstance(
       });
       // A new instance is not usable yet, and its detail page is where the
       // setup it needs is followed.
-      navigate(`/instances/${created.id}`);
+      // `created` has the page play the setup from its first step.
+      navigate(`/instances/${created.id}?created=1`);
     } catch (e) {
       setError(errorMessage(e));
       setBusy(false);

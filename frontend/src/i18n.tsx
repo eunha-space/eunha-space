@@ -144,6 +144,39 @@ const ko: Record<string, string> = {
   "Admin username": "관리자 사용자명",
   "Letters, numbers, and underscores.": "영문, 숫자, 밑줄(_)만 사용할 수 있습니다.",
   "Admin account": "관리자 계정",
+  "Getting started": "시작하기",
+  "Before you ask anyone to join, a few things are worth setting up. Sign in with the admin account first; each link opens that page on your instance.":
+    "다른 분들을 초대하기 전에 몇 가지를 준비해 두면 좋습니다. 먼저 관리자 계정으로 로그인하세요. 각 링크를 누르면 인스턴스의 해당 페이지가 열립니다.",
+  "Introduce your server": "서버 소개하기",
+  "Give it a name, a short description and a contact, so visitors and other servers know who runs it and who it is for.":
+    "서버 이름과 짧은 소개, 연락처를 적어 두세요. 방문자와 다른 서버가 누가 운영하는 어떤 서버인지 알 수 있습니다.",
+  Branding: "브랜딩",
+  "About page": "소개 페이지",
+  "Write the rules": "규칙 정하기",
+  "Your rules are shown on the server's about page, and a report can name the rule a post breaks. Add terms of service if you want them too.":
+    "규칙은 서버 소개 페이지에 표시되고, 신고할 때 어떤 규칙을 어겼는지 고를 수 있습니다. 필요하면 이용약관도 추가하세요.",
+  "Server rules": "서버 규칙",
+  "Terms of service": "이용약관",
+  "Decide how people join": "가입 방식 정하기",
+  "Sign-ups start closed. Open them to everyone, require your approval, or keep them closed and send invite links to the people you want.":
+    "처음에는 가입이 닫혀 있습니다. 누구나 가입하게 열거나, 승인을 거치게 하거나, 닫아 둔 채 원하는 분들께 초대 링크를 보낼 수 있습니다.",
+  Registrations: "가입 설정",
+  Invites: "초대",
+  "Get ready to moderate": "운영 준비하기",
+  "Reports from members and other servers arrive here. Give trusted members a moderator role, and block servers you don't want to hear from.":
+    "회원과 다른 서버에서 보낸 신고가 이곳에 모입니다. 믿을 수 있는 회원에게 모더레이터 역할을 주고, 원하지 않는 서버는 차단하세요.",
+  Reports: "신고",
+  Roles: "역할",
+  "Blocked servers": "서버 차단",
+  "Welcome new members": "새 회원 맞이하기",
+  "Post an announcement, suggest accounts to follow, and add custom emoji, so the first visit doesn't land on an empty timeline.":
+    "공지를 올리고, 팔로우할 만한 계정을 추천하고, 커스텀 이모지를 추가해 두세요. 처음 온 분이 빈 타임라인을 마주하지 않도록요.",
+  Announcements: "공지",
+  "Follow recommendations": "팔로우 추천",
+  "Custom emoji": "커스텀 이모지",
+  "Tell people how to sign in": "로그인 방법 알려 주기",
+  "Members can use the web, or any Mastodon app: they choose to sign in on another server and enter {domain}.":
+    "회원은 웹이나 마스토돈 앱으로 이용할 수 있습니다. 앱에서는 다른 서버로 로그인을 고른 뒤 {domain} 주소를 입력하면 됩니다.",
   "Sign in to your instance as its owner to manage it.":
     "소유자로 인스턴스에 로그인하여 관리하세요.",
   Username: "사용자명",

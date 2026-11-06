@@ -218,15 +218,26 @@ export function ProgressSteps(
     <ol className="grid gap-4">
       {steps.map(({ label, status, note }) => (
         <li key={label} className="flex items-center gap-3">
-          {status === "succeeded"
-            ? <Check className="text-success size-5 shrink-0" />
-            : status === "running"
-            ? <Spinner label={t("In progress")} className="text-pending size-5 shrink-0" />
-            : status === "failed"
-            ? <CircleAlert className="text-destructive size-5 shrink-0" />
-            : <Clock className="text-muted-foreground size-5 shrink-0" />}
+          {/* Keyed by status, so each change is drawn rather than swapped. */}
+          <span
+            key={status}
+            className="animate-in fade-in zoom-in-75 flex shrink-0 duration-300 motion-reduce:animate-none"
+          >
+            {status === "succeeded"
+              ? <Check className="text-success size-5" />
+              : status === "running"
+              ? <Spinner label={t("In progress")} className="text-pending size-5" />
+              : status === "failed"
+              ? <CircleAlert className="text-destructive size-5" />
+              : <Clock className="text-muted-foreground size-5" />}
+          </span>
           <span className="flex-1 text-sm font-medium">{t(label)}</span>
-          <span className="text-muted-foreground text-xs">{note ?? t(STATUS_TEXT[status])}</span>
+          <span
+            key={`${status}-text`}
+            className="text-muted-foreground animate-in fade-in text-xs duration-300 motion-reduce:animate-none"
+          >
+            {note ?? t(STATUS_TEXT[status])}
+          </span>
         </li>
       ))}
     </ol>
