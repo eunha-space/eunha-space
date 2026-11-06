@@ -12,6 +12,7 @@ import { CONTACT_EMAIL, planLimits } from "@/planLimits";
 const TERMS = [
   "Every plan is charged monthly.",
   "A payment can be refunded in full for 7 days after it is made, and not after that.",
+  "With an international card, only your first payment can be refunded from your account page; write to us about any other.",
   "Cancel any time and keep the period you already paid for.",
   "If a subscription ends, your instances go offline and their data is kept. Subscribing again brings them back.",
   "A deleted instance can be restored for seven days.",

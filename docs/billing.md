@@ -467,9 +467,16 @@ the time already used, or it has none, the trial ends and Polar charges the
 new plan's price at once. The confirmation says which, from the plan's
 `trial_until`.
 
-A customer's refund follows the same rules as a TossPayments one: within
-seven days, and a full refund ends the subscription and takes the instances
-offline. `refund_sent_at` is written before Polar is asked, so the refund is
+A customer can ask back only the account's first Polar payment (its first
+`renewal`, which after a free trial is the first charge), within seven days,
+and only if the account has never had a refund of its own. Polar keeps its
+fee on every refund, and the trial is where an international card tries the
+service, so this is for one who forgot to cancel. Any other Polar payment is
+an operator's call from `/admin/billing`, which is bound by none of this.
+TossPayments payments are not limited this way. The rule is
+`POLAR_SELF_REFUND` in *src/billing_sync.rs*, shown on Pricing and the
+refund policy. As with TossPayments, a full refund ends the subscription and
+takes the instances offline. `refund_sent_at` is written before Polar is asked, so the refund is
 never requested twice. After that, Polar's own record of the order and its
 refunds decides the outcome. The request is sent again only if Polar has no
 refund for the order an hour later. The net amount is refunded and Polar adds

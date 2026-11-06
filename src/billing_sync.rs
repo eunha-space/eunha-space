@@ -33,6 +33,14 @@ use crate::{
 /// How long after it was paid a customer may ask for a payment back.
 pub(crate) const REFUND_WINDOW: &str = "7 days";
 
+/// Which Polar payments, `p`, a customer may ask back themselves: only an
+/// account's first Polar payment, and only if the account has never had a
+/// refund of its own. Polar keeps its fee on every refund, and a free trial
+/// is where an international card tries the service; this is for one who
+/// forgot to cancel. Anything else is an operator's call. TossPayments
+/// payments are not limited this way.
+pub(crate) const POLAR_SELF_REFUND: &str = "(p.provider<>'polar' OR (p.kind='renewal' AND NOT EXISTS(SELECT 1 FROM subscription_payments e WHERE e.user_id=p.user_id AND e.provider='polar' AND e.kind='renewal' AND e.status IN ('paid','refunded') AND (e.settled_at,e.order_id)<(p.settled_at,p.order_id)) AND NOT EXISTS(SELECT 1 FROM subscription_payments r WHERE r.user_id=p.user_id AND r.order_id<>p.order_id AND r.refund_requested_by=r.user_id)))";
+
 /// TossPayments' events are a few hundred bytes.
 const WEBHOOK_BODY_LIMIT: usize = 64 * 1024;
 
@@ -236,8 +244,8 @@ pub(crate) async fn start_refund(
         ));
     }
     let mut tx = s.db.begin().await?;
-    let (user_id, refundable) = sqlx::query_as::<_, (Uuid, bool)>(&format!(
-        "SELECT user_id,status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND (NOT $3 OR settled_at>now()-interval '{REFUND_WINDOW}') AND (payment_key IS NOT NULL OR provider='polar') FROM subscription_payments WHERE order_id=$1 AND ($2::uuid IS NULL OR user_id=$2) FOR UPDATE"
+    let (user_id, refundable, allowed) = sqlx::query_as::<_, (Uuid, bool, bool)>(&format!(
+        "SELECT p.user_id,p.status='paid' AND p.refunded_amount=0 AND p.refund_requested_at IS NULL AND (NOT $3 OR p.settled_at>now()-interval '{REFUND_WINDOW}') AND (p.payment_key IS NOT NULL OR p.provider='polar'),NOT $3 OR {POLAR_SELF_REFUND} FROM subscription_payments p WHERE p.order_id=$1 AND ($2::uuid IS NULL OR p.user_id=$2) FOR UPDATE OF p"
     ))
     .bind(order_id)
     .bind(owner)
@@ -249,6 +257,12 @@ pub(crate) async fn start_refund(
         return Err(ApiError(
             StatusCode::CONFLICT,
             "This payment can no longer be refunded.".into(),
+        ));
+    }
+    if !allowed {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Only an account's first payment by international card can be refunded here. Contact us about this one.".into(),
         ));
     }
     // A charge still being confirmed could otherwise be approved after the

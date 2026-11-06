@@ -5347,3 +5347,76 @@ async fn a_polar_free_trial_is_shown_and_a_plan_change_during_it_charges_nothing
         1
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn only_the_first_polar_payment_can_be_refunded_by_its_customer(pool: PgPool) {
+    let (polar, base) = polar_stand_in().await;
+    let state = polar_state(pool.clone(), &base, None);
+    let (_, admin) = fixture(&pool).await;
+    let (user_id, headers) = billed_customer(&pool).await;
+    offer_polar_plans(&pool).await;
+    polar.holds_subscription("sub_1", user_id, "active", "prod_standard", 699);
+    // The first charge, after a trial, and a renewal a month on, both within
+    // the seven days for the sake of the rule.
+    polar.holds_order("ord_1", user_id, "sub_1", 769, 70);
+    polar.holds_order("ord_2", user_id, "sub_1", 769, 70);
+    let earlier = rfc3339(time::OffsetDateTime::now_utc() - time::Duration::days(2));
+    polar.orders.lock().unwrap().get_mut("ord_1").unwrap()["created_at"] = earlier.into();
+    polar_webhook(
+        &state,
+        "subscription.created",
+        serde_json::json!({"id": "sub_1"}),
+        true,
+    )
+    .await;
+    for order in ["ord_1", "ord_2"] {
+        polar_webhook(&state, "order.paid", serde_json::json!({"id": order}), true).await;
+    }
+
+    let view = polar_view(&state, &headers).await;
+    let refundable: HashMap<String, bool> = view["payments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            (
+                p["order_id"].as_str().unwrap().to_owned(),
+                p["refundable"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(refundable["ord_1"], true);
+    assert_eq!(refundable["ord_2"], false);
+    // The renewal is not the customer's to give back, but an operator's.
+    assert_eq!(
+        refund(&state, &headers, "ord_2").await.err(),
+        Some(StatusCode::CONFLICT)
+    );
+    assert_eq!(
+        billing_admin::refund(State(state.clone()), admin.clone(), Path("ord_2".into()))
+            .await
+            .unwrap(),
+        StatusCode::NO_CONTENT
+    );
+
+    // A customer who has had a refund of their own gets no second one: here
+    // an earlier TossPayments refund they asked for.
+    sqlx::query("INSERT INTO subscription_payments(order_id,user_id,amount,period,period_start,period_end,status,kind,requested_at,settled_at,refund_requested_at,refund_requested_by,refunded_at,refunded_amount) VALUES('toss-1',$1,9900,0,now()-interval '60 days',now()-interval '30 days','refunded','renewal',now()-interval '60 days',now()-interval '60 days',now()-interval '59 days',$1,now()-interval '59 days',9900)")
+        .bind(user_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let view = polar_view(&state, &headers).await;
+    let first = view["payments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["order_id"] == "ord_1")
+        .unwrap();
+    assert_eq!(first["refundable"], false);
+    assert_eq!(
+        refund(&state, &headers, "ord_1").await.err(),
+        Some(StatusCode::CONFLICT)
+    );
+}

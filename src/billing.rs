@@ -725,7 +725,7 @@ pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiEr
     .fetch_optional(&s.db)
     .await?;
     let payments = sqlx::query_as::<_, PaymentView>(
-        &format!("SELECT order_id,amount,provider,currency,kind,status,period_start,period_end,receipt_url,failure_message,requested_at,(status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND settled_at>now()-interval '{}' AND (payment_key IS NOT NULL OR provider='polar')) refundable,(refund_requested_at IS NOT NULL AND refunded_at IS NULL) refund_pending,refunded_amount,refund_error FROM subscription_payments WHERE user_id=$1 AND status<>'expired' ORDER BY requested_at DESC LIMIT 24", crate::billing_sync::REFUND_WINDOW),
+        &format!("SELECT order_id,amount,provider,currency,kind,status,period_start,period_end,receipt_url,failure_message,requested_at,(status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND settled_at>now()-interval '{}' AND (payment_key IS NOT NULL OR provider='polar') AND {}) refundable,(refund_requested_at IS NOT NULL AND refunded_at IS NULL) refund_pending,refunded_amount,refund_error FROM subscription_payments p WHERE user_id=$1 AND status<>'expired' ORDER BY requested_at DESC LIMIT 24", crate::billing_sync::REFUND_WINDOW, crate::billing_sync::POLAR_SELF_REFUND),
     )
     .bind(user_id)
     .fetch_all(&s.db)

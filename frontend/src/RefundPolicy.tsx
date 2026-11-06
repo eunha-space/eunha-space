@@ -10,7 +10,8 @@ import {
 import { Page, PageHeader, SectionCard } from "@/components/customer/page";
 
 // The refund policy as written in Korean, and its English translation. The
-// rates state what `REFUND_WINDOW` in src/billing_sync.rs enforces.
+// rates state what `REFUND_WINDOW` in src/billing_sync.rs enforces, and the
+// international card entry what `POLAR_SELF_REFUND` does.
 const REFUND_RATES_KO = [
   ["결제 후 7일 이내", "결제 금액의 100%"],
   ["결제 후 7일 경과", "환불 불가"],
@@ -32,6 +33,10 @@ const REFUND_POLICY_KO = [
   [
     "해지",
     "정기 결제는 언제든지 해지할 수 있습니다. 다음 결제부터 청구되지 않으며, 이미 결제한 기간은 만료일까지 이용할 수 있습니다. 해지만으로는 환불되지 않으며, 이미 시작된 기간의 일할 환불은 제공하지 않습니다.",
+  ],
+  [
+    "해외 카드",
+    "해외 카드 결제는 Polar가 판매자(Merchant of Record)로 처리합니다. 계정 페이지에서 직접 환불을 신청할 수 있는 것은 계정의 첫 해외 카드 결제뿐이며, 이전에 환불을 받은 적이 없는 경우에 한합니다. 무료 체험이 있는 요금제는 체험이 끝난 뒤의 첫 결제가 이에 해당합니다. 그 밖의 결제는 결제 후 7일 이내에 hello@eunha.space로 문의해 주시면 검토 후 환불해 드립니다.",
   ],
   [
     "장애 시 환불",
@@ -60,6 +65,10 @@ const REFUND_POLICY_EN = [
   [
     "Cancelling",
     "You can cancel a recurring payment at any time. You are not charged again, and you keep the period you already paid for until it ends. Cancelling alone is not a refund, and a period that has already begun is not refunded pro rata.",
+  ],
+  [
+    "International cards",
+    "Payments by international card are handled by Polar, our merchant of record. You can ask for a refund yourself from your account page only for your account's first payment by international card, and only if you have not had a refund before. On a plan with a free trial, that is the first payment after the trial. For any other payment, write to hello@eunha.space within 7 days of paying, and we will look at it and refund you where it is fair.",
   ],
   [
     "Refunds for outages",

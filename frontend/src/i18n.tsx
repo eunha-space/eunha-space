@@ -77,6 +77,8 @@ const ko: Record<string, string> = {
   "Every plan is charged monthly.": "모든 요금제는 매월 결제됩니다.",
   "A payment can be refunded in full for 7 days after it is made, and not after that.":
     "결제 후 7일 이내에는 결제 금액의 100%를 환불받을 수 있으며, 7일이 지나면 환불되지 않습니다.",
+  "With an international card, only your first payment can be refunded from your account page; write to us about any other.":
+    "해외 카드로 결제한 경우 계정 페이지에서는 첫 결제만 환불받을 수 있으며, 그 밖의 결제는 문의해 주세요.",
   "Cancel any time and keep the period you already paid for.":
     "언제든지 해지할 수 있으며, 이미 결제한 기간은 그대로 이용할 수 있습니다.",
   "If a subscription ends, your instances go offline and their data is kept. Subscribing again brings them back.":
