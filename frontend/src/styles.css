@@ -152,6 +152,13 @@
   html {
     @apply font-sans;
   }
+  /*
+   * Korean wraps between words, not inside them. Only Korean: keep-all also
+   * stops WebKit breaking an English word at its hyphen.
+   */
+  :lang(ko) {
+    word-break: keep-all;
+  }
 }
 
 /* The brand mark ships as two SVGs; the theme picks which one is painted. */

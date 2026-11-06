@@ -56,8 +56,6 @@ export function SiteHeader(
         </a>
         <div className="flex shrink-0 items-center gap-1 sm:gap-2">
           <nav className="flex items-center gap-1 sm:gap-2" aria-label={t("Site")}>
-            {/* There is no room on a phone; the footer links here on every page. */}
-            <NavLink href="/pricing" label={t("Pricing")} current={path === "/pricing"} hideOnPhone />
             {customer && (
               <NavLink
                 href="/instances"
@@ -92,19 +90,17 @@ export function SiteHeader(
 
 /** A page the header goes to: its name, shrinking to its icon where space is short. */
 function NavLink(
-  { href, label, icon, current = false, hideOnPhone = false }: {
+  { href, label, icon, current = false }: {
     href: string;
     label: string;
     icon?: React.ReactNode;
     current?: boolean;
-    hideOnPhone?: boolean;
   },
 ) {
   return (
     <Button
       variant="ghost"
       className={cn(
-        hideOnPhone && "hidden sm:inline-flex",
         icon && "max-md:aspect-square max-md:px-0",
         current && "bg-muted",
       )}

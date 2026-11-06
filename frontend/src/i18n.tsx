@@ -81,7 +81,6 @@ const ko: Record<string, string> = {
     "구독이 끝나면 인스턴스는 오프라인이 되지만 데이터는 보관됩니다. 다시 구독하면 되살아납니다.",
   "A deleted instance can be restored for seven days.":
     "삭제한 인스턴스는 7일 동안 복원할 수 있습니다.",
-  "Start your own server.": "나만의 서버를 시작하세요.",
   "About Eunha": "은하 소개",
   "Source code": "소스 코드",
   "Create your account": "계정 만들기",
