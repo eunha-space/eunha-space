@@ -638,9 +638,69 @@ async fn handle_event(s: &Shared, polar: &Config, event: &WebhookEvent) -> Resul
             return Ok(());
         };
         read_order(s, polar, &order_id).await
+    } else if event.kind.starts_with("product.") {
+        let Some(product_id) = id("id") else {
+            return Ok(());
+        };
+        match refresh_product(s, polar, &product_id).await {
+            Err(PolarError::Unreachable) => anyhow::bail!("could not read a product from Polar"),
+            _ => Ok(()),
+        }
     } else {
         Ok(())
     }
+}
+
+/// Bring the price shown for a plan sold as this Polar product in step with
+/// Polar's. Polar lets a fixed price change; existing subscribers keep the
+/// price they signed up at, which their own subscription's amount carries, so
+/// only what new customers see and what plan changes compare with moves.
+/// Returns the plan's price now, or why the product can no longer be sold as a
+/// plan, in which case the price stays as it was. `Ok(None)` when no plan is
+/// sold as it.
+pub(crate) async fn refresh_product(
+    s: &Shared,
+    polar: &Config,
+    product_id: &str,
+) -> Result<Option<Result<i64, String>>, PolarError> {
+    let linked = sqlx::query_as::<_, (Uuid, i64)>(
+        "SELECT id,polar_amount FROM plans WHERE polar_product_id=$1",
+    )
+    .bind(product_id)
+    .fetch_optional(&s.db)
+    .await
+    .map_err(|_| PolarError::Unreachable)?;
+    let Some((plan_id, amount)) = linked else {
+        return Ok(None);
+    };
+    let product = polar.product(product_id).await?;
+    let price = product.monthly_price(&polar.currency);
+    match &price {
+        Ok(price) if *price != amount => {
+            let updated: sqlx::Result<()> = async {
+                let mut tx = s.db.begin().await?;
+                sqlx::query("UPDATE plans SET polar_amount=$2 WHERE id=$1")
+                    .bind(plan_id)
+                    .bind(price)
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("INSERT INTO operations(id,kind,status,detail,started_at,finished_at) VALUES($1,'subscription_plan_polar_price','succeeded',$2,now(),now())")
+                    .bind(Uuid::new_v4())
+                    .bind(serde_json::json!({ "plan_id": plan_id, "polar_product_id": product_id, "from": amount, "to": price, "currency": polar.currency }))
+                    .execute(&mut *tx)
+                    .await?;
+                tx.commit().await
+            }
+            .await;
+            updated.map_err(|_| PolarError::Unreachable)?;
+            tracing::info!(%plan_id, from = amount, to = price, "a Polar plan's price changed");
+        }
+        Ok(_) => {}
+        Err(reason) => {
+            tracing::warn!(%plan_id, product = %product_id, %reason, "a plan's Polar product can no longer be sold as it; its price was left as it was");
+        }
+    }
+    Ok(Some(price))
 }
 
 async fn read_order(s: &Shared, polar: &Config, order_id: &str) -> Result<()> {

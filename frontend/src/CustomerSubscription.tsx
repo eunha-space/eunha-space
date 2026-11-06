@@ -368,7 +368,12 @@ export function SubscriptionSections(
                       {planName(plan)}
                       {isCurrent ? ` · ${t("Current plan")}` : ""}
                     </span>
-                    <span className="tabular-nums">{price(plan)} {t("/ month")}</span>
+                    <span className="tabular-nums">
+                      {/* A subscriber keeps the price they signed up at. */}
+                      {isCurrent && subscription
+                        ? money(subscription.amount, subscription.currency)
+                        : price(plan)} {t("/ month")}
+                    </span>
                     {limitLabel(plan) && (
                       <span className="text-muted-foreground text-xs">{limitLabel(plan)}</span>
                     )}

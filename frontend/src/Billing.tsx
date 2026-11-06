@@ -465,16 +465,42 @@ function DeletePlanDialog(
   );
 }
 
-/** The Polar product a plan is sold as, or a field to link one. */
+/**
+ * The Polar product a plan is sold as, with its price, which follows Polar's.
+ * It can be moved to another product, as from the sandbox to live products,
+ * while no running Polar subscription is on the plan.
+ */
 function PolarProduct(
-  { plan, busy, onLink }: { plan: Plan; busy: boolean; onLink: (productId: string) => void },
+  { plan, busy, onLink, onRefresh }: {
+    plan: Plan;
+    busy: boolean;
+    onLink: (productId: string) => Promise<boolean>;
+    onRefresh: () => void;
+  },
 ) {
+  const linked = plan.polar_product_id && plan.polar_amount != null && plan.polar_currency;
+  const [changing, setChanging] = useState(false);
   const [productId, setProductId] = useState("");
-  if (plan.polar_product_id && plan.polar_amount != null && plan.polar_currency) {
+  if (linked && !changing) {
     return (
-      <span className="tabular-nums" title={plan.polar_product_id}>
-        {money(plan.polar_amount, plan.polar_currency)}
-      </span>
+      <div className="flex items-center gap-1">
+        <span className="tabular-nums" title={plan.polar_product_id ?? undefined}>
+          {money(plan.polar_amount!, plan.polar_currency!)}
+        </span>
+        <Button
+          size="icon-xs"
+          variant="ghost"
+          aria-label={`Read ${plan.name_en}'s Polar price again`}
+          title="Read the price from Polar again"
+          disabled={busy}
+          onClick={onRefresh}
+        >
+          <RotateCcw />
+        </Button>
+        <Button size="xs" variant="ghost" disabled={busy} onClick={() => setChanging(true)}>
+          Change
+        </Button>
+      </div>
     );
   }
   return (
@@ -482,7 +508,12 @@ function PolarProduct(
       className="flex gap-1"
       onSubmit={(event) => {
         event.preventDefault();
-        onLink(productId.trim());
+        void onLink(productId.trim()).then((done) => {
+          if (done) {
+            setChanging(false);
+            setProductId("");
+          }
+        });
       }}
     >
       <Input
@@ -495,6 +526,11 @@ function PolarProduct(
         onChange={(event) => setProductId(event.target.value)}
       />
       <Button type="submit" size="xs" variant="outline" disabled={busy}>Link</Button>
+      {changing && (
+        <Button type="button" size="xs" variant="ghost" onClick={() => setChanging(false)}>
+          Cancel
+        </Button>
+      )}
     </form>
   );
 }
@@ -584,6 +620,9 @@ function Plans(
       })
     );
 
+  const refreshPolar = (plan: Plan) =>
+    run(() => api(`/billing/plans/${plan.id}/polar/refresh`, { method: "POST" }));
+
   return (
     <Card className="gap-0 overflow-hidden p-0">
       <CardHeader className="px-4 py-3">
@@ -622,7 +661,8 @@ function Plans(
                   <PolarProduct
                     plan={plan}
                     busy={busy}
-                    onLink={(productId) => void linkPolar(plan, productId)}
+                    onLink={(productId) => linkPolar(plan, productId)}
+                    onRefresh={() => void refreshPolar(plan)}
                   />
                 </TableCell>
               )}

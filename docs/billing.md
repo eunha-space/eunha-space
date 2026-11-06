@@ -354,7 +354,7 @@ Set Polar up like this:
 
 - Add a webhook endpoint at `https://eunha.space/api/webhooks/polar` in Raw
   format, pinned to API version 2026-10, and subscribe it to the
-  `subscription.*`, `order.*` and `refund.*` events.
+  `subscription.*`, `order.*`, `refund.*` and `product.*` events.
 - In the customer portal settings, turn off **Enable subscription plan
   changes** and **Enable subscription pause**. Plan changes are made on the
   account page, which checks the instance limit before a downgrade. A paused
@@ -365,9 +365,24 @@ Set Polar up like this:
 A plan is sold to international cards once an operator links it to a Polar
 product on the billing page. The product must renew every month at a fixed
 price in `POLAR_CURRENCY`. Its price is read from Polar and kept in
-`plans.polar_amount`, in the currency's smallest unit (cents). Like the won
-price, it never changes: a plan cannot be linked to a second product. A new
-price means a new product on a new plan.
+`plans.polar_amount`, in the currency's smallest unit (cents).
+
+Unlike the won price, the Polar price can change. Polar lets a fixed price
+be changed, and existing subscribers keep the price they signed up at. Their
+amount comes from their own Polar subscription, so they are not affected
+here either. A `product.updated` webhook reads the product again, and
+**Refresh** on the billing page does the same without waiting for it. What
+new customers see, and whether a plan change applies now or at the renewal,
+follows the new price. A subscriber sees their own price on their current
+plan. A product that can no longer be sold as a plan, because it was
+archived or lost its monthly USD price, keeps its last price and is logged.
+
+**Change** moves a plan to another Polar product, as when switching from
+the sandbox to live products, and reads the new product's price. A plan
+with a running Polar subscription keeps its product, because those
+subscriptions were sold as it. To switch from the sandbox, end the test
+subscriptions first. A sandbox subscription left running would be looked up
+against production every hour and logged as unknown.
 
 ### Subscribing through Polar
 

@@ -612,9 +612,10 @@ pub(crate) struct PolarLink {
     product_id: String,
 }
 
-/// Sell a plan to international cards as a Polar product. Its price is read
-/// from Polar, and, like the plan's won price, fixed from here on: a plan once
-/// linked cannot be linked to another product.
+/// Sell a plan to international cards as a Polar product, or move it to
+/// another, as from Polar's sandbox to its live products. Its price is read
+/// from Polar, and follows the product's from then on. A plan with a running
+/// Polar subscription keeps its product: those subscriptions were sold as it.
 pub(crate) async fn link_polar(
     State(s): State<Shared>,
     headers: HeaderMap,
@@ -656,11 +657,27 @@ pub(crate) async fn link_polar(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Plan not found.".into()))?;
-    if linked.is_some() {
+    if linked.as_deref() == Some(product_id) {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "This plan is already sold through Polar. Offer a new plan for a new price.".into(),
+            "This plan is already sold as this product.".into(),
         ));
+    }
+    if linked.is_some() {
+        let running = sqlx::query_scalar::<_, bool>(
+            "SELECT true FROM subscriptions WHERE provider='polar' AND status IN ('active','past_due') AND $1 IN (plan_id,pending_plan_id) LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+        if running {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "A running Polar subscription is on this plan, so its product cannot change."
+                    .into(),
+            ));
+        }
     }
     let taken = sqlx::query_scalar::<_, bool>("SELECT true FROM plans WHERE polar_product_id=$1")
         .bind(product_id)
@@ -687,10 +704,54 @@ pub(crate) async fn link_polar(
         admin_id,
         "subscription_plan_polar",
         "succeeded",
-        serde_json::json!({ "plan_id": id, "polar_product_id": product_id, "amount": amount, "currency": polar.currency }),
+        serde_json::json!({ "plan_id": id, "polar_product_id": product_id, "previous_product_id": linked, "amount": amount, "currency": polar.currency }),
         None,
     )
     .await?;
     tx.commit().await?;
+    Ok(Json(plan))
+}
+
+/// Read a plan's Polar price again now, rather than wait for Polar's
+/// `product.updated` webhook.
+pub(crate) async fn refresh_polar(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Plan>, ApiError> {
+    admin_user(&headers, &s.db).await?;
+    let polar = crate::billing_polar::config(&s)?;
+    let product_id =
+        sqlx::query_scalar::<_, Option<String>>("SELECT polar_product_id FROM plans WHERE id=$1")
+            .bind(id)
+            .fetch_optional(&s.db)
+            .await?
+            .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Plan not found.".into()))?
+            .ok_or_else(|| {
+                ApiError(
+                    StatusCode::CONFLICT,
+                    "This plan is not sold through Polar.".into(),
+                )
+            })?;
+    match crate::billing_polar::refresh_product(&s, polar, &product_id).await {
+        Ok(Some(Err(reason))) => return Err(ApiError(StatusCode::CONFLICT, reason)),
+        Ok(_) => {}
+        Err(crate::billing_polar::PolarError::NotFound) => {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "Polar has no product with this plan's id. Link it to another.".into(),
+            ));
+        }
+        Err(_) => {
+            return Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                "Polar could not be reached. Try again shortly.".into(),
+            ));
+        }
+    }
+    let plan = sqlx::query_as::<_, Plan>(&format!("SELECT {PLAN_COLUMNS} FROM plans WHERE id=$1"))
+        .bind(id)
+        .fetch_one(&s.db)
+        .await?;
     Ok(Json(plan))
 }

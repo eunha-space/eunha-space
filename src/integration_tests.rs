@@ -4418,6 +4418,9 @@ struct PolarStandIn {
     checkouts: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     /// Every PATCH and DELETE of a subscription, in order.
     changes: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+    /// Products' prices, where they differ from $6.99 ($14.99 for the large
+    /// one).
+    prices: Arc<std::sync::Mutex<HashMap<String, i64>>>,
 }
 
 fn rfc3339(at: time::OffsetDateTime) -> String {
@@ -4518,13 +4521,15 @@ async fn polar_stand_in() -> (PolarStandIn, String) {
         )
         .route(
             "/v1/products/{id}",
-            get(|headers: HeaderMap, Path(id): Path<String>| async move {
+            get(|State(polar): State<PolarStandIn>, headers: HeaderMap, Path(id): Path<String>| async move {
+                let price = polar.prices.lock().unwrap().get(&id).copied()
+                    .unwrap_or(if id == "prod_large" { 1499 } else { 699 });
                 polar_answer(&headers, StatusCode::OK, serde_json::json!({
                     "id": id,
                     "is_recurring": true,
                     "is_archived": false,
                     "recurring_interval": "month",
-                    "prices": [{"amount_type": "fixed", "is_archived": false, "price_currency": "usd", "price_amount": if id == "prod_large" { 1499 } else { 699 }}],
+                    "prices": [{"amount_type": "fixed", "is_archived": false, "price_currency": "usd", "price_amount": price}],
                 }))
             }),
         )
@@ -5122,4 +5127,103 @@ async fn operators_edit_shown_limits_and_delete_only_unused_plans(pool: PgPool) 
         .await
         .unwrap();
     assert_eq!(left, vec![used]);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_polar_price_change_reaches_new_customers_and_spares_subscribers(pool: PgPool) {
+    let (polar, base) = polar_stand_in().await;
+    let state = polar_state(pool.clone(), &base, None);
+    let (_, admin) = fixture(&pool).await;
+    let (user_id, headers) = billed_customer(&pool).await;
+    let (standard, large) = offer_polar_plans(&pool).await;
+    polar.holds_subscription("sub_1", user_id, "active", "prod_standard", 699);
+    let _ = billing_polar::refresh(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+
+    // Polar raises the price; its webhook names the product.
+    polar
+        .prices
+        .lock()
+        .unwrap()
+        .insert("prod_standard".into(), 799);
+    assert_eq!(
+        polar_webhook(
+            &state,
+            "product.updated",
+            serde_json::json!({"id": "prod_standard"}),
+            true
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    let view = polar_view(&state, &headers).await;
+    assert_eq!(view["plans"][0]["polar_amount"], 799);
+    // The subscriber keeps the price they signed up at, and the next renewal
+    // reading Polar's subscription changes nothing about it.
+    assert_eq!(view["subscription"]["amount"], 699);
+    sqlx::query(
+        "UPDATE subscriptions SET polar_synced_at=now()-interval '2 hours' WHERE user_id=$1",
+    )
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(billing_polar::sync_due(&state).await.unwrap());
+    assert_eq!(
+        polar_view(&state, &headers).await["subscription"]["amount"],
+        699
+    );
+
+    // An operator can read it again without waiting for the webhook.
+    polar
+        .prices
+        .lock()
+        .unwrap()
+        .insert("prod_large".into(), 1599);
+    let Json(plan) = billing_admin::refresh_polar(State(state.clone()), admin.clone(), Path(large))
+        .await
+        .unwrap();
+    assert_eq!(serde_json::to_value(plan).unwrap()["polar_amount"], 1599);
+
+    // A plan with a running Polar subscription keeps its product; one without
+    // moves to another, as from the sandbox to live products, at its price.
+    let link = |product: &str| {
+        Json(serde_json::from_value(serde_json::json!({"product_id": product})).unwrap())
+    };
+    assert_eq!(
+        billing_admin::link_polar(
+            State(state.clone()),
+            admin.clone(),
+            Path(standard),
+            link("prod_live_standard")
+        )
+        .await
+        .err()
+        .unwrap()
+        .0,
+        StatusCode::CONFLICT
+    );
+    polar
+        .prices
+        .lock()
+        .unwrap()
+        .insert("prod_live_large".into(), 1499);
+    let Json(plan) = billing_admin::link_polar(
+        State(state.clone()),
+        admin.clone(),
+        Path(large),
+        link("prod_live_large"),
+    )
+    .await
+    .unwrap();
+    let plan = serde_json::to_value(plan).unwrap();
+    assert_eq!(
+        (
+            plan["polar_product_id"].clone(),
+            plan["polar_amount"].clone()
+        ),
+        ("prod_live_large".into(), 1499.into())
+    );
 }
