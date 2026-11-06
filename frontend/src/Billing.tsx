@@ -805,7 +805,6 @@ function SignupSwitches({ overview, onChanged }: { overview: Overview; onChanged
     try {
       await api("/billing/signups", {
         method: "PATCH",
-        headers: { "content-type": "application/json" },
         body: JSON.stringify({ [field]: value }),
       });
       setError("");
