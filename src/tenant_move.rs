@@ -418,6 +418,9 @@ struct Running {
     cancel_requested: bool,
     routed_at: Option<OffsetDateTime>,
     domain: String,
+    /// The domain the instance names itself by: its handle domain, if it has
+    /// one, else `domain`.
+    served_domain: String,
     lifecycle_state: String,
     /// The runtime the tenant belongs to now: `from_runtime_id` until switch.
     runtime_id: Uuid,
@@ -428,7 +431,7 @@ struct Running {
 
 async fn running(db: &sqlx::PgPool, tenant_id: Uuid) -> Result<Option<Running>> {
     Ok(sqlx::query_as(
-        "SELECT m.id,m.tenant_id,m.operation_id,m.from_runtime_id,m.to_runtime_id,m.step,m.cancel_requested,m.routed_at,t.domain,t.lifecycle_state,t.runtime_id,f.bind_address from_bind_address,r.bind_address to_bind_address,r.origin_hostname to_origin_hostname FROM tenant_moves m JOIN tenants t ON t.id=m.tenant_id JOIN runtimes f ON f.id=m.from_runtime_id JOIN runtimes r ON r.id=m.to_runtime_id WHERE m.tenant_id=$1 AND m.status='running'",
+        "SELECT m.id,m.tenant_id,m.operation_id,m.from_runtime_id,m.to_runtime_id,m.step,m.cancel_requested,m.routed_at,t.domain,COALESCE(t.handle_domain,t.domain) served_domain,t.lifecycle_state,t.runtime_id,f.bind_address from_bind_address,r.bind_address to_bind_address,r.origin_hostname to_origin_hostname FROM tenant_moves m JOIN tenants t ON t.id=m.tenant_id JOIN runtimes f ON f.id=m.from_runtime_id JOIN runtimes r ON r.id=m.to_runtime_id WHERE m.tenant_id=$1 AND m.status='running'",
     )
     .bind(tenant_id)
     .fetch_optional(db)
@@ -573,9 +576,14 @@ async fn run_step(state: &Shared, change: &Running, step: &str) -> Result<bool> 
                 false,
             )
             .await?;
-            verify_offline_at(state, &change.from_bind_address, &change.domain)
-                .await
-                .context("the old runtime still serves the tenant")?;
+            verify_offline_at(
+                state,
+                &change.from_bind_address,
+                &change.domain,
+                &change.served_domain,
+            )
+            .await
+            .context("the old runtime still serves the tenant")?;
             event(
                 &state.db,
                 change.operation_id,
@@ -600,7 +608,7 @@ async fn serve_on_target(state: &Shared, change: &Running) -> Result<()> {
         state,
         &change.to_bind_address,
         &change.domain,
-        &change.domain,
+        &change.served_domain,
     )
     .await
 }

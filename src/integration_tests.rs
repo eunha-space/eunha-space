@@ -4139,3 +4139,167 @@ async fn a_rollout_never_takes_a_runtime_back_to_an_older_build(pool: PgPool) {
     assert!(!channels[1].runtimes[0].on_release);
     assert_eq!(channels[1].runtimes[0].held, None);
 }
+
+/// A tenant being set up at `domain`, connected, with handles on `handle`: a
+/// `.invalid` domain resolves nowhere, so its WebFinger never redirects.
+async fn handle_domain_tenant(pool: &PgPool, runtime: Uuid, domain: &str, handle: &str) -> Uuid {
+    let id = tenant(pool, runtime).await;
+    sqlx::query(
+        "UPDATE tenants SET lifecycle_state='provisioning',domain=$2,handle_domain=$3 WHERE id=$1",
+    )
+    .bind(id)
+    .bind(domain)
+    .bind(handle)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO provisioning_steps(tenant_id,step) VALUES($1,'database')")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary) VALUES($1,$2,$3,'custom','active',true)")
+        .bind(Uuid::new_v4())
+        .bind(id)
+        .bind(domain)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn provisioning_waits_for_the_handle_domain_to_redirect(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let id = handle_domain_tenant(&pool, runtime, "custom.example", "handle.invalid").await;
+    let state = state(pool.clone());
+    let step = || async {
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM provisioning_steps WHERE tenant_id=$1 AND step='database'",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    queue_job(&pool, id, "provision").await;
+    let job = jobs::claim(&pool).await.unwrap().unwrap();
+    jobs::run(&state, &job).await;
+    // Its web domain connected, but `@user@handle.invalid` would not find it.
+    assert!(!job_finished(&pool, job.id).await);
+    assert_eq!(step().await, "pending");
+    assert!(
+        sqlx::query_scalar::<_, Option<OffsetDateTime>>(
+            "SELECT handle_domain_verified_at FROM tenants WHERE id=$1"
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+        .is_none()
+    );
+    // Once seen redirecting, setup goes on: this test has no server to make
+    // a database on, so the step failing shows it was tried.
+    sqlx::query("UPDATE tenants SET handle_domain_verified_at=now() WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    jobs::wake_provisioning(&state, id).await;
+    let job = jobs::claim(&pool).await.unwrap().unwrap();
+    jobs::run(&state, &job).await;
+    assert_eq!(step().await, "failed");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_handle_domain_that_never_redirects_expires_with_its_instance(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let waiting = handle_domain_tenant(&pool, runtime, "waiting.example", "waiting.invalid").await;
+    let expired = handle_domain_tenant(&pool, runtime, "expired.example", "expired.invalid").await;
+    // Verified, it is being set up, however long ago it was asked for.
+    let verified =
+        handle_domain_tenant(&pool, runtime, "verified.example", "verified.invalid").await;
+    sqlx::query("UPDATE tenants SET handle_domain_verified_at=now() WHERE id=$1")
+        .bind(verified)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "UPDATE tenant_domains SET created_at=now()-interval '8 days' WHERE tenant_id=ANY($1)",
+    )
+    .bind(vec![expired, verified])
+    .execute(&pool)
+    .await
+    .unwrap();
+    expire_custom_domains(&state(pool.clone())).await;
+    let states = sqlx::query_as::<_, (Uuid, String, String)>(
+        "SELECT t.id,t.lifecycle_state,d.status FROM tenants t JOIN tenant_domains d ON d.tenant_id=t.id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(states.len(), 3);
+    for (id, lifecycle, domain) in states {
+        let expected = if id == expired {
+            ("deprovisioning", "removing")
+        } else {
+            ("provisioning", "active")
+        };
+        assert_eq!((lifecycle.as_str(), domain.as_str()), expected, "{id}");
+    }
+    let _ = waiting;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_handle_domain_needs_a_custom_domain_of_its_own(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let taken = tenant(&pool, runtime).await;
+    sqlx::query("UPDATE tenants SET domain='taken.example',handle_domain='taken-handle.example' WHERE id=$1")
+        .bind(taken)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut state = state(pool.clone());
+    Arc::get_mut(&mut state).unwrap().provided_domain_suffixes = vec!["eunha.example".into()];
+    let check = |handle: &'static str, custom: Option<&'static str>| {
+        let state = state.clone();
+        async move {
+            validate_handle_domain(&state, handle, custom)
+                .await
+                .map_err(|error| error.0)
+        }
+    };
+    assert_eq!(
+        check(" Example.COM. ", Some("social.example.com")).await,
+        Ok(Some("example.com".into()))
+    );
+    assert_eq!(check("  ", None).await, Ok(None));
+    // On a provided hostname the ids stay on eunha.space when the customer
+    // leaves, so the handles could never follow them.
+    assert_eq!(
+        check("example.com", None).await,
+        Err(StatusCode::BAD_REQUEST)
+    );
+    for handle in [
+        "social.example.com",
+        "a.eunha.example",
+        "eunha.example",
+        "not a domain",
+    ] {
+        assert_eq!(
+            check(handle, Some("social.example.com")).await,
+            Err(StatusCode::BAD_REQUEST),
+            "{handle}"
+        );
+    }
+    for handle in ["taken.example", "taken-handle.example"] {
+        assert_eq!(
+            check(handle, Some("social.example.com")).await,
+            Err(StatusCode::CONFLICT),
+            "{handle}"
+        );
+    }
+}

@@ -122,7 +122,9 @@ another domain is a migration rather than a setting. Until eunha could send
 Moves, a custom domain verified after the tenant had accounts only ever became
 an alias. Now a customer or an operator can move a ready tenant to a provided
 subdomain or a custom domain, and a `domain_change` job walks it through
-six steps, recorded in `domain_changes`:
+six steps, recorded in `domain_changes`. A tenant whose handles are on another
+domain (`handle_domain`, see the README) is refused: its handles cannot follow
+a move. The six steps are:
 
 1. **attach**: the new hostname, with its provided siblings, is added as a
    pending domain and as an alias, so it is served and can be checked before

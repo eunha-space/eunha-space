@@ -169,16 +169,38 @@ async fn start(
         .clone();
 
     let mut tx = s.db.begin().await?;
-    let tenant = sqlx::query_as::<_, (String, String, Option<Uuid>, Uuid)>(
-        "SELECT domain,lifecycle_state,user_id,runtime_id FROM tenants WHERE id=$1 FOR UPDATE",
+    let tenant = sqlx::query_as::<_, (String, String, Option<Uuid>, Uuid, bool)>(
+        "SELECT domain,lifecycle_state,user_id,runtime_id,handle_domain IS NOT NULL FROM tenants WHERE id=$1 FOR UPDATE",
     )
     .bind(tenant_id)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Instance not found".into()))?;
-    let (from_domain, lifecycle, owner, runtime_id) = tenant;
+    let (from_domain, lifecycle, owner, runtime_id, has_handle_domain) = tenant;
     if user_id.is_some() && owner != user_id {
         return Err(ApiError(StatusCode::NOT_FOUND, "Instance not found".into()));
+    }
+    // A domain change moves every account to handles on the new domain. With
+    // handles on another domain, the web domain is in every ActivityPub id
+    // but in no handle, and Eunha has no move that keeps the handles: the
+    // two domains are fixed together.
+    if has_handle_domain {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "An instance with handles on another domain keeps both of its domains.".into(),
+        ));
+    }
+    if sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM tenants WHERE handle_domain=ANY($1))",
+    )
+    .bind(&hostnames)
+    .fetch_one(&mut *tx)
+    .await?
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "That domain is already managed.".into(),
+        ));
     }
     if lifecycle != "ready" {
         return Err(ApiError(

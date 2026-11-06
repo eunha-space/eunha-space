@@ -107,6 +107,29 @@ Restoring such an instance tries the same domain again for another seven days,
 and is refused if another instance has claimed the domain meanwhile. Runtime
 placement is automatic and favors the least-loaded eligible runtime.
 
+An instance at a custom domain can put its handles on another domain the
+customer owns: served at `social.example.com`, with accounts named
+`@admin@example.com`. This is Mastodon's `LOCAL_DOMAIN` and `WEB_DOMAIN`
+split. The rendered `[instance]` gets `domain = "example.com"` and
+`web_domain = "social.example.com"`, and `tenants.handle_domain` records the
+handle domain. Only a custom web domain may have one. Every ActivityPub id is
+on the web domain, so on a `*.eunha.space` hostname they would stay behind if
+the customer left, and handles that point there could never move with them.
+The handle domain is not routed through Cloudflare. Its own web server
+redirects `/.well-known/webfinger` to the web domain. Setup waits at its
+`database` step until a request to
+`https://<handle>/.well-known/webfinger` returns a redirect to WebFinger on
+the web domain. That redirect is checked, never followed, and its time is
+kept as `handle_domain_verified_at`. The seven-day window covers this wait
+too: an instance whose custom domain connected but whose redirect never
+appeared is deleted like one whose domain never validated. A handle domain
+belongs to one instance and is never another's domain, and it stays reserved
+on the tenant row as its domain does. The handle domain is fixed once
+chosen, and so is the web domain: a domain change would move every account to
+handles on the new domain, so one is refused for these instances. Health
+checks expect `/api/v2/instance` to name the handle domain, which is what
+Eunha reports as the instance's `domain`.
+
 The portal and every email to a customer are in English or Korean. The service
 is called eunha space in English and 은하공간 in Korean, in the page title, the
 portal and as the emails' sender name. An account's language (`users.locale`)

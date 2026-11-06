@@ -29,6 +29,7 @@ export function CustomerCreateInstance(
   );
   const [subdomain, setSubdomain] = useState("");
   const [customDomain, setCustomDomain] = useState("");
+  const [handleDomain, setHandleDomain] = useState("");
   const [dnsCheck, setDnsCheck] = useState<
     { hostname: string; points_to_target: boolean | null; target: string } | null
   >(null);
@@ -48,6 +49,9 @@ export function CustomerCreateInstance(
         body: JSON.stringify({
           subdomain: addressKind === "provided" ? subdomain : "",
           custom_domain: addressKind === "custom" ? customDomain : null,
+          handle_domain: addressKind === "custom" && handleDomain.trim()
+            ? handleDomain
+            : null,
           owner_username: ownerUsername,
         }),
       });
@@ -155,6 +159,25 @@ export function CustomerCreateInstance(
                     )}
                   </div>
                 )}
+                {addressKind === "custom" && (
+                  <div className="grid gap-2">
+                    <Label htmlFor="handle-domain">
+                      {t("Handle domain (optional)")}
+                    </Label>
+                    <Input
+                      id="handle-domain"
+                      placeholder="example.com"
+                      value={handleDomain}
+                      onChange={(e) =>
+                        setHandleDomain(e.target.value.toLowerCase())}
+                    />
+                    <span className="text-muted-foreground text-xs">
+                      {t(
+                        "For handles on another domain you own, such as @admin@example.com while the instance is served on social.example.com. That domain must redirect /.well-known/webfinger to the instance, and neither domain can be changed afterwards.",
+                      )}
+                    </span>
+                  </div>
+                )}
                 <div className="grid gap-2">
                   <Label htmlFor="owner">{t("Admin username")}</Label>
                   <Input
@@ -169,6 +192,9 @@ export function CustomerCreateInstance(
                   />
                   <span className="text-muted-foreground text-xs">
                     @{ownerUsername || "admin"}
+                    {addressKind === "custom" &&
+                      (handleDomain.trim() || customDomain) &&
+                      `@${handleDomain.trim() || customDomain}`}
                     {" · "}
                     {t("Letters, numbers, and underscores.")}
                   </span>

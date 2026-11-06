@@ -292,6 +292,10 @@ struct CustomerTenantRequest {
     #[serde(default)]
     subdomain: String,
     custom_domain: Option<String>,
+    /// The domain in the instance's handles, when it is not `custom_domain`.
+    /// Only with a custom domain: see [`validate_handle_domain`].
+    #[serde(default)]
+    handle_domain: Option<String>,
     owner_username: String,
 }
 
@@ -304,6 +308,8 @@ struct AutomaticRelease {
 struct NewTenant {
     subdomain: String,
     runtime_id: Uuid,
+    #[serde(default)]
+    handle_domain: Option<String>,
 }
 
 /// An existing Mastodon instance taken over rather than created.
@@ -430,6 +436,10 @@ struct CustomerTenantInfo {
     abandoned_custom_domain: Option<String>,
     /// Taken offline because the subscription ended, rather than deleted.
     billing_suspended: bool,
+    /// The domain in the instance's handles, when it is not `domain`.
+    handle_domain: Option<String>,
+    /// Whether the handle domain was seen redirecting WebFinger to `domain`.
+    handle_domain_verified: bool,
 }
 
 #[derive(Serialize)]
@@ -539,7 +549,12 @@ struct EncryptionToml {
 }
 #[derive(Deserialize, Serialize)]
 struct InstanceToml {
+    /// The domain in handles, Mastodon's `LOCAL_DOMAIN`.
     domain: String,
+    /// The domain the instance is served on, Mastodon's `WEB_DOMAIN`, when
+    /// its handles are on another one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    web_domain: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     aliases: Vec<String>,
     /// Domains the instance had before, which its actors name in
@@ -649,6 +664,8 @@ struct StoredConfig {
 #[derive(Deserialize)]
 struct StoredTenant {
     domain: String,
+    #[serde(default)]
+    handle_domain: Option<String>,
     aliases: Vec<String>,
     #[serde(default)]
     previous_domains: Vec<String>,
@@ -731,12 +748,23 @@ fn typed_toml(
             base_url: config.media_storage_base_url,
         },
         smtp,
-        instance: InstanceToml {
-            domain: tenant.domain,
-            aliases: tenant.aliases,
-            previous_domains: tenant.previous_domains,
-            vapid_private_key: required(tenant.vapid_private_key, "vapid_private_key")?,
-            vapid_public_key: required(tenant.vapid_public_key, "vapid_public_key")?,
+        instance: match tenant.handle_domain {
+            Some(handle_domain) => InstanceToml {
+                domain: handle_domain,
+                web_domain: Some(tenant.domain),
+                aliases: tenant.aliases,
+                previous_domains: tenant.previous_domains,
+                vapid_private_key: required(tenant.vapid_private_key, "vapid_private_key")?,
+                vapid_public_key: required(tenant.vapid_public_key, "vapid_public_key")?,
+            },
+            None => InstanceToml {
+                domain: tenant.domain,
+                web_domain: None,
+                aliases: tenant.aliases,
+                previous_domains: tenant.previous_domains,
+                vapid_private_key: required(tenant.vapid_private_key, "vapid_private_key")?,
+                vapid_public_key: required(tenant.vapid_public_key, "vapid_public_key")?,
+            },
         },
         active_record_encryption: encryption,
         software_update_url: config.software_update_url,
@@ -1486,7 +1514,7 @@ async fn customer_tenant_detail(
     Path(id): Path<Uuid>,
 ) -> Result<Json<CustomerTenantDetail>, ApiError> {
     let (user_id, _) = customer(&headers, &s.db).await?;
-    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.lifecycle_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,t.owner_email,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.purge_scheduled_for,t.abandoned_custom_domain,t.billing_suspended_at IS NOT NULL billing_suspended FROM tenants t JOIN users c ON c.id=t.user_id WHERE t.id=$1 AND t.user_id=$2 AND t.lifecycle_state NOT IN ('purging','purged')")
+    let tenant = sqlx::query_as("SELECT t.id,t.domain,t.lifecycle_state,CASE WHEN t.desired_state='running' AND (t.observed_at IS NULL OR t.observed_at < now()-interval '10 minutes') THEN 'unknown' ELSE t.observed_state END observed_state,t.updated_at,t.owner_username,t.owner_email,EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded') owner_ready,t.owner_password_issued_at,t.purge_scheduled_for,t.abandoned_custom_domain,t.billing_suspended_at IS NOT NULL billing_suspended,t.handle_domain,t.handle_domain_verified_at IS NOT NULL handle_domain_verified FROM tenants t JOIN users c ON c.id=t.user_id WHERE t.id=$1 AND t.user_id=$2 AND t.lifecycle_state NOT IN ('purging','purged')")
         .bind(id)
         .bind(user_id)
         .fetch_optional(&s.db)
@@ -1605,6 +1633,7 @@ async fn customer_create_tenant(
         NewTenant {
             subdomain: body.subdomain,
             runtime_id,
+            handle_domain: body.handle_domain,
         },
         None,
         Some(user_id),
@@ -1640,6 +1669,19 @@ async fn create_tenant_inner(
             return Err(ApiError(
                 StatusCode::BAD_REQUEST,
                 "Enter a valid externally owned custom domain.".into(),
+            ));
+        }
+        // Another instance's handle domain is that instance's, served or not.
+        if sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM tenants WHERE handle_domain=$1)",
+        )
+        .bind(custom_domain)
+        .fetch_one(&s.db)
+        .await?
+        {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "That domain is already managed.".into(),
             ));
         }
         (custom_domain.clone(), Vec::new())
@@ -1684,6 +1726,12 @@ async fn create_tenant_inner(
         (format!("{}.{}", body.subdomain, suffix), provided)
     };
     let aliases: Vec<String> = provided_domains.iter().skip(1).cloned().collect();
+    let handle_domain = match body.handle_domain.take() {
+        Some(handle_domain) => {
+            validate_handle_domain(s, &handle_domain, custom_domain.as_deref()).await?
+        }
+        None => None,
+    };
 
     let origin_hostname =
         sqlx::query_scalar::<_, String>("SELECT origin_hostname FROM runtimes WHERE id=$1")
@@ -1754,10 +1802,10 @@ async fn create_tenant_inner(
         }
         billing::require_subscription(s, &mut tx, user_id).await?;
     }
-    sqlx::query("INSERT INTO tenants(id,domain,aliases,runtime_id,desired_state,observed_state,lifecycle_state,vapid_private_key,vapid_public_key,user_id,owner_username,owner_email) VALUES($1,$2,$3,$4,'running','unknown','provisioning',$5,$6,$7,$8,$9)")
+    sqlx::query("INSERT INTO tenants(id,domain,aliases,runtime_id,desired_state,observed_state,lifecycle_state,vapid_private_key,vapid_public_key,user_id,owner_username,owner_email,handle_domain) VALUES($1,$2,$3,$4,'running','unknown','provisioning',$5,$6,$7,$8,$9,$10)")
         .bind(tenant_id).bind(&domain).bind(&aliases).bind(body.runtime_id)
-        .bind(vapid_private).bind(vapid_public).bind(user_id).bind(&owner_username).bind(owner_email).execute(&mut *tx).await
-        .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenants_domain_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
+        .bind(vapid_private).bind(vapid_public).bind(user_id).bind(&owner_username).bind(owner_email).bind(&handle_domain).execute(&mut *tx).await
+        .map_err(|error| if matches!(error.as_database_error().and_then(|e| e.constraint()), Some("tenants_domain_key" | "tenants_handle_domain_key")) { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
     sqlx::query(r#"INSERT INTO tenant_configuration(
         tenant_id,database_url,database_pool_max_connections,database_pool_min_connections,database_pool_acquire_timeout_seconds,database_pool_idle_timeout_seconds,
         redis_url,redis_coordination_url,redis_key_prefix,redis_process_metrics,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,
@@ -2129,6 +2177,127 @@ async fn adopt_legacy_domain(
     ))
 }
 
+/// Check a handle domain asked for at creation, and normalize it. `None`
+/// for a blank one.
+///
+/// A handle domain names every account and every remote follow, so it can
+/// never change, and an instance's ActivityPub ids are on its web domain. Only
+/// a web domain the customer owns can leave eunha.space with them, so a handle
+/// domain is accepted only beside a custom domain. It must be a domain of its
+/// own: never a provided hostname, never the web domain, never another
+/// instance's.
+async fn validate_handle_domain(
+    s: &Shared,
+    handle_domain: &str,
+    custom_domain: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    let handle_domain = handle_domain
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    if handle_domain.is_empty() {
+        return Ok(None);
+    }
+    let Some(custom_domain) = custom_domain else {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Handles on another domain need a custom domain for the instance itself.".into(),
+        ));
+    };
+    if !is_valid_domain(&handle_domain)
+        || handle_domain == custom_domain
+        || s.provided_domain_suffixes.iter().any(|suffix| {
+            handle_domain == *suffix || handle_domain.ends_with(&format!(".{suffix}"))
+        })
+    {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Enter a valid handle domain you own, other than the instance's own domain.".into(),
+        ));
+    }
+    if sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM tenants WHERE (domain=$1 OR handle_domain=$1 OR $1=ANY(aliases) OR $1=ANY(previous_domains))) OR EXISTS(SELECT 1 FROM tenant_domains WHERE hostname=$1)",
+    )
+    .bind(&handle_domain)
+    .fetch_one(&s.db)
+    .await?
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "That domain is already managed.".into(),
+        ));
+    }
+    Ok(Some(handle_domain))
+}
+
+/// Whether `location`, where the handle domain's WebFinger redirected, is
+/// WebFinger on `web_domain`, as Mastodon's `WEB_DOMAIN` setup asks for.
+fn webfinger_redirect_reaches(location: &str, web_domain: &str) -> bool {
+    let Ok(url) = url::Url::parse(location) else {
+        return false;
+    };
+    url.scheme() == "https"
+        && url.host_str() == Some(web_domain)
+        && url.port().is_none()
+        && url.path() == "/.well-known/webfinger"
+}
+
+/// Whether a handle domain sends WebFinger on to the web domain, which is
+/// what makes `@user@handle` find the instance. Only the redirect is looked
+/// at: it is never followed, and nothing from the response is kept or shown.
+async fn handle_domain_redirects(handle_domain: &str, web_domain: &str) -> bool {
+    if !is_valid_domain(handle_domain) {
+        return false;
+    }
+    let Ok(client) = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(4))
+        .build()
+    else {
+        return false;
+    };
+    let Ok(response) = client
+        .get(format!(
+            "https://{handle_domain}/.well-known/webfinger?resource=acct:{handle_domain}@{handle_domain}"
+        ))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    response.status().is_redirection()
+        && response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|location| location.to_str().ok())
+            .is_some_and(|location| webfinger_redirect_reaches(location, web_domain))
+}
+
+/// Whether an instance with handles on another domain may be set up: once its
+/// handle domain redirects WebFinger to it. Like a custom domain, nothing is
+/// provisioned before then, because an owner made before would be unreachable
+/// by its handle. The check is remembered; a redirect taken away later is the
+/// customer's to put back.
+async fn handle_domain_verified(state: &Shared, tenant_id: Uuid) -> Result<bool> {
+    let Some((handle_domain, web_domain)) = sqlx::query_as::<_, (String, String)>(
+        "SELECT handle_domain,domain FROM tenants WHERE id=$1 AND handle_domain IS NOT NULL AND handle_domain_verified_at IS NULL",
+    )
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await?
+    else {
+        return Ok(true);
+    };
+    if !handle_domain_redirects(&handle_domain, &web_domain).await {
+        return Ok(false);
+    }
+    sqlx::query("UPDATE tenants SET handle_domain_verified_at=now(),updated_at=now() WHERE id=$1")
+        .bind(tenant_id)
+        .execute(&state.db)
+        .await?;
+    Ok(true)
+}
+
 fn is_valid_domain(domain: &str) -> bool {
     is_safe_domain(domain)
         && domain.contains('.')
@@ -2197,9 +2366,13 @@ async fn domain_reconciler(state: Shared) {
 /// behind. An imported one was set up on its first day — its data is restored,
 /// rendered and served — and is only waiting for an operator and a customer to
 /// agree on a cutover, so the window does not apply to it.
+///
+/// A handle domain has the same window: an instance whose custom domain
+/// connected but whose handle domain never redirected was never set up either,
+/// and its custom domain is released with it.
 async fn expire_custom_domains(state: &Shared) {
     let Ok(expired) = sqlx::query_as::<_, (Uuid, Uuid, String)>(&format!(
-        "SELECT d.id,d.tenant_id,d.hostname FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id WHERE d.kind='custom' AND d.status='pending' AND t.lifecycle_state='provisioning' AND NOT EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=t.id) AND d.created_at < now()-interval '{CUSTOM_DOMAIN_SETUP_WINDOW}' ORDER BY d.created_at LIMIT 10"
+        "SELECT d.id,d.tenant_id,CASE WHEN d.status='pending' THEN d.hostname ELSE t.handle_domain END FROM tenant_domains d JOIN tenants t ON t.id=d.tenant_id WHERE d.kind='custom' AND d.is_primary AND (d.status='pending' OR (d.status='active' AND t.handle_domain IS NOT NULL AND t.handle_domain_verified_at IS NULL)) AND t.lifecycle_state='provisioning' AND NOT EXISTS(SELECT 1 FROM tenant_imports m WHERE m.tenant_id=t.id) AND NOT EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='database' AND p.status='succeeded') AND d.created_at < now()-interval '{CUSTOM_DOMAIN_SETUP_WINDOW}' ORDER BY d.created_at LIMIT 10"
     ))
     .fetch_all(&state.db)
     .await
@@ -2217,7 +2390,7 @@ async fn expire_custom_domains(state: &Shared) {
             .bind(tenant_id)
             .fetch_one(&mut *tx)
             .await?;
-            let released = sqlx::query(&format!("UPDATE tenant_domains SET status='removing',error='It was not connected within {CUSTOM_DOMAIN_SETUP_WINDOW}.',updated_at=now() WHERE id=$1 AND status='pending'"))
+            let released = sqlx::query(&format!("UPDATE tenant_domains SET status='removing',error='It was not connected within {CUSTOM_DOMAIN_SETUP_WINDOW}.',updated_at=now() WHERE id=$1 AND status IN ('pending','active')"))
                 .bind(domain_id)
                 .execute(&mut *tx)
                 .await?
@@ -3632,18 +3805,25 @@ async fn rename_legacy_tenant_files(state: &Shared) -> Result<()> {
 
 /// Confirm the runtime no longer answers for the tenant's domain.
 async fn verify_tenant_offline(state: &Shared, tenant_id: Uuid) -> Result<()> {
-    let (domain, bind_address) = sqlx::query_as::<_, (String, String)>("SELECT t.domain,r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1")
+    let (domain, served_domain, bind_address) = sqlx::query_as::<_, (String, String, String)>("SELECT t.domain,COALESCE(t.handle_domain,t.domain),r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1")
         .bind(tenant_id).fetch_one(&state.db).await?;
-    verify_offline_at(state, &bind_address, &domain).await
+    verify_offline_at(state, &bind_address, &domain, &served_domain).await
 }
 
 /// Confirm the runtime at `bind_address` no longer answers for `domain`.
-async fn verify_offline_at(state: &Shared, bind_address: &str, domain: &str) -> Result<()> {
+/// `host` is asked for the instance, which names itself `domain`: its handle
+/// domain, when it has one.
+async fn verify_offline_at(
+    state: &Shared,
+    bind_address: &str,
+    host: &str,
+    domain: &str,
+) -> Result<()> {
     let url = format!("http://{bind_address}/api/v2/instance");
     for _ in 0..30 {
         // A runtime left with a single tenant answers every host with that
         // tenant, so only a response naming this domain means it is served.
-        let serving = match state.client.get(&url).header("Host", domain).send().await {
+        let serving = match state.client.get(&url).header("Host", host).send().await {
             Ok(response) if response.status().is_success() => response
                 .json::<serde_json::Value>()
                 .await
@@ -3769,7 +3949,10 @@ pub(crate) async fn provision_tenant_step(
     }
     let ready = match step {
         "database" => match runtime_connection_budget(&state.db, tenant_id).await {
-            Ok(()) => custom_domain_validated(&state.db, tenant_id).await,
+            Ok(()) => match custom_domain_validated(&state.db, tenant_id).await {
+                Ok(true) => handle_domain_verified(state, tenant_id).await,
+                other => other,
+            },
             Err(error) => Err(error),
         },
         "routing" => tenant_routing_ready(&state.db, tenant_id).await,
@@ -4557,16 +4740,17 @@ async fn active_runtime_label(
 }
 
 async fn healthcheck_provisioned_tenant(state: &Shared, tenant_id: Uuid) -> Result<()> {
-    let (domain, bind_address) = sqlx::query_as::<_, (String, String)>("SELECT t.domain,r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1")
+    let (domain, served_domain, bind_address) = sqlx::query_as::<_, (String, String, String)>("SELECT t.domain,COALESCE(t.handle_domain,t.domain),r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1")
         .bind(tenant_id).fetch_one(&state.db).await?;
-    healthcheck_url(state, &bind_address, &domain, &domain).await
+    healthcheck_url(state, &bind_address, &domain, &served_domain).await
 }
 
 /// Check that `host`, which may be an alias, reaches this tenant. An alias is
-/// answered by the tenant under its primary domain, which is what it reports.
+/// answered by the tenant under its primary domain, which is what it reports,
+/// or under its handle domain, when it has one.
 async fn healthcheck_host(state: &Shared, tenant_id: Uuid, host: &str) -> Result<()> {
     let (domain, bind_address) = sqlx::query_as::<_, (String, String)>(
-        "SELECT t.domain,r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
+        "SELECT COALESCE(t.handle_domain,t.domain),r.bind_address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.id=$1",
     )
     .bind(tenant_id)
     .fetch_one(&state.db)
@@ -6365,6 +6549,111 @@ async fn render_tenant(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn a_handle_domain_redirect_must_reach_webfinger_on_the_web_domain() {
+        for location in [
+            "https://social.example/.well-known/webfinger?resource=acct:a@example",
+            "https://social.example/.well-known/webfinger",
+        ] {
+            assert!(
+                webfinger_redirect_reaches(location, "social.example"),
+                "{location}"
+            );
+        }
+        for location in [
+            "http://social.example/.well-known/webfinger",
+            "https://elsewhere.example/.well-known/webfinger",
+            "https://social.example:8443/.well-known/webfinger",
+            "https://social.example/",
+            "https://social.example.evil.example/.well-known/webfinger",
+            "/.well-known/webfinger",
+        ] {
+            assert!(
+                !webfinger_redirect_reaches(location, "social.example"),
+                "{location}"
+            );
+        }
+    }
+
+    fn stored(handle_domain: Option<&str>) -> (StoredTenant, StoredConfig) {
+        let tenant = serde_json::from_value(serde_json::json!({
+            "domain": "social.example",
+            "handle_domain": handle_domain,
+            "aliases": [],
+            "vapid_private_key": "private",
+            "vapid_public_key": "public",
+            "lifecycle_state": "ready",
+        }))
+        .unwrap();
+        let config = serde_json::from_value(serde_json::json!({
+            "database_url": "postgres://tenant@db/tenant",
+            "database_pool_max_connections": 5,
+            "database_pool_min_connections": 0,
+            "database_pool_acquire_timeout_seconds": 5,
+            "database_pool_idle_timeout_seconds": 60,
+            "redis_url": "redis://redis",
+            "redis_coordination_url": null,
+            "redis_key_prefix": "t",
+            "redis_process_metrics": false,
+            "smtp_host": null, "smtp_port": null, "smtp_username": null,
+            "smtp_password": null, "smtp_from": null,
+            "active_record_encryption_primary_key": null,
+            "active_record_encryption_key_derivation_salt": null,
+            "media_storage_region": "auto",
+            "media_storage_endpoint": null,
+            "media_storage_access_key_id": "key",
+            "media_storage_secret_access_key": "secret",
+            "media_storage_base_url": "https://media.example",
+            "media_storage_key_prefix": "t",
+            "software_update_url": null,
+            "allowed_private_networks": [],
+            "sign_integrity_proofs": false,
+            "delivery_workers": 1, "delivery_batch": 50, "delivery_concurrency": 16,
+            "inbox_workers": 1, "inbox_batch": 20, "inbox_concurrency": 4,
+            "queue_idle_poll_seconds": 30, "process_delivery_concurrency": 256,
+            "max_concurrent_requests": null, "process_max_tenants": null,
+            "process_database_connections": null,
+        }))
+        .unwrap();
+        (tenant, config)
+    }
+
+    #[test]
+    fn a_handle_domain_renders_as_eunhas_domain_beside_its_web_domain() {
+        let (tenant, config) = stored(Some("example"));
+        let typed = typed_toml(
+            tenant,
+            config,
+            "bucket".into(),
+            "127.0.0.1:3000".into(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(typed.instance.domain, "example");
+        assert_eq!(typed.instance.web_domain.as_deref(), Some("social.example"));
+        let rendered = toml::to_string_pretty(&typed).unwrap();
+        assert!(
+            rendered.contains("web_domain = \"social.example\""),
+            "{rendered}"
+        );
+
+        let (tenant, config) = stored(None);
+        let typed = typed_toml(
+            tenant,
+            config,
+            "bucket".into(),
+            "127.0.0.1:3000".into(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(typed.instance.domain, "social.example");
+        assert!(
+            !toml::to_string_pretty(&typed)
+                .unwrap()
+                .contains("web_domain")
+        );
+    }
+
+    #[test]
     fn a_release_without_the_migration_check_is_told_apart_from_a_failure() {
         assert_eq!(known_migrations(Some(0), b""), KnownMigrations::Known);
         assert_eq!(known_migrations(Some(1), b""), KnownMigrations::Unknown);
@@ -6383,9 +6672,10 @@ mod tests {
     }
 
     use super::{
-        DomainDnsTargetError, KnownMigrations, REDACTED, connection_budget_error,
-        domain_reconcile_error_message, is_valid_owner_username, known_migrations,
-        printed_password, redact_connection_url, tenant_redis_key_prefix,
+        DomainDnsTargetError, KnownMigrations, REDACTED, StoredConfig, StoredTenant,
+        connection_budget_error, domain_reconcile_error_message, is_valid_owner_username,
+        known_migrations, printed_password, redact_connection_url, tenant_redis_key_prefix,
+        typed_toml, webfinger_redirect_reaches,
     };
     use uuid::Uuid;
 

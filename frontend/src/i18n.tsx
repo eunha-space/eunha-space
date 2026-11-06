@@ -235,6 +235,15 @@ const ko: Record<string, string> = {
   "We can't see that CNAME record yet. You can still create the instance; setup keeps trying for 7 days, then deletes the instance.":
     "아직 CNAME 레코드가 확인되지 않습니다. 인스턴스는 만들 수 있으며, 설정은 7일 동안 계속 시도한 뒤 인스턴스를 삭제합니다.",
   "The CNAME record is in place.": "CNAME 레코드가 확인되었습니다.",
+  "Handle domain (optional)": "핸들 도메인 (선택)",
+  "For handles on another domain you own, such as @admin@example.com while the instance is served on social.example.com. That domain must redirect /.well-known/webfinger to the instance, and neither domain can be changed afterwards.":
+    "인스턴스는 social.example.com에서 운영하면서 핸들은 @admin@example.com처럼 소유한 다른 도메인으로 쓰려면 입력하세요. 그 도메인은 /.well-known/webfinger를 인스턴스로 리디렉션해야 하며, 이후에는 두 도메인 모두 바꿀 수 없습니다.",
+  Redirecting: "리디렉션 중",
+  "Waiting for the redirect": "리디렉션 대기 중",
+  "Handles on this instance end in @{domain}. Keep this redirect in place: other servers find accounts through it.":
+    "이 인스턴스의 핸들은 @{domain}으로 끝납니다. 다른 서버가 이 리디렉션으로 계정을 찾으므로 유지해 주세요.",
+  "Handles on this instance end in @{domain}. Have the web server for {domain} redirect /.well-known/webfinger here; with nginx:":
+    "이 인스턴스의 핸들은 @{domain}으로 끝납니다. {domain}의 웹 서버가 /.well-known/webfinger를 이 인스턴스로 리디렉션하도록 설정하세요. nginx의 경우:",
   "Keep each domain's DNS record in place for as long as it is connected.":
     "도메인이 연결되어 있는 동안 DNS 레코드를 그대로 유지하세요.",
   Removing: "제거 중",

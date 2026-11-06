@@ -270,7 +270,9 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
               />
             )
             : null;
-          const move = setupDone || detail.domain_change
+          // Handles on another domain fix both domains together.
+          const move = !detail.tenant.handle_domain &&
+              (setupDone || detail.domain_change)
             ? (
               <CustomerDomainChange
                 key="move"
@@ -725,7 +727,50 @@ function CustomDomainSetup(
             )}
           </section>
         ))}
+        {tenant.handle_domain && (
+          <HandleDomainSetup
+            handleDomain={tenant.handle_domain}
+            webDomain={tenant.domain}
+            verified={tenant.handle_domain_verified}
+          />
+        )}
     </SectionCard>
+  );
+}
+
+/** Handles on another domain: that domain's server sends WebFinger here. */
+function HandleDomainSetup(
+  { handleDomain, webDomain, verified }: {
+    handleDomain: string;
+    webDomain: string;
+    verified: boolean;
+  },
+) {
+  const { i18n } = useLingui();
+  const t = (message: string) => i18n._(message);
+  return (
+    <section className="grid gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <strong className="break-all">{handleDomain}</strong>
+        <StateBadge tone={verified ? "ok" : "waiting"}>
+          {verified ? t("Redirecting") : t("Waiting for the redirect")}
+        </StateBadge>
+      </div>
+      <p className="text-muted-foreground text-sm">
+        {verified
+          ? i18n._(
+            "Handles on this instance end in @{domain}. Keep this redirect in place: other servers find accounts through it.",
+            { domain: handleDomain },
+          )
+          : i18n._(
+            "Handles on this instance end in @{domain}. Have the web server for {domain} redirect /.well-known/webfinger here; with nginx:",
+            { domain: handleDomain },
+          )}
+      </p>
+      <pre className="bg-muted/60 overflow-x-auto rounded-md p-3 text-xs"><code>{`location = /.well-known/webfinger {
+    return 301 https://${webDomain}$request_uri;
+}`}</code></pre>
+    </section>
   );
 }
 

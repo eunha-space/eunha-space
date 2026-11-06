@@ -224,6 +224,10 @@ export type CustomerTenantDetail = {
     owner_ready: boolean;
     /** Taken offline because the subscription ended, rather than deleted. */
     billing_suspended: boolean;
+    /** The domain in the instance's handles, when it is not `domain`. */
+    handle_domain: string | null;
+    /** Whether the handle domain was seen redirecting WebFinger here. */
+    handle_domain_verified: boolean;
     /** When the customer area last issued a password for the Owner. */
     owner_password_issued_at: string | null;
   };
