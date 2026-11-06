@@ -130,6 +130,18 @@ handles on the new domain, so one is refused for these instances. Health
 checks expect `/api/v2/instance` to name the handle domain, which is what
 Eunha reports as the instance's `domain`.
 
+eunha space's own instances are the one exception, and only an operator can
+make one: handles on a provided suffix itself, such as `@nyx@eunha.space`, with
+the instance at a provided hostname such as `social.eunha.space`. Both domains
+stay with eunha space, so nothing is left behind. The handle domain must be a
+suffix exactly, never a hostname under it, and never beside a custom web
+domain. The control plane serves the suffix, so it answers
+`/.well-known/webfinger` there itself: a request whose host is a suffix that an
+instance has its handles on is redirected, query and all, to WebFinger on that
+instance's web domain. That is the redirect setup waits for, as with a
+customer's handle domain. Each suffix holds the handles of one instance at
+most.
+
 The portal and every email to a customer are in English or Korean. The service
 is called eunha space in English and 은하공간 in Korean, in the page title, the
 portal and as the emails' sender name. An account's language (`users.locale`)

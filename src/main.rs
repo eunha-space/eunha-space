@@ -1101,6 +1101,7 @@ async fn main() -> Result<()> {
         .nest("/api", api)
         .route("/health/live", get(health::live))
         .route("/health/ready", get(health::ready))
+        .route("/.well-known/webfinger", get(handle_domain_webfinger))
         .route_service("/", index.clone())
         .route_service("/pricing", index.clone())
         .route_service("/refund-policy", index.clone())
@@ -1747,7 +1748,13 @@ async fn create_tenant_inner(
     let aliases: Vec<String> = provided_domains.iter().skip(1).cloned().collect();
     let handle_domain = match body.handle_domain.take() {
         Some(handle_domain) => {
-            validate_handle_domain(s, &handle_domain, custom_domain.as_deref()).await?
+            validate_handle_domain(
+                s,
+                &handle_domain,
+                custom_domain.as_deref(),
+                admin_user_id.is_some(),
+            )
+            .await?
         }
         None => None,
     };
@@ -2205,10 +2212,17 @@ async fn adopt_legacy_domain(
 /// domain is accepted only beside a custom domain. It must be a domain of its
 /// own: never a provided hostname, never the web domain, never another
 /// instance's.
+///
+/// eunha space's own instances are the exception, and only an operator may
+/// make one: handles on a provided suffix itself, such as `@nyx@eunha.space`,
+/// with the instance at a provided hostname. Both domains stay with eunha
+/// space, so nothing is left behind, and the control plane, which serves the
+/// suffix, redirects its WebFinger (see [`handle_domain_webfinger`]).
 async fn validate_handle_domain(
     s: &Shared,
     handle_domain: &str,
     custom_domain: Option<&str>,
+    operator: bool,
 ) -> Result<Option<String>, ApiError> {
     let handle_domain = handle_domain
         .trim()
@@ -2217,22 +2231,30 @@ async fn validate_handle_domain(
     if handle_domain.is_empty() {
         return Ok(None);
     }
-    let Some(custom_domain) = custom_domain else {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "Handles on another domain need a custom domain for the instance itself.".into(),
-        ));
-    };
-    if !is_valid_domain(&handle_domain)
-        || handle_domain == custom_domain
-        || s.provided_domain_suffixes.iter().any(|suffix| {
-            handle_domain == *suffix || handle_domain.ends_with(&format!(".{suffix}"))
-        })
-    {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "Enter a valid handle domain you own, other than the instance's own domain.".into(),
-        ));
+    let provided = s
+        .provided_domain_suffixes
+        .iter()
+        .any(|suffix| handle_domain == *suffix || handle_domain.ends_with(&format!(".{suffix}")));
+    match custom_domain {
+        None if operator
+            && s.provided_domain_suffixes
+                .iter()
+                .any(|suffix| handle_domain == *suffix) => {}
+        None => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "Handles on another domain need a custom domain for the instance itself.".into(),
+            ));
+        }
+        Some(custom_domain) => {
+            if !is_valid_domain(&handle_domain) || handle_domain == custom_domain || provided {
+                return Err(ApiError(
+                    StatusCode::BAD_REQUEST,
+                    "Enter a valid handle domain you own, other than the instance's own domain."
+                        .into(),
+                ));
+            }
+        }
     }
     if sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM tenants WHERE (domain=$1 OR handle_domain=$1 OR $1=ANY(aliases) OR $1=ANY(previous_domains))) OR EXISTS(SELECT 1 FROM tenant_domains WHERE hostname=$1)",
@@ -2247,6 +2269,62 @@ async fn validate_handle_domain(
         ));
     }
     Ok(Some(handle_domain))
+}
+
+/// WebFinger for an eunha space instance whose handles are on a provided
+/// suffix, which the control plane serves: `@nyx@eunha.space` is looked up at
+/// `https://eunha.space/.well-known/webfinger`, and is sent on to the instance
+/// as Mastodon's `WEB_DOMAIN` setup asks. The request's host only picks which
+/// suffix is asked about; a redirect goes only to the instance that owns it.
+async fn handle_domain_webfinger(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> Result<axum::response::Response, ApiError> {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|host| host.to_str().ok())
+        .map(|host| {
+            host.split(':')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default();
+    if !s
+        .provided_domain_suffixes
+        .iter()
+        .any(|suffix| *suffix == host)
+    {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    }
+    let Some(web_domain) = sqlx::query_scalar::<_, String>(
+        "SELECT domain FROM tenants WHERE handle_domain=$1 AND lifecycle_state NOT IN ('purging','purged')",
+    )
+    .bind(&host)
+    .fetch_optional(&s.db)
+    .await?
+    else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    let query = uri
+        .query()
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    Ok((
+        StatusCode::MOVED_PERMANENTLY,
+        [
+            (
+                axum::http::header::LOCATION,
+                format!("https://{web_domain}/.well-known/webfinger{query}"),
+            ),
+            (
+                axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                "*".to_owned(),
+            ),
+        ],
+    )
+        .into_response())
 }
 
 /// Whether `location`, where the handle domain's WebFinger redirected, is

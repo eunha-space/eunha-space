@@ -4267,7 +4267,7 @@ async fn a_handle_domain_needs_a_custom_domain_of_its_own(pool: PgPool) {
     let check = |handle: &'static str, custom: Option<&'static str>| {
         let state = state.clone();
         async move {
-            validate_handle_domain(&state, handle, custom)
+            validate_handle_domain(&state, handle, custom, false)
                 .await
                 .map_err(|error| error.0)
         }
@@ -4302,4 +4302,104 @@ async fn a_handle_domain_needs_a_custom_domain_of_its_own(pool: PgPool) {
             "{handle}"
         );
     }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn only_an_operator_puts_handles_on_a_provided_suffix(pool: PgPool) {
+    let _ = fixture(&pool).await;
+    let mut state = state(pool.clone());
+    Arc::get_mut(&mut state).unwrap().provided_domain_suffixes =
+        vec!["eunha.example".into(), "eunha.example.net".into()];
+    let check = |handle: &'static str, custom: Option<&'static str>, operator: bool| {
+        let state = state.clone();
+        async move {
+            validate_handle_domain(&state, handle, custom, operator)
+                .await
+                .map_err(|error| error.0)
+        }
+    };
+    // An official instance: @nyx@eunha.example at social.eunha.example.
+    assert_eq!(
+        check("Eunha.Example.", None, true).await,
+        Ok(Some("eunha.example".into()))
+    );
+    assert_eq!(
+        check("eunha.example.net", None, true).await,
+        Ok(Some("eunha.example.net".into()))
+    );
+    // A customer never may, and only the suffix itself is an operator's.
+    assert_eq!(
+        check("eunha.example", None, false).await,
+        Err(StatusCode::BAD_REQUEST)
+    );
+    for handle in ["a.eunha.example", "example.com"] {
+        assert_eq!(
+            check(handle, None, true).await,
+            Err(StatusCode::BAD_REQUEST),
+            "{handle}"
+        );
+    }
+    // Ids on a custom web domain would leave with it; handles on the suffix
+    // could not.
+    assert_eq!(
+        check("eunha.example", Some("social.example.com"), true).await,
+        Err(StatusCode::BAD_REQUEST)
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn the_suffix_sends_webfinger_on_to_the_instance_with_its_handles(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    sqlx::query("UPDATE tenants SET domain='social.eunha.example',handle_domain='eunha.example' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut state = state(pool.clone());
+    Arc::get_mut(&mut state).unwrap().provided_domain_suffixes =
+        vec!["eunha.example".into(), "eunha.example.net".into()];
+    let ask = |host: &'static str| {
+        let state = state.clone();
+        async move {
+            let mut headers = HeaderMap::new();
+            headers.insert(axum::http::header::HOST, host.parse().unwrap());
+            handle_domain_webfinger(
+                State(state),
+                headers,
+                "/.well-known/webfinger?resource=acct:nyx@eunha.example"
+                    .parse()
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    let response = ask("eunha.example:443").await;
+    assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+    let location = response.headers()[axum::http::header::LOCATION]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        location,
+        "https://social.eunha.example/.well-known/webfinger?resource=acct:nyx@eunha.example"
+    );
+    // The redirect is the one setup waits for.
+    assert!(webfinger_redirect_reaches(
+        &location,
+        "social.eunha.example"
+    ));
+    // A suffix no instance has its handles on, and a host that is no suffix.
+    for host in ["eunha.example.net", "elsewhere.example"] {
+        assert_eq!(ask(host).await.status(), StatusCode::NOT_FOUND, "{host}");
+    }
+    sqlx::query("UPDATE tenants SET lifecycle_state='purged' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(ask("eunha.example").await.status(), StatusCode::NOT_FOUND);
 }
