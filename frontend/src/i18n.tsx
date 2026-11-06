@@ -421,10 +421,10 @@ const ko: Record<string, string> = {
   "Change plan": "요금제 변경",
   "Current plan": "현재 요금제",
   "From your next renewal": "다음 갱신부터",
-  "Change to this plan?": "이 요금제로 변경할까요?",
+  "Change to {plan}?": "{plan} 요금제로 변경할까요?",
   "Keep this plan": "변경하지 않기",
-  "It starts now, and we charge your card the difference for the rest of this period:":
-    "지금 바로 적용되며, 이번 이용 기간의 남은 기간에 대한 차액을 카드로 결제합니다:",
+  "It starts now, and we charge your card the difference for the {days} days left of this period: {amount}.":
+    "지금 바로 적용되며, 이번 이용 기간의 남은 {days}일에 대한 차액 {amount}을 카드로 결제합니다.",
   "Your renewal date stays the same.": "갱신일은 그대로입니다.",
   "It starts now at no charge, because so little of this period is left.":
     "이번 이용 기간이 거의 끝나 추가 요금 없이 지금 바로 적용됩니다.",

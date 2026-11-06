@@ -195,7 +195,8 @@ export function SubscriptionSections(
       setBilling(
         await api<Billing>("/customer/billing/plan", {
           method: "POST",
-          body: JSON.stringify({ plan_id: plan.id }),
+          // The server charges only what was shown, or says what it is now.
+          body: JSON.stringify({ plan_id: plan.id, expected_charge: plan.switch_charge }),
         }),
       );
       await onChanged();
@@ -552,7 +553,7 @@ export function SubscriptionSections(
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>
-                {switching ? `${t("Change to this plan?")} ${planName(switching)}` : ""}
+                {switching ? i18n._("Change to {plan}?", { plan: planName(switching) }) : ""}
               </AlertDialogTitle>
               <AlertDialogDescription>
                 {switching && switching.id === subscription?.plan_id
@@ -564,7 +565,12 @@ export function SubscriptionSections(
                   : switching && polar && planAmount(switching) > (subscription?.amount ?? 0)
                   ? `${t("It starts now, and Polar charges your card the difference for the rest of this period.")} ${t("Your renewal date stays the same.")}`
                   : switching?.switch_charge
-                  ? `${t("It starts now, and we charge your card the difference for the rest of this period:")} ${money(switching.switch_charge, "KRW")}. ${t("Your renewal date stays the same.")}`
+                  ? `${
+                    i18n._(
+                      "It starts now, and we charge your card the difference for the {days} days left of this period: {amount}.",
+                      { days: switching.switch_days ?? 0, amount: money(switching.switch_charge, "KRW") },
+                    )
+                  } ${t("Your renewal date stays the same.")}`
                   : switching && planAmount(switching) > (subscription?.amount ?? 0)
                   ? t("It starts now at no charge, because so little of this period is left.")
                   : t("It starts at your next renewal. Nothing changes until then, and you can change your mind.")}

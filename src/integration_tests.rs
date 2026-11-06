@@ -3354,6 +3354,12 @@ fn an_upgrade_costs_the_difference_for_what_is_left_of_the_period() {
     let charge = |now| billing::upgrade_charge(19900, 9900, start, end, now);
     assert_eq!(charge(start), 10000);
     assert_eq!(charge(start + time::Duration::days(15)), 5000);
+    // The day under way counts as used, and the rest is rounded up to ten
+    // won: 8,000 won for 29 days of 30 is 7,733.33, charged as 7,740.
+    let personal = |now| billing::upgrade_charge(14900, 6900, start, end, now);
+    assert_eq!(personal(start + time::Duration::minutes(21)), 7740);
+    assert_eq!(personal(start + time::Duration::hours(23)), 7740);
+    assert_eq!(personal(start + time::Duration::hours(25)), 7470);
     // Too little to put through a card, or nothing at all.
     assert_eq!(charge(end - time::Duration::hours(1)), 0);
     assert_eq!(charge(end + time::Duration::days(1)), 0);
@@ -3385,7 +3391,12 @@ async fn an_upgrade_is_charged_now_and_keeps_the_renewal_date(pool: PgPool) {
     assert_eq!(view["payments"][0]["kind"], "upgrade");
     assert_eq!(view["payments"][0]["status"], "paid");
     let charged = view["payments"][0]["amount"].as_i64().unwrap();
-    assert!((9990..=10000).contains(&charged), "charged {charged}");
+    // The day under way counts as used: 10,000 won for all but one day of a
+    // 28- to 31-day month, rounded up to ten won.
+    assert!(
+        (9650..=9680).contains(&charged) && charged % 10 == 0,
+        "charged {charged}"
+    );
     assert_eq!(toss.charges().len(), 2);
     assert_eq!(period_end(pool.clone()).await, renews_on);
     assert_eq!(
@@ -5501,5 +5512,71 @@ async fn paused_signups_refuse_new_subscriptions_only(pool: PgPool) {
         .await
         .unwrap(),
         3
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn an_upgrade_charges_only_the_amount_the_customer_was_shown(pool: PgPool) {
+    let (_toss, base) = toss_stand_in().await;
+    let state = billed_state(pool.clone(), &base);
+    let (user_id, headers) = billed_customer(&pool).await;
+    subscribe(&state, &headers).await;
+    let big = plan(&pool, 19900, None).await;
+    let view = polar_view(&state, &headers).await;
+    let shown = view["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|plan| plan["id"] == big.to_string())
+        .unwrap()
+        .clone();
+    // The day under way counts as used.
+    assert!((27..=30).contains(&shown["switch_days"].as_i64().unwrap()));
+    let choose = |expected: i64| {
+        billing::change_plan(
+            State(state.clone()),
+            headers.clone(),
+            Json(
+                serde_json::from_value(
+                    serde_json::json!({"plan_id": big, "expected_charge": expected}),
+                )
+                .unwrap(),
+            ),
+        )
+    };
+
+    // A day turned since the dialog opened: nothing is charged, and the
+    // customer is told the amount now.
+    let refused = choose(shown["switch_charge"].as_i64().unwrap() + 270)
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(refused.0, StatusCode::CONFLICT);
+    assert!(refused.1.contains("₩"));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM subscription_payments WHERE user_id=$1 AND kind='upgrade'"
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+
+    // The amount shown is the amount charged.
+    choose(shown["switch_charge"].as_i64().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT amount FROM subscription_payments WHERE user_id=$1 AND kind='upgrade'"
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        shown["switch_charge"].as_i64().unwrap()
     );
 }

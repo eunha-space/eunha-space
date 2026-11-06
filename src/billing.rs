@@ -676,6 +676,9 @@ pub(crate) struct PlanView {
     /// What moving to this plan charges now, for an upgrade.
     #[sqlx(skip)]
     switch_charge: Option<i64>,
+    /// The whole days left that `switch_charge` is for.
+    #[sqlx(skip)]
+    switch_days: Option<i64>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -749,6 +752,7 @@ pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiEr
         let now = OffsetDateTime::now_utc();
         for plan in plans.iter_mut().filter(|plan| plan.amount > running.amount) {
             plan.switch_charge = Some(upgrade_charge(plan.amount, running.amount, start, end, now));
+            plan.switch_days = Some(days_left(start, end, now));
         }
     }
     let (toss_signups, polar_signups) = sqlx::query_as::<_, (bool, bool)>(
@@ -851,8 +855,21 @@ async fn new_order_id(tx: &mut sqlx::PgConnection) -> sqlx::Result<String> {
     }
 }
 
-/// The difference between two monthly prices for what is left of a period,
-/// rounded up to the won, or nothing when that is too little to charge.
+/// The whole days left of a period, the day under way counted as used: what
+/// an upgrade is charged for. Never more than the period's own days.
+pub(crate) fn days_left(start: OffsetDateTime, end: OffsetDateTime, now: OffsetDateTime) -> i64 {
+    (end - now).whole_days().clamp(0, period_days(start, end))
+}
+
+/// A period's length in days: 28 to 31 for a month.
+fn period_days(start: OffsetDateTime, end: OffsetDateTime) -> i64 {
+    ((end - start).whole_hours() as f64 / 24.0).round().max(1.0) as i64
+}
+
+/// The difference between two monthly prices for the whole days left of a
+/// period (일할 계산), rounded up to ten won, or nothing when that is too
+/// little to charge. It changes only when a day passes, so the amount a
+/// customer is shown is the amount charged, unless a day turned meanwhile.
 pub(crate) fn upgrade_charge(
     new_amount: i64,
     old_amount: i64,
@@ -860,10 +877,11 @@ pub(crate) fn upgrade_charge(
     end: OffsetDateTime,
     now: OffsetDateTime,
 ) -> i64 {
-    let total = (end - start).whole_seconds().max(1) as i128;
-    let left = ((end - now).whole_seconds() as i128).clamp(0, total);
+    let total = period_days(start, end) as i128;
+    let left = days_left(start, end, now) as i128;
     let difference = (new_amount - old_amount).max(0) as i128;
-    let charge = ((difference * left + total - 1) / total) as i64;
+    let tens = (difference * left + total * 10 - 1) / (total * 10);
+    let charge = (tens * 10) as i64;
     if charge < SMALLEST_CHARGE { 0 } else { charge }
 }
 
@@ -1208,6 +1226,11 @@ pub(crate) async fn resume(
 #[derive(Deserialize)]
 pub(crate) struct PlanChoice {
     plan_id: Uuid,
+    /// The upgrade charge the customer was shown. If it is no longer what
+    /// would be charged, as when a day turned since, nothing is charged and
+    /// they are shown the new amount.
+    #[serde(default)]
+    expected_charge: Option<i64>,
 }
 
 /// Move a running subscription to another plan. A dearer one applies now, for
@@ -1317,6 +1340,18 @@ pub(crate) async fn change_plan(
         return Ok(Json(view(&s, user_id).await?));
     }
     let charge = upgrade_charge(new_amount, amount, start, end, OffsetDateTime::now_utc());
+    if body
+        .expected_charge
+        .is_some_and(|expected| expected != charge)
+    {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "The charge for the rest of this period is now {}. Check it and try again.",
+                crate::billing_mail::money(charge, "KRW")
+            ),
+        ));
+    }
     if charge == 0 {
         sqlx::query("UPDATE subscriptions SET plan_id=$2,amount=$3,pending_plan_id=NULL,updated_at=now() WHERE user_id=$1")
             .bind(user_id)

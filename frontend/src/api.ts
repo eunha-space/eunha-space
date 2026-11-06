@@ -162,6 +162,8 @@ export type Plan = {
   active: boolean;
   /** What moving to this plan charges now, for a TossPayments upgrade. */
   switch_charge: number | null;
+  /** The whole days left that `switch_charge` is for. */
+  switch_days: number | null;
 };
 
 /** A plan as shown to visitors, who have no account yet. */

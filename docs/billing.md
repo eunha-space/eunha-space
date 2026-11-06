@@ -162,8 +162,13 @@ An active subscription that is not set to end can move to any offered plan.
 Past-due subscriptions must pay first.
 
 - **A dearer plan applies now.** The customer pays the price difference for the
-  time left in the period, rounded up to the won, and the renewal date stays the
-  same. Under 100 won it applies free. The charge is a payment with `kind`
+  whole days left in the period (일할 계산), the day under way counted as used,
+  rounded up to ten won, and the renewal date stays the same: 8,000 won more a
+  month, 29 days of a 30-day period left, is 7,733.33, charged as 7,740. Under
+  100 won it applies free. The confirmation names the days and the amount, and
+  sends the amount back as `expected_charge`. If a day has turned since and the
+  amount is no longer that, nothing is charged and the customer is told the new
+  amount, so nobody is charged an amount they were not shown. The charge is a payment with `kind`
   `upgrade`, taking the same order, idempotency and lookup path as a renewal, so
   one interrupted mid-request is never charged twice. If the card declines it,
   the plan does not change, nothing is retried and the decline does not count
