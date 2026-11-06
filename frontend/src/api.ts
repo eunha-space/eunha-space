@@ -363,6 +363,30 @@ export class ApiError extends Error {
   }
 }
 
+type BootResponse = { ok: boolean; status: number; body: unknown };
+declare global {
+  interface Window {
+    __boot?: Partial<Record<"locale" | "me", Promise<BootResponse>>>;
+  }
+}
+
+/**
+ * A request index.html started before the script loaded, the first time it is
+ * asked for; after that, null, and the caller asks the server itself.
+ */
+export function takeBoot<T>(name: "locale" | "me"): Promise<T> | null {
+  const started = window.__boot?.[name];
+  if (!started) return null;
+  delete window.__boot![name];
+  return trackRequest(started.then(({ ok, status, body }) => {
+    if (!ok) {
+      const error = (body as { error?: string } | null)?.error;
+      throw new ApiError(error || `Request failed (${status})`, status);
+    }
+    return body as T;
+  }));
+}
+
 export function api<T>(path: string, init?: RequestInit): Promise<T> {
   return trackRequest(request<T>(path, init));
 }

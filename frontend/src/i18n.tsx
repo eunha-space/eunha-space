@@ -1,4 +1,5 @@
 import { i18n } from "@lingui/core";
+import { takeBoot } from "@/api";
 import { I18nProvider, useLingui } from "@lingui/react";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
@@ -513,12 +514,18 @@ apply(
 export async function initLocale(): Promise<void> {
   if (adminPage) return;
   try {
-    const response = await fetch("/api/customer/locale", {
-      signal: AbortSignal.timeout(2000),
-    });
-    // An error's body has no locale to activate, and activating none renders nothing.
-    if (!response.ok) throw new Error(`Request failed (${response.status})`);
-    const { locale, saved } = (await response.json()) as { locale: Locale; saved: boolean };
+    // Usually already on its way, asked for by index.html.
+    const answer = takeBoot<{ locale: Locale; saved: boolean }>("locale") ??
+      fetch("/api/customer/locale").then(async (response) => {
+        // An error's body has no locale to activate, and activating none renders nothing.
+        if (!response.ok) throw new Error(`Request failed (${response.status})`);
+        return (await response.json()) as { locale: Locale; saved: boolean };
+      });
+    const timeout = new Promise<never>((_, reject) =>
+      window.setTimeout(() => reject(new Error("Timed out")), 2000)
+    );
+    const { locale, saved } = await Promise.race([answer, timeout]);
+    if (locale !== "ko" && locale !== "en") throw new Error("No locale");
     const picked = readPicked();
     apply(!saved && picked ? picked : locale);
   } catch {

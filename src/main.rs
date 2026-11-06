@@ -489,6 +489,24 @@ struct TenantToml {
     #[serde(default)]
     limits: LimitsToml,
 }
+/// Vite names everything under /assets/ after its contents, so a file there
+/// never changes: browsers and Cloudflare may keep it for good. Without this
+/// they fell back to a four-hour lifetime and asked again after that.
+async fn immutable_assets(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let hashed = request.uri().path().starts_with("/assets/");
+    let mut response = next.run(request).await;
+    if hashed && response.status().is_success() {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    }
+    response
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1098,6 +1116,7 @@ async fn main() -> Result<()> {
             ServeFile::new(frontend_directory.join("index.html")),
         )
         .fallback_service(ServeDir::new(frontend_directory))
+        .layer(axum::middleware::from_fn(immutable_assets))
         .layer(TraceLayer::new_for_http().make_span_with(|request: &axum::http::Request<_>| {
             tracing::info_span!("http_request", method = %request.method(), path = %request.uri().path())
         }))
@@ -6548,6 +6567,37 @@ async fn render_tenant(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn hashed_assets_are_kept_for_good_and_nothing_else_is() {
+        use axum::{Router, body::Body, http::Request, routing::get};
+        let app = Router::new()
+            .route("/assets/index-abc.js", get(|| async { "js" }))
+            .route("/", get(|| async { "shell" }))
+            .layer(axum::middleware::from_fn(super::immutable_assets));
+        let cache = |path: &'static str| {
+            let app = app.clone();
+            async move {
+                let response = tower::ServiceExt::oneshot(
+                    app,
+                    Request::get(path).body(Body::empty()).unwrap(),
+                )
+                .await
+                .unwrap();
+                response
+                    .headers()
+                    .get(axum::http::header::CACHE_CONTROL)
+                    .map(|value| value.to_str().unwrap().to_owned())
+            }
+        };
+        assert_eq!(
+            cache("/assets/index-abc.js").await.as_deref(),
+            Some("public, max-age=31536000, immutable")
+        );
+        // A missing asset must not be cached as though it were there.
+        assert_eq!(cache("/assets/missing.js").await, None);
+        assert_eq!(cache("/").await, None);
+    }
+
     #[test]
     fn a_handle_domain_redirect_must_reach_webfinger_on_the_web_domain() {
         for location in [

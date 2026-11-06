@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { useLingui } from "@lingui/react";
 import { ArrowLeft, Check, CircleAlert, CircleCheck, Clock } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -15,18 +15,17 @@ import { cn } from "cn";
  */
 
 /** The site's one column: the header, every page and the footer share its edges. */
-export const siteColumn = "mx-auto w-full max-w-5xl px-4 md:px-8";
-
 /**
- * A page below the header. Forms and settings keep to a readable width, along
- * the same left edge as the wider pages, so that a title stays put between them.
+ * The one column every customer page keeps to, header and footer included, so
+ * that nothing moves sideways between pages. The operators' console is apart.
  */
-export function Page(
-  { wide = false, children }: { wide?: boolean; children: ReactNode },
-) {
+export const siteColumn = "mx-auto w-full max-w-3xl px-4 md:px-8";
+
+/** A page below the header, in the site's column. */
+export function Page({ children }: { children: ReactNode }) {
   return (
     <main className={cn(siteColumn, "flex-1 py-8 md:py-12")}>
-      <div className={cn("grid gap-6", !wide && "max-w-2xl")}>{children}</div>
+      <div className="grid gap-6">{children}</div>
     </main>
   );
 }
@@ -110,17 +109,34 @@ export function ProseSection(
       className="grid scroll-mt-4 gap-6 border-t py-12 md:grid-cols-[12rem_1fr] md:gap-10 md:py-16"
     >
       <h2 className="text-xl font-semibold tracking-tight">{title}</h2>
-      <div className="max-w-2xl">{children}</div>
+      <div>{children}</div>
     </section>
   );
 }
 
 /** Waiting for a page or a section's first answer. */
+/**
+ * A wait shorter than this reads as instant, and a spinner that flashes up and
+ * away only makes it look slower; so the spinner waits this long to appear.
+ */
+const SPINNER_DELAY_MS = 300;
+
 export function Loading({ inline = false }: { inline?: boolean }) {
   const { i18n } = useLingui();
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setVisible(true), SPINNER_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, []);
+  // The space is kept either way, so the page does not move when it appears.
   return (
     <div className={cn("grid place-items-center", inline ? "py-4" : "min-h-64")}>
-      <Spinner label={i18n._("Loading…")} className="text-muted-foreground" />
+      {visible && (
+        <Spinner
+          label={i18n._("Loading…")}
+          className="text-muted-foreground animate-in fade-in duration-300 motion-reduce:animate-none"
+        />
+      )}
     </div>
   );
 }

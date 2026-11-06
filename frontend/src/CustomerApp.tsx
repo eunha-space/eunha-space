@@ -3,6 +3,7 @@ import { CreditCard, KeyRound, Plus, Server } from "lucide-react";
 import {
   api,
   ApiError,
+  takeBoot,
   countsTowardInstanceLimit,
   type Customer,
   errorMessage,
@@ -42,6 +43,8 @@ import { CommunityGuidelines } from "@/CommunityGuidelines";
 import { SiteHeader } from "@/SiteHeader";
 import { navigate, useCustomerNavigation } from "@/navigation";
 
+const PUBLIC_PAGES = ["/", "/pricing", "/refund-policy", "/community-guidelines"];
+
 export function CustomerApp() {
   const { i18n } = useLingui();
   const t = (message: string, values?: Record<string, string | number>) =>
@@ -58,10 +61,17 @@ export function CustomerApp() {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   async function load() {
-    const me = await api<Customer>("/customer/session/me");
-    const nextTenants = await api<Tenant[]>("/customer/tenants");
+    // Both at once: a signed-out visitor's tenants fail as the session does.
+    // The first session check is the one index.html has already started.
+    const [me, nextTenants] = await Promise.all([
+      takeBoot<Customer>("me") ?? api<Customer>("/customer/session/me"),
+      // The pages for anyone list no instances.
+      PUBLIC_PAGES.includes(location.pathname)
+        ? Promise.resolve(null)
+        : api<Tenant[]>("/customer/tenants"),
+    ]);
     setCustomer(me);
-    setTenants(nextTenants);
+    if (nextTenants) setTenants(nextTenants);
     // Signed in, these paths have nothing to show.
     if (["/signin", "/signup"].includes(location.pathname)) {
       navigate("/instances", { replace: true });
@@ -150,6 +160,12 @@ export function CustomerApp() {
       {main}
     </>
   );
+  // The pages for anyone say the same thing signed in or not, so they do not
+  // wait for the session; the header fills in its account when it is known.
+  if (location.pathname === "/") return withHeader(<Landing />);
+  if (location.pathname === "/pricing") return withHeader(<Pricing customer={sessionLoaded ? customer : undefined} />);
+  if (location.pathname === "/refund-policy") return withHeader(<RefundPolicy />);
+  if (location.pathname === "/community-guidelines") return withHeader(<CommunityGuidelines />);
   if (!sessionLoaded) {
     return withHeader(
       <Page>
@@ -157,10 +173,6 @@ export function CustomerApp() {
       </Page>,
     );
   }
-  if (location.pathname === "/") return withHeader(<Landing />);
-  if (location.pathname === "/pricing") return withHeader(<Pricing customer={customer} />);
-  if (location.pathname === "/refund-policy") return withHeader(<RefundPolicy />);
-  if (location.pathname === "/community-guidelines") return withHeader(<CommunityGuidelines />);
   if (!customer) {
     return withHeader(
       // A form on its own, centred; at a fixed height, so that it stays put

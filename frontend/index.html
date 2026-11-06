@@ -19,6 +19,23 @@
         var dark = stored ? stored === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
         document.documentElement.classList.toggle("dark", dark);
       } catch (_) {}
+      // The customer pages need the language and the session before they can
+      // say anything. Asking now runs those requests alongside the download of
+      // the script, rather than one after the other once it has started.
+      if (!location.pathname.startsWith("/admin")) {
+        var ask = function (path) {
+          return fetch(path, { credentials: "same-origin" }).then(function (response) {
+            return response.json().then(
+              function (body) { return { ok: response.ok, status: response.status, body: body }; },
+              function () { return { ok: response.ok, status: response.status, body: null }; }
+            );
+          });
+        };
+        window.__boot = {
+          locale: ask("/api/customer/locale"),
+          me: ask("/api/customer/session/me"),
+        };
+      }
     </script>
   </head>
   <body>

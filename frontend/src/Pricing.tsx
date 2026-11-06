@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { cn } from "cn";
 import { useLingui } from "@lingui/react";
 import { api, type Customer, type PublicPlan } from "@/api";
 import { Button } from "@/components/ui/button";
@@ -17,7 +18,8 @@ const TERMS = [
 ];
 
 /** The plans on offer, at `/pricing`, for anyone. */
-export function Pricing({ customer }: { customer: Customer | null }) {
+/** `customer` is undefined until the session is known, null when signed out. */
+export function Pricing({ customer }: { customer: Customer | null | undefined }) {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
   const [plans, setPlans] = useState<PublicPlan[]>([]);
@@ -35,7 +37,7 @@ export function Pricing({ customer }: { customer: Customer | null }) {
     ? { href: "/signup", label: t("Create account") }
     : { href: "/account", label: t(customer.subscription_required ? "Subscribe" : "Change plan") };
   return (
-    <Page wide>
+    <Page>
       <PageHeader
         title={t("Pricing")}
         description={t("Every plan includes hosting, automatic updates and an address of your own.")}
@@ -56,7 +58,11 @@ export function Pricing({ customer }: { customer: Customer | null }) {
               <ul className="text-muted-foreground grid gap-1 text-sm">
                 {planLimits(plan, korean).map((limit) => <li key={limit}>{limit}</li>)}
               </ul>
-              <Button className="mt-auto" render={<a href={action.href} />}>
+              <Button
+                // Held in place, unseen, until it is known which one to offer.
+                className={cn("mt-auto", customer === undefined && "invisible")}
+                render={<a href={action.href} />}
+              >
                 {action.label}
               </Button>
             </PlanCard>
@@ -77,7 +83,7 @@ export function Pricing({ customer }: { customer: Customer | null }) {
           </PlanCard>
         </li>
       </ul>
-      <section className="grid max-w-2xl gap-3 border-t pt-6">
+      <section className="grid gap-3 border-t pt-6">
         <h2 className="text-xl font-semibold tracking-tight">{t("Billing terms")}</h2>
         <ul className="text-muted-foreground grid list-disc gap-2 pl-5">
           {TERMS.map((term) => <li key={term}>{t(term)}</li>)}

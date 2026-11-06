@@ -69,9 +69,9 @@ export function Landing() {
   const t = (message: string) => i18n._(message);
   return (
     <main className={`${siteColumn} flex-1`}>
-      <section className="grid items-center gap-10 py-12 md:py-20 lg:grid-cols-[3fr_2fr]">
+      <section className="grid items-center gap-10 py-12 md:grid-cols-[1fr_13rem] md:py-20">
         <div>
-          <h1 className="text-4xl font-semibold tracking-tight text-balance md:text-6xl">
+          <h1 className="text-4xl font-semibold tracking-tight text-balance md:text-5xl">
             {/* A colon ends a line: the Korean headline names the server, then says what we do. */}
             {t("Your own Mastodon-compatible server, run for you.")
               .split(/(?<=:)\s+/)
@@ -144,7 +144,7 @@ function Constellation({ label }: { label: string }) {
   return (
     <svg
       viewBox="0 0 430 360"
-      className="mx-auto w-full max-w-sm lg:max-w-none"
+      className="mx-auto w-full max-w-sm md:max-w-none"
       aria-hidden="true"
     >
       <g className="stroke-border" strokeWidth="1.5">

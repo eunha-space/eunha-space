@@ -2,7 +2,6 @@ import { won } from "@/format";
 import { useEffect, useState } from "react";
 import { CreditCard, ExternalLink } from "lucide-react";
 import { useLingui } from "@lingui/react";
-import { loadTossPayments } from "@tosspayments/tosspayments-sdk";
 import { api, type Billing, type Customer, errorMessage, type Plan } from "@/api";
 import { cn } from "cn";
 import { absoluteTime } from "@/format";
@@ -120,6 +119,8 @@ export function SubscriptionSections(
         "/customer/billing/checkout",
         { method: "POST", body: JSON.stringify({ plan_id: choosing ? chosenPlan?.id : undefined }) },
       );
+      // Loaded only for the customer about to pay, not with every page.
+      const { loadTossPayments } = await import("@tosspayments/tosspayments-sdk");
       const toss = await loadTossPayments(checkout.client_key);
       await toss.payment({ customerKey: checkout.customer_key }).requestBillingAuth({
         method: "CARD",
