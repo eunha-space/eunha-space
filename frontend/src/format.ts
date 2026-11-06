@@ -75,3 +75,21 @@ export function instanceUsage(
     ? `${limit}개 중 ${used}개 사용 중입니다.`
     : `${used} of ${limit} used.`;
 }
+
+const TRIAL_UNITS = {
+  day: ["day", "일"],
+  week: ["week", "주"],
+  month: ["month", "개월"],
+  year: ["year", "년"],
+} as const;
+
+/** "7-day free trial", "7일 무료 체험"; null for a plan without one. */
+export function trialLength(
+  plan: { polar_trial_interval: string | null; polar_trial_interval_count: number | null },
+  korean: boolean,
+): string | null {
+  const unit = TRIAL_UNITS[plan.polar_trial_interval as keyof typeof TRIAL_UNITS];
+  const count = plan.polar_trial_interval_count;
+  if (!unit || !count) return null;
+  return korean ? `${count}${unit[1]} 무료 체험` : `${count}-${unit[0]} free trial`;
+}

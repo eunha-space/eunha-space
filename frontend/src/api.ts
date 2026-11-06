@@ -150,6 +150,14 @@ export type Plan = {
   /** What Polar charges for it, for international cards, if it is sold there. */
   polar_amount: number | null;
   polar_currency: string | null;
+  /** The free trial its Polar product gives new subscribers, if any. */
+  polar_trial_interval: "day" | "week" | "month" | "year" | null;
+  polar_trial_interval_count: number | null;
+  /**
+   * For a subscriber in a trial, when it would end on this plan. Null if
+   * moving here ends it at once and Polar charges the first period.
+   */
+  trial_until: string | null;
   /** False for a retired plan, listed only for those on it. */
   active: boolean;
   /** What moving to this plan charges now, for a TossPayments upgrade. */
@@ -169,6 +177,8 @@ export type PublicPlan = Pick<
   | "monthly_activities"
   | "polar_amount"
   | "polar_currency"
+  | "polar_trial_interval"
+  | "polar_trial_interval_count"
 >;
 
 export type Billing = {
@@ -199,6 +209,8 @@ export type Billing = {
     renews_at: string | null;
     /** TossPayments' or the card company's reason for the last decline. */
     last_error: string | null;
+    /** When the Polar free trial it is in ends; nothing is charged before. */
+    trial_ends_at: string | null;
   } | null;
   payments: {
     order_id: string;

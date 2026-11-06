@@ -1,4 +1,4 @@
-import { money } from "@/format";
+import { money, trialLength } from "@/format";
 import { useEffect, useState } from "react";
 import { CreditCard, ExternalLink, Globe } from "lucide-react";
 import { useLingui } from "@lingui/react";
@@ -265,6 +265,10 @@ export function SubscriptionSections(
     description = t(
       "Your subscription is cancelled. Your instances keep running until the end of the paid period, then go offline with their data kept.",
     );
+  } else if (status === "active" && polar && subscription?.trial_ends_at) {
+    description = `${t("You are on a free trial until")} ${day(subscription.trial_ends_at)}. ${
+      t("Polar charges your international card then, and each month after. Cancel before then and you pay nothing.")
+    }`;
   } else if (status === "active" && polar) {
     description = t(
       "Your international card is charged automatically each month through Polar, which sends your receipts.",
@@ -319,6 +323,11 @@ export function SubscriptionSections(
           {choosing && chosenPlan && canPayInternationally && (
             <Detail label={t("With an international card")}>
               {internationalPrice(chosenPlan)}
+              {trialLength(chosenPlan, i18n.locale === "ko") && (
+                <span className="text-muted-foreground block text-sm">
+                  {trialLength(chosenPlan, i18n.locale === "ko")}
+                </span>
+              )}
             </Detail>
           )}
           {subscribed && subscription?.has_card && (
@@ -327,7 +336,13 @@ export function SubscriptionSections(
             </Detail>
           )}
           {status === "active" && subscription?.current_period_end && (
-            <Detail label={subscription.cancel_at_period_end ? t("Ends on") : t("Renews on")}>
+            <Detail
+              label={subscription.cancel_at_period_end
+                ? t("Ends on")
+                : subscription.trial_ends_at
+                ? t("First charge on")
+                : t("Renews on")}
+            >
               {day(
                 subscription.cancel_at_period_end
                   ? subscription.current_period_end
@@ -518,6 +533,10 @@ export function SubscriptionSections(
               <AlertDialogDescription>
                 {switching && switching.id === subscription?.plan_id
                   ? t("You stay on your current plan, and the change waiting for your next renewal is dropped.")
+                  : switching && polar && subscription?.trial_ends_at && switching.trial_until
+                  ? `${t("It starts now, and your free trial carries on until")} ${day(switching.trial_until)}. ${t("Nothing is charged before then.")}`
+                  : switching && polar && subscription?.trial_ends_at
+                  ? `${t("It starts now and ends your free trial, because this plan's trial is shorter or there is none. Polar charges your card this plan's price now:")} ${price(switching)}.`
                   : switching && polar && planAmount(switching) > (subscription?.amount ?? 0)
                   ? `${t("It starts now, and Polar charges your card the difference for the rest of this period.")} ${t("Your renewal date stays the same.")}`
                   : switching?.switch_charge

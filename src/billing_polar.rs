@@ -347,6 +347,10 @@ pub(crate) struct Subscription {
     pub(crate) customer: PolarCustomer,
     #[serde(default)]
     pub(crate) pending_update: Option<PendingUpdate>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub(crate) trial_start: Option<OffsetDateTime>,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub(crate) trial_end: Option<OffsetDateTime>,
 }
 
 /// Where a Polar subscription stands, as far as instances are concerned.
@@ -374,6 +378,13 @@ impl Subscription {
             "canceled" | "paused" | "incomplete_expired" => Standing::Ended("canceled"),
             _ => Standing::NotStarted,
         }
+    }
+
+    /// When the trial it is in started and ends, while Polar says `trialing`.
+    pub(crate) fn trial(&self) -> Option<(OffsetDateTime, OffsetDateTime)> {
+        (self.status == "trialing")
+            .then_some(self.trial_start.zip(self.trial_end))
+            .flatten()
     }
 
     fn user_id(&self) -> Option<Uuid> {
@@ -425,6 +436,8 @@ pub(crate) struct Product {
     pub(crate) recurring_interval: Option<String>,
     #[serde(default)]
     pub(crate) prices: Vec<ProductPrice>,
+    pub(crate) trial_interval: Option<String>,
+    pub(crate) trial_interval_count: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -458,6 +471,14 @@ impl Product {
             .and_then(|price| price.price_amount)
             .filter(|amount| *amount > 0)
             .ok_or_else(|| format!("The Polar product needs a fixed price in {currency}."))
+    }
+
+    /// The free trial a new subscriber gets, as an interval and how many of
+    /// it: `("day", 7)`.
+    pub(crate) fn trial(&self) -> Option<(&str, i32)> {
+        let interval = self.trial_interval.as_deref()?;
+        let count = self.trial_interval_count.filter(|count| *count > 0)?;
+        matches!(interval, "day" | "week" | "month" | "year").then_some((interval, count))
     }
 }
 
@@ -675,6 +696,18 @@ pub(crate) async fn refresh_product(
     };
     let product = polar.product(product_id).await?;
     let price = product.monthly_price(&polar.currency);
+    if price.is_ok() {
+        let trial = product.trial();
+        sqlx::query(
+            "UPDATE plans SET polar_trial_interval=$2,polar_trial_interval_count=$3 WHERE id=$1",
+        )
+        .bind(plan_id)
+        .bind(trial.map(|(interval, _)| interval))
+        .bind(trial.map(|(_, count)| count))
+        .execute(&s.db)
+        .await
+        .map_err(|_| PolarError::Unreachable)?;
+    }
     match &price {
         Ok(price) if *price != amount => {
             let updated: sqlx::Result<()> = async {
@@ -875,7 +908,7 @@ async fn mirror(
         .bind(user_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("UPDATE subscriptions SET provider='polar',currency=$2,polar_subscription_id=$3,polar_customer_id=$4,status=$5,amount=$6,plan_id=COALESCE($7,plan_id),pending_plan_id=$8,anchor_at=$9,periods_paid=1,current_period_end=$10,cancel_at_period_end=$11,last_error=$12,billing_key=NULL,toss_mid=NULL,card_company=NULL,card_number=NULL,next_attempt_at=NULL,failed_attempts=0,lease_until=NULL,polar_live=true,polar_synced_at=now(),updated_at=now() WHERE user_id=$1")
+    sqlx::query("UPDATE subscriptions SET provider='polar',currency=$2,polar_subscription_id=$3,polar_customer_id=$4,status=$5,amount=$6,plan_id=COALESCE($7,plan_id),pending_plan_id=$8,anchor_at=$9,periods_paid=1,current_period_end=$10,cancel_at_period_end=$11,last_error=$12,billing_key=NULL,toss_mid=NULL,card_company=NULL,card_number=NULL,next_attempt_at=NULL,failed_attempts=0,lease_until=NULL,polar_live=true,polar_synced_at=now(),trial_started_at=$13,trial_ends_at=$14,updated_at=now() WHERE user_id=$1")
         .bind(user_id)
         .bind(subscription.currency.to_ascii_uppercase())
         .bind(&subscription.id)
@@ -888,6 +921,8 @@ async fn mirror(
         .bind(subscription.current_period_end)
         .bind(subscription.cancel_at_period_end)
         .bind((state == "past_due").then_some("The last payment failed. Update your card in the billing portal."))
+        .bind(subscription.trial().map(|(start, _)| start))
+        .bind(subscription.trial().map(|(_, end)| end))
         .execute(&mut **tx)
         .await?;
     Ok(())
@@ -1303,9 +1338,9 @@ pub(crate) async fn change_plan(
     plan_id: Uuid,
 ) -> Result<(), ApiError> {
     let polar = config(s)?;
-    let (status, canceling, amount, currency, current_plan) =
-        sqlx::query_as::<_, (String, bool, i64, String, Option<Uuid>)>(
-            "SELECT status,cancel_at_period_end,amount,currency,plan_id FROM subscriptions WHERE user_id=$1",
+    let (status, canceling, amount, currency, current_plan, trialing) =
+        sqlx::query_as::<_, (String, bool, i64, String, Option<Uuid>, bool)>(
+            "SELECT status,cancel_at_period_end,amount,currency,plan_id,coalesce(trial_ends_at>now(),false) FROM subscriptions WHERE user_id=$1",
         )
         .bind(user_id)
         .fetch_one(&s.db)
@@ -1345,7 +1380,9 @@ pub(crate) async fn change_plan(
         .fetch_optional(&s.db)
         .await?
         .ok_or_else(|| ApiError(StatusCode::CONFLICT, "This plan is not available.".into()))?;
-        if new_amount > amount {
+        // During a trial Polar moves the trial to the new product, so the
+        // change starts now and nothing is charged until the trial ends.
+        if new_amount > amount && !trialing {
             (
                 "now",
                 serde_json::json!({ "product_id": product_id, "proration_behavior": "invoice" }),
@@ -1360,10 +1397,17 @@ pub(crate) async fn change_plan(
                     "Delete instances until you are within this plan's limit first.".into(),
                 ));
             }
-            (
-                "at_renewal",
-                serde_json::json!({ "product_id": product_id, "proration_behavior": "next_period" }),
-            )
+            if trialing {
+                (
+                    "now",
+                    serde_json::json!({ "product_id": product_id, "proration_behavior": "invoice" }),
+                )
+            } else {
+                (
+                    "at_renewal",
+                    serde_json::json!({ "product_id": product_id, "proration_behavior": "next_period" }),
+                )
+            }
         }
     };
     let subscription = polar

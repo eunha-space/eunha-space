@@ -3493,8 +3493,8 @@ async fn visitors_see_the_plans_on_offer_only_when_billing_is_on(pool: PgPool) {
     assert_eq!(
         serde_json::to_value(plans).unwrap(),
         serde_json::json!([
-            {"name_en":"plan 9900","name_ko":"plan 9900","amount":9900,"instance_limit":null,"user_limit":50,"media_gb":10,"database_gb":5,"monthly_activities":100000,"polar_amount":null,"polar_currency":null},
-            {"name_en":"plan 19900","name_ko":"plan 19900","amount":19900,"instance_limit":5,"user_limit":null,"media_gb":null,"database_gb":null,"monthly_activities":null,"polar_amount":null,"polar_currency":null},
+            {"name_en":"plan 9900","name_ko":"plan 9900","amount":9900,"instance_limit":null,"user_limit":50,"media_gb":10,"database_gb":5,"monthly_activities":100000,"polar_amount":null,"polar_currency":null,"polar_trial_interval":null,"polar_trial_interval_count":null},
+            {"name_en":"plan 19900","name_ko":"plan 19900","amount":19900,"instance_limit":5,"user_limit":null,"media_gb":null,"database_gb":null,"monthly_activities":null,"polar_amount":null,"polar_currency":null,"polar_trial_interval":null,"polar_trial_interval_count":null},
         ])
     );
 }
@@ -4421,6 +4421,8 @@ struct PolarStandIn {
     /// Products' prices, where they differ from $6.99 ($14.99 for the large
     /// one).
     prices: Arc<std::sync::Mutex<HashMap<String, i64>>>,
+    /// Products' free trials, as an interval and a count; none by default.
+    trials: Arc<std::sync::Mutex<HashMap<String, (&'static str, i32)>>>,
 }
 
 fn rfc3339(at: time::OffsetDateTime) -> String {
@@ -4524,8 +4526,11 @@ async fn polar_stand_in() -> (PolarStandIn, String) {
             get(|State(polar): State<PolarStandIn>, headers: HeaderMap, Path(id): Path<String>| async move {
                 let price = polar.prices.lock().unwrap().get(&id).copied()
                     .unwrap_or(if id == "prod_large" { 1499 } else { 699 });
+                let trial = polar.trials.lock().unwrap().get(&id).copied();
                 polar_answer(&headers, StatusCode::OK, serde_json::json!({
                     "id": id,
+                    "trial_interval": trial.map(|(interval, _)| interval),
+                    "trial_interval_count": trial.map(|(_, count)| count),
                     "is_recurring": true,
                     "is_archived": false,
                     "recurring_interval": "month",
@@ -5225,5 +5230,120 @@ async fn a_polar_price_change_reaches_new_customers_and_spares_subscribers(pool:
             plan["polar_amount"].clone()
         ),
         ("prod_live_large".into(), 1499.into())
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_polar_free_trial_is_shown_and_a_plan_change_during_it_charges_nothing(pool: PgPool) {
+    let (polar, base) = polar_stand_in().await;
+    let state = polar_state(pool.clone(), &base, None);
+    let (_, admin) = fixture(&pool).await;
+    let (user_id, headers) = billed_customer(&pool).await;
+    let (standard, large) = offer_polar_plans(&pool).await;
+
+    // The products' trials are read with them: two weeks on the standard
+    // plan, three days on the large one.
+    polar
+        .trials
+        .lock()
+        .unwrap()
+        .insert("prod_standard".into(), ("week", 2));
+    polar
+        .trials
+        .lock()
+        .unwrap()
+        .insert("prod_large".into(), ("day", 3));
+    for plan in [standard, large] {
+        let _ = billing_admin::refresh_polar(State(state.clone()), admin.clone(), Path(plan))
+            .await
+            .unwrap();
+    }
+    let Json(plans) = billing::public_plans(State(state.clone())).await.unwrap();
+    let plans = serde_json::to_value(plans).unwrap();
+    assert_eq!(
+        (
+            plans[0]["polar_trial_interval"].clone(),
+            plans[0]["polar_trial_interval_count"].clone()
+        ),
+        ("week".into(), 2.into())
+    );
+
+    // Five days into the standard plan's trial.
+    let now = time::OffsetDateTime::now_utc();
+    let started = now - time::Duration::days(5);
+    polar.holds_subscription("sub_1", user_id, "trialing", "prod_standard", 699);
+    polar.set("sub_1", "trial_start", rfc3339(started).into());
+    polar.set(
+        "sub_1",
+        "trial_end",
+        rfc3339(started + time::Duration::weeks(2)).into(),
+    );
+    polar.set(
+        "sub_1",
+        "current_period_end",
+        rfc3339(started + time::Duration::weeks(2)).into(),
+    );
+    let _ = billing_polar::refresh(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    let view = polar_view(&state, &headers).await;
+    assert_eq!(view["subscription"]["status"], "active");
+    assert!(view["subscription"]["trial_ends_at"].is_string());
+    // On the large plan the trial would already be over.
+    assert!(view["plans"][0]["trial_until"].is_string());
+    assert!(view["plans"][1]["trial_until"].is_null());
+
+    // Nobody in a trial counts as paying.
+    let Json(overview) = billing_admin::overview(State(state.clone()), admin.clone())
+        .await
+        .unwrap();
+    let overview = serde_json::to_value(overview).unwrap();
+    assert_eq!(
+        (
+            overview["summary"]["active"].clone(),
+            overview["summary"]["trialing"].clone()
+        ),
+        (0.into(), 1.into())
+    );
+    assert_eq!(overview["revenue"], serde_json::json!([]));
+
+    // A trial moves with a plan change, so a cheaper plan starts now too, and
+    // nothing waits for a renewal.
+    sqlx::query("UPDATE plans SET polar_amount=499 WHERE id=$1")
+        .bind(large)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let choose =
+        |plan: Uuid| Json(serde_json::from_value(serde_json::json!({"plan_id": plan})).unwrap());
+    let Json(view) = billing::change_plan(State(state.clone()), headers.clone(), choose(large))
+        .await
+        .unwrap();
+    let view = serde_json::to_value(view).unwrap();
+    assert_eq!(view["subscription"]["plan_id"], large.to_string());
+    assert!(view["subscription"]["pending_plan_id"].is_null());
+    assert_eq!(
+        polar.changes()[0].1,
+        serde_json::json!({"product_id": "prod_large", "proration_behavior": "invoice"})
+    );
+
+    // The trial ends and Polar bills the first period.
+    polar.set("sub_1", "status", "active".into());
+    polar.set("sub_1", "trial_start", serde_json::Value::Null);
+    polar.set("sub_1", "trial_end", serde_json::Value::Null);
+    let data = polar.subscriptions.lock().unwrap()["sub_1"].clone();
+    assert_eq!(
+        polar_webhook(&state, "subscription.updated", data, true).await,
+        StatusCode::ACCEPTED
+    );
+    let view = polar_view(&state, &headers).await;
+    assert!(view["subscription"]["trial_ends_at"].is_null());
+    let Json(overview) = billing_admin::overview(State(state.clone()), admin.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(overview).unwrap()["summary"]["active"],
+        1
     );
 }

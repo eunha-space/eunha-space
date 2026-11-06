@@ -334,6 +334,18 @@ const ko: Record<string, string> = {
     "매달 Polar를 통해 해외 카드로 자동 결제되며, 영수증은 Polar가 보내드립니다.",
   "Your last payment was declined. Polar will try again, and your instances keep running meanwhile. Update your card in the billing portal.":
     "최근 결제가 거절되었습니다. Polar가 다시 결제를 시도하며, 그동안 인스턴스는 계속 운영됩니다. 결제 관리에서 카드를 변경하세요.",
+  "You are on a free trial until":
+    "무료 체험 종료일:",
+  "Polar charges your international card then, and each month after. Cancel before then and you pay nothing.":
+    "그때부터 매월 Polar가 해외 카드로 결제합니다. 그 전에 해지하면 요금이 청구되지 않습니다.",
+  "First charge on":
+    "첫 결제일",
+  "It starts now, and your free trial carries on until":
+    "지금 바로 적용되며, 무료 체험은 다음 날짜까지 이어집니다:",
+  "Nothing is charged before then.":
+    "그 전에는 결제되지 않습니다.",
+  "It starts now and ends your free trial, because this plan's trial is shorter or there is none. Polar charges your card this plan's price now:":
+    "이 요금제는 체험 기간이 더 짧거나 없어서, 지금 바로 적용되며 무료 체험이 끝납니다. Polar가 이 요금제의 요금을 지금 카드로 결제합니다:",
   "It starts now, and Polar charges your card the difference for the rest of this period.":
     "지금 바로 적용되며, 남은 기간에 대한 차액을 Polar가 카드로 결제합니다.",
   "This subscription is paid by an international card. Manage it in the billing portal.":

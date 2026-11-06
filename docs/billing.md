@@ -384,6 +384,26 @@ subscriptions were sold as it. To switch from the sandbox, end the test
 subscriptions first. A sandbox subscription left running would be looked up
 against production every hour and logged as unknown.
 
+### Free trials
+
+A trial is set on the Polar product, never here: Polar takes the card at
+checkout, charges nothing until the trial ends, emails a reminder three days
+before, and then bills the first period. The checkout does not override the
+product's trial. Linking a product, its `product.updated` webhook and
+**Refresh** read its trial into `plans.polar_trial_interval` and
+`polar_trial_interval_count`, which Pricing, the account page and the
+billing page show. TossPayments has no trial, so Korean cards pay from the
+first day.
+
+A subscription Polar calls `trialing` runs its instances like an active one.
+Its `trial_started_at` and `trial_ends_at` are mirrored while the trial
+lasts. The account page then names the trial's end as the first charge. The
+billing page counts it under **In a free trial** rather than **Active**, and
+leaves it out of the monthly revenue. Cancelling during a trial ends the
+subscription when the trial ends, with nothing charged, and its instances go
+offline as after any cancellation. Turn on **Prevent trial abuse** in Polar's
+subscription settings so that a customer gets one trial only.
+
 ### Subscribing through Polar
 
 The account page offers **Pay with an international card** for a plan that
@@ -438,6 +458,14 @@ difference at once and applies the change only if that charge succeeds. A
 downgrade is sent with `next_period`, and choosing the current plan again
 clears the pending update. The plan has to be sold in the subscription's
 currency.
+
+During a free trial every change applies at once, a cheaper plan included,
+and is sent with `invoice`. Polar carries the trial over to the new product
+and recomputes its end from the trial's start with that product's trial
+length, so nothing is charged. If the new product's trial is shorter than
+the time already used, or it has none, the trial ends and Polar charges the
+new plan's price at once. The confirmation says which, from the plan's
+`trial_until`.
 
 A customer's refund follows the same rules as a TossPayments one: within
 seven days, and a full refund ends the subscription and takes the instances

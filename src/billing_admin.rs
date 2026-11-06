@@ -18,7 +18,10 @@ use crate::{ApiError, Shared, admin_user, billing, billing_sync};
 
 #[derive(Serialize, sqlx::FromRow)]
 pub(crate) struct Summary {
+    /// Paying: in a free trial is counted apart, as `trialing`.
     active: i64,
+    /// In a Polar free trial, not cancelled: nothing paid yet.
+    trialing: i64,
     past_due: i64,
     canceling: i64,
     ended: i64,
@@ -56,6 +59,9 @@ pub(crate) struct Account {
     cancel_at_period_end: bool,
     failed_attempts: i32,
     last_error: Option<String>,
+    /// When the Polar free trial it is in ends.
+    #[serde(with = "time::serde::rfc3339::option")]
+    trial_ends_at: Option<OffsetDateTime>,
     /// Instances counting against the account's limit.
     instances: i64,
     /// Instances an ended subscription took offline.
@@ -80,6 +86,9 @@ pub(crate) struct Plan {
     polar_product_id: Option<String>,
     polar_amount: Option<i64>,
     polar_currency: Option<String>,
+    /// The free trial its Polar product gives new subscribers.
+    polar_trial_interval: Option<String>,
+    polar_trial_interval_count: Option<i32>,
     active: bool,
     /// Running subscriptions on it, or moving to it at their next renewal.
     subscribers: i64,
@@ -87,7 +96,7 @@ pub(crate) struct Plan {
     deletable: bool,
 }
 
-const PLAN_COLUMNS: &str = "id,name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,polar_product_id,polar_amount,polar_currency,active,(SELECT count(*) FROM subscriptions s WHERE s.status IN ('active','past_due') AND plans.id IN (s.plan_id,s.pending_plan_id)) subscribers,NOT EXISTS(SELECT 1 FROM subscriptions s WHERE plans.id IN (s.plan_id,s.pending_plan_id)) AND NOT EXISTS(SELECT 1 FROM subscription_payments p WHERE plans.id IN (p.plan_id,p.from_plan_id)) deletable";
+const PLAN_COLUMNS: &str = "id,name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,polar_product_id,polar_amount,polar_currency,polar_trial_interval,polar_trial_interval_count,active,(SELECT count(*) FROM subscriptions s WHERE s.status IN ('active','past_due') AND plans.id IN (s.plan_id,s.pending_plan_id)) subscribers,NOT EXISTS(SELECT 1 FROM subscriptions s WHERE plans.id IN (s.plan_id,s.pending_plan_id)) AND NOT EXISTS(SELECT 1 FROM subscription_payments p WHERE plans.id IN (p.plan_id,p.from_plan_id)) deletable";
 
 #[derive(Serialize)]
 pub(crate) struct Overview {
@@ -166,7 +175,8 @@ pub(crate) async fn overview(
     admin_user(&headers, &s.db).await?;
     let summary = sqlx::query_as::<_, Summary>(
         "SELECT
-            (SELECT count(*) FROM subscriptions WHERE status='active' AND NOT cancel_at_period_end) active,
+            (SELECT count(*) FROM subscriptions WHERE status='active' AND NOT cancel_at_period_end AND NOT coalesce(trial_ends_at>now(),false)) active,
+            (SELECT count(*) FROM subscriptions WHERE status='active' AND NOT cancel_at_period_end AND trial_ends_at>now()) trialing,
             (SELECT count(*) FROM subscriptions WHERE status='past_due') past_due,
             (SELECT count(*) FROM subscriptions WHERE status='active' AND cancel_at_period_end) canceling,
             (SELECT count(*) FROM subscriptions WHERE status IN ('canceled','lapsed')) ended,
@@ -183,7 +193,7 @@ pub(crate) async fn overview(
     let accounts = sqlx::query_as::<_, Account>(
         "SELECT u.id user_id,u.email,u.is_admin,u.billing_exempt,s.status,s.amount,s.provider,s.currency,s.card_company,s.card_number,
             coalesce(s.billing_key IS NOT NULL,false) has_card,s.current_period_end,s.next_attempt_at,
-            coalesce(s.cancel_at_period_end,false) cancel_at_period_end,coalesce(s.failed_attempts,0) failed_attempts,s.last_error,
+            coalesce(s.cancel_at_period_end,false) cancel_at_period_end,coalesce(s.failed_attempts,0) failed_attempts,s.last_error,CASE WHEN s.trial_ends_at>now() THEN s.trial_ends_at END trial_ends_at,
             (SELECT count(*) FROM tenants t WHERE t.user_id=u.id AND t.lifecycle_state IN ('provisioning','ready','failed')) instances,
             (SELECT count(*) FROM tenants t WHERE t.user_id=u.id AND t.billing_suspended_at IS NOT NULL AND t.lifecycle_state IN ('deprovisioning','retained')) suspended_instances,
             EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=u.id AND p.refund_requested_at IS NOT NULL AND p.refunded_at IS NULL) refund_open,
@@ -215,7 +225,7 @@ pub(crate) async fn overview(
     .fetch_optional(&s.db)
     .await?;
     let revenue = sqlx::query_as::<_, Revenue>(
-        "SELECT currency,sum(amount)::bigint amount,count(*) subscriptions FROM subscriptions WHERE status IN ('active','past_due') AND NOT cancel_at_period_end GROUP BY currency ORDER BY currency",
+        "SELECT currency,sum(amount)::bigint amount,count(*) subscriptions FROM subscriptions WHERE status IN ('active','past_due') AND NOT cancel_at_period_end AND NOT coalesce(trial_ends_at>now(),false) GROUP BY currency ORDER BY currency",
     )
     .fetch_all(&s.db)
     .await?;
@@ -649,6 +659,7 @@ pub(crate) async fn link_polar(
     let amount = product
         .monthly_price(&polar.currency)
         .map_err(|reason| ApiError(StatusCode::BAD_REQUEST, reason))?;
+    let trial = product.trial();
     let mut tx = s.db.begin().await?;
     let linked = sqlx::query_scalar::<_, Option<String>>(
         "SELECT polar_product_id FROM plans WHERE id=$1 FOR UPDATE",
@@ -691,12 +702,14 @@ pub(crate) async fn link_polar(
         ));
     }
     let plan = sqlx::query_as::<_, Plan>(&format!(
-        "UPDATE plans SET polar_product_id=$2,polar_amount=$3,polar_currency=$4 WHERE id=$1 RETURNING {PLAN_COLUMNS}"
+        "UPDATE plans SET polar_product_id=$2,polar_amount=$3,polar_currency=$4,polar_trial_interval=$5,polar_trial_interval_count=$6 WHERE id=$1 RETURNING {PLAN_COLUMNS}"
     ))
     .bind(id)
     .bind(product_id)
     .bind(amount)
     .bind(&polar.currency)
+    .bind(trial.map(|(interval, _)| interval))
+    .bind(trial.map(|(_, count)| count))
     .fetch_one(&mut *tx)
     .await?;
     billing::record(

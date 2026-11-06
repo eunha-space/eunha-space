@@ -1,4 +1,4 @@
-import { money, won } from "@/format";
+import { money, trialLength, won } from "@/format";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ChevronDown,
@@ -62,6 +62,8 @@ type Account = {
   cancel_at_period_end: boolean;
   failed_attempts: number;
   last_error: string | null;
+  /** When the Polar free trial it is in ends. */
+  trial_ends_at: string | null;
   instances: number;
   suspended_instances: number;
   refund_open: boolean;
@@ -81,6 +83,8 @@ type Plan = {
   polar_product_id: string | null;
   polar_amount: number | null;
   polar_currency: string | null;
+  polar_trial_interval: string | null;
+  polar_trial_interval_count: number | null;
   active: boolean;
   subscribers: number;
   /** Nothing refers to it, so it can be deleted rather than retired. */
@@ -95,7 +99,9 @@ type Overview = {
   /** Running subscriptions' monthly amounts, by currency. */
   revenue: { currency: string; amount: number; subscriptions: number }[];
   summary: {
+    /** Paying; those in a free trial are `trialing`. */
     active: number;
+    trialing: number;
     past_due: number;
     canceling: number;
     ended: number;
@@ -297,6 +303,8 @@ function standing(account: Account): { label: string; tone: string } {
     case "active":
       return account.cancel_at_period_end
         ? { label: "canceling", tone: "text-pending" }
+        : account.trial_ends_at
+        ? { label: "trial", tone: "text-pending" }
         : { label: "active", tone: "text-success" };
     case "past_due":
       return { label: "past due", tone: "text-destructive" };
@@ -487,6 +495,9 @@ function PolarProduct(
         <span className="tabular-nums" title={plan.polar_product_id ?? undefined}>
           {money(plan.polar_amount!, plan.polar_currency!)}
         </span>
+        {trialLength(plan, false) && (
+          <span className="text-muted-foreground text-xs">{trialLength(plan, false)}</span>
+        )}
         <Button
           size="icon-xs"
           variant="ghost"
@@ -808,6 +819,7 @@ export function Billing() {
       false,
     ],
     ["Active", String(summary.active), false],
+    ["In a free trial", String(summary.trialing), false],
     ["Past due", String(summary.past_due), summary.past_due > 0],
     ["Canceling", String(summary.canceling), false],
     ["Unbilled with instances", String(summary.unbilled), false],
