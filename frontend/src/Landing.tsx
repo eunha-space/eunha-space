@@ -69,7 +69,7 @@ export function Landing() {
   const t = (message: string) => i18n._(message);
   return (
     <main className={`${siteColumn} flex-1`}>
-      <section className="grid items-center gap-10 py-12 md:grid-cols-[1fr_13rem] md:py-20">
+      <section className="grid items-center gap-10 py-12 md:grid-cols-[1fr_19rem] md:py-20">
         <div>
           <h1 className="text-4xl font-semibold tracking-tight text-balance md:text-5xl">
             {/* A colon ends a line: the Korean headline names the server, then says what we do. */}

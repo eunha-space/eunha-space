@@ -19,7 +19,7 @@ import { cn } from "cn";
  * The one column every customer page keeps to, header and footer included, so
  * that nothing moves sideways between pages. The operators' console is apart.
  */
-export const siteColumn = "mx-auto w-full max-w-3xl px-4 md:px-8";
+export const siteColumn = "mx-auto w-full max-w-4xl px-4 md:px-8";
 
 /** A page below the header, in the site's column. */
 export function Page({ children }: { children: ReactNode }) {
