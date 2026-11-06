@@ -92,8 +92,16 @@ type Plan = {
   deletable: boolean;
 };
 
+type Signups = {
+  toss_signups: boolean;
+  polar_signups: boolean;
+  updated_at: string;
+  updated_by: string | null;
+};
+
 type Overview = {
   enabled: boolean;
+  signups: Signups;
   toss: boolean;
   polar: boolean;
   plans: Plan[];
@@ -787,6 +795,87 @@ function BillingPages({ page }: { page: BillingPage }) {
   );
 }
 
+/** The switches that pause new subscriptions through each provider. */
+function SignupSwitches({ overview, onChanged }: { overview: Overview; onChanged: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const { signups } = overview;
+  const set = async (field: "toss_signups" | "polar_signups", value: boolean) => {
+    setBusy(true);
+    try {
+      await api("/billing/signups", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ [field]: value }),
+      });
+      setError("");
+      await onChanged();
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const rows = [
+    {
+      field: "toss_signups" as const,
+      label: "Korean cards (TossPayments)",
+      configured: overview.toss,
+      on: signups.toss_signups,
+    },
+    {
+      field: "polar_signups" as const,
+      label: "International cards (Polar)",
+      configured: overview.polar,
+      on: signups.polar_signups,
+    },
+  ];
+  return (
+    <Card className="gap-0 overflow-hidden p-0">
+      <CardHeader className="px-4 py-3">
+        <CardTitle className="text-base">New subscriptions</CardTitle>
+        <CardDescription className="text-xs">
+          Turning one off stops new sign-ups only. Running subscriptions keep renewing and can
+          still change plans and cards, and administrators can still subscribe to test.
+          {signups.updated_by && ` Last changed by ${signups.updated_by}, ${relativeTime(signups.updated_at)}.`}
+        </CardDescription>
+      </CardHeader>
+      {error && (
+        <Alert variant="destructive" className="mx-4 mb-3 w-auto">
+          <CircleAlert />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      <Separator />
+      <div className="grid sm:grid-cols-2">
+        {rows.map((row) => (
+          <label
+            key={row.field}
+            className="flex items-center justify-between gap-3 border-b px-4 py-3 sm:border-r"
+          >
+            <span>
+              <span className="block text-sm font-medium">{row.label}</span>
+              <span className="text-muted-foreground block text-xs">
+                {!row.configured
+                  ? "Not set up on the control plane"
+                  : row.on
+                  ? "Taking new subscriptions"
+                  : "Paused: customers see that new subscriptions are paused"}
+              </span>
+            </span>
+            <Switch
+              checked={row.on}
+              disabled={busy}
+              aria-label={`Take new subscriptions by ${row.label}`}
+              onCheckedChange={(checked) => void set(row.field, checked)}
+            />
+          </label>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 type Tile = {
   label: string;
   value: string;
@@ -989,6 +1078,7 @@ export function Billing() {
 
       {page === "" && (
         <>
+          <SignupSwitches overview={overview} onChanged={load} />
           <TileGroup
             title="Subscriptions"
             description="Select a count to see those accounts."

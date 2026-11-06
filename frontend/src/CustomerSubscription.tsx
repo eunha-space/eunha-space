@@ -258,6 +258,11 @@ export function SubscriptionSections(
     ? price(chosenPlan)
     : null;
   const canPayInternationally = billing.polar && chosenPlan?.polar_amount != null;
+  // An operator can pause new subscriptions through either.
+  const tossOpen = billing.toss && billing.toss_signups;
+  const polarOpen = canPayInternationally && billing.polar_signups;
+  const paused = choosing && !tossOpen && !polarOpen &&
+    (billing.toss || canPayInternationally);
   const limitLabel = (plan: Plan) => planLimits(plan, i18n.locale === "ko").join(" · ");
 
   let description: string;
@@ -408,20 +413,25 @@ export function SubscriptionSections(
             </div>
           </div>
         )}
+        {paused && (
+          <p className="text-muted-foreground text-sm">
+            {t("New subscriptions are paused for now. Please try again later.")}
+          </p>
+        )}
         <div className="flex flex-wrap gap-2">
-          {!subscribed && !pending && billing.toss && (
+          {!subscribed && !pending && tossOpen && (
             <Button disabled={busy || !chosenPlan} onClick={() => void openBillingWindow()}>
               {busy ? <Spinner label={t("Please wait…")} /> : <CreditCard />}
               {billing.polar ? t("Subscribe with a Korean card") : t("Subscribe with a card")}
             </Button>
           )}
-          {!subscribed && !pending && canPayInternationally && (
+          {!subscribed && !pending && polarOpen && (
             <Button
-              variant={billing.toss ? "outline" : "default"}
+              variant={tossOpen ? "outline" : "default"}
               disabled={busy}
               onClick={() => void openPolar("/checkout")}
             >
-              {!billing.toss && busy ? <Spinner label={t("Please wait…")} /> : <Globe />}
+              {!tossOpen && busy ? <Spinner label={t("Please wait…")} /> : <Globe />}
               {t("Pay with an international card")}
             </Button>
           )}

@@ -710,6 +710,10 @@ pub(crate) struct BillingView {
     /// Whether an international card can pay, through Polar, and in what.
     polar: bool,
     polar_currency: Option<String>,
+    /// Whether this account may start a subscription through each, now: an
+    /// operator can pause new ones.
+    toss_signups: bool,
+    polar_signups: bool,
     /// What can be subscribed to, cheapest first. An existing subscription
     /// keeps the amount it was started at.
     plans: Vec<PlanView>,
@@ -747,8 +751,16 @@ pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiEr
             plan.switch_charge = Some(upgrade_charge(plan.amount, running.amount, start, end, now));
         }
     }
+    let (toss_signups, polar_signups) = sqlx::query_as::<_, (bool, bool)>(
+        "SELECT u.is_admin OR b.toss_signups,u.is_admin OR b.polar_signups FROM users u CROSS JOIN billing_settings b WHERE u.id=$1",
+    )
+    .bind(user_id)
+    .fetch_one(&s.db)
+    .await?;
     Ok(BillingView {
         enabled: billing_on(s),
+        toss_signups,
+        polar_signups,
         toss: s.billing.is_some(),
         polar: s.polar.is_some(),
         polar_currency: s.polar.as_ref().map(|polar| polar.currency.clone()),
@@ -890,6 +902,7 @@ pub(crate) async fn checkout(
             customer_key,
         }));
     }
+    signups_open(&s, user_id, "toss").await?;
     let chosen = choice.and_then(|Json(choice)| choice.plan_id);
     let plan = sqlx::query_as::<_, (Uuid, i64)>(
         "SELECT id,amount FROM plans WHERE active AND ($1::uuid IS NULL OR id=$1) ORDER BY amount,created_at LIMIT 1",
@@ -956,6 +969,16 @@ pub(crate) async fn authorize(
             StatusCode::BAD_REQUEST,
             "The card could not be registered.".into(),
         ));
+    }
+    // A card for a running subscription is only a change of card.
+    let running = sqlx::query_scalar::<_, bool>(
+        "SELECT status IN ('active','past_due') OR EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=s.user_id AND p.status='pending') FROM subscriptions s WHERE user_id=$1",
+    )
+    .bind(user_id)
+    .fetch_one(&s.db)
+    .await?;
+    if !running {
+        signups_open(&s, user_id, "toss").await?;
     }
     let issued = billing
         .issue_billing_key(auth_key, body.customer_key)
@@ -1056,6 +1079,34 @@ pub(crate) async fn authorize(
         tracing::warn!(%user_id, "could not charge a new subscription");
     }
     Ok(Json(view(&s, user_id).await?))
+}
+
+/// Refuse a new subscription through `provider`, `toss` or `polar`, while an
+/// operator has paused those. Administrators may still subscribe, to test.
+pub(crate) async fn signups_open(
+    s: &Shared,
+    user_id: Uuid,
+    provider: &str,
+) -> Result<(), ApiError> {
+    let open = sqlx::query_scalar::<_, bool>(
+        "SELECT u.is_admin OR CASE WHEN $2='polar' THEN b.polar_signups ELSE b.toss_signups END FROM users u CROSS JOIN billing_settings b WHERE u.id=$1",
+    )
+    .bind(user_id)
+    .bind(provider)
+    .fetch_one(&s.db)
+    .await?;
+    if !open {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            if provider == "polar" {
+                "New subscriptions by international card are paused. Try again later."
+            } else {
+                "New subscriptions by Korean card are paused. Try again later."
+            }
+            .into(),
+        ));
+    }
+    Ok(())
 }
 
 /// A card cannot be added through TossPayments while Polar bills the

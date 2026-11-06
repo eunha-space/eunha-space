@@ -188,6 +188,9 @@ export type Billing = {
   /** International cards, through Polar, in `polar_currency`. */
   polar: boolean;
   polar_currency: string | null;
+  /** Whether this account may start a subscription through each now. */
+  toss_signups: boolean;
+  polar_signups: boolean;
   /** Cheapest first. */
   plans: Plan[];
   subscription: {

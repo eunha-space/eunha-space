@@ -5420,3 +5420,86 @@ async fn only_the_first_polar_payment_can_be_refunded_by_its_customer(pool: PgPo
         Some(StatusCode::CONFLICT)
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn paused_signups_refuse_new_subscriptions_only(pool: PgPool) {
+    let (_toss, toss_base) = toss_stand_in().await;
+    let (_polar, polar_base) = polar_stand_in().await;
+    let state = polar_state(pool.clone(), &polar_base, Some(&toss_base));
+    let (_, admin) = fixture(&pool).await;
+    let (_, headers) = billed_customer(&pool).await;
+    offer_polar_plans(&pool).await;
+    let set = |body: serde_json::Value| {
+        billing_admin::set_signups(
+            State(state.clone()),
+            admin.clone(),
+            Json(serde_json::from_value(body).unwrap()),
+        )
+    };
+    let Json(signups) = set(serde_json::json!({"toss_signups": false, "polar_signups": false}))
+        .await
+        .unwrap();
+    let signups = serde_json::to_value(signups).unwrap();
+    assert_eq!(
+        (
+            signups["toss_signups"].clone(),
+            signups["polar_signups"].clone()
+        ),
+        (false.into(), false.into())
+    );
+
+    // Nobody new can start one, by either card.
+    let view = polar_view(&state, &headers).await;
+    assert_eq!(
+        (view["toss_signups"].clone(), view["polar_signups"].clone()),
+        (false.into(), false.into())
+    );
+    assert_eq!(
+        billing::checkout(State(state.clone()), headers.clone(), None)
+            .await
+            .err()
+            .unwrap()
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        billing_polar::checkout(State(state.clone()), headers.clone(), None)
+            .await
+            .err()
+            .unwrap()
+            .0,
+        StatusCode::CONFLICT
+    );
+    // An administrator still can, to test.
+    assert!(
+        billing_polar::checkout(State(state.clone()), admin.clone(), None)
+            .await
+            .is_ok()
+    );
+
+    // A subscription that runs can still change its card while paused.
+    set(serde_json::json!({"toss_signups": true}))
+        .await
+        .unwrap();
+    let view = subscribe(&state, &headers).await;
+    assert_eq!(view["subscription"]["status"], "active");
+    set(serde_json::json!({"toss_signups": false}))
+        .await
+        .unwrap();
+    assert!(
+        billing::checkout(State(state.clone()), headers.clone(), None)
+            .await
+            .is_ok()
+    );
+    // The change is recorded.
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM operations WHERE kind='subscription_signups'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        3
+    );
+}

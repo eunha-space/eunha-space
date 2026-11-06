@@ -252,7 +252,8 @@ it waits with `last_error` set, for deletion in the TossPayments dashboard.
 The billing section of the console has four pages, listed under **Billing**
 in the sidebar:
 
-- **Overview**, `/admin/billing`: monthly revenue and counts of active,
+- **Overview**, `/admin/billing`: the **New subscriptions** switches, then
+  monthly revenue and counts of active,
   trialing and canceling subscriptions and of accounts running instances
   unbilled (such as customers from before billing). Under **Needs
   attention** are past-due subscriptions, open refunds, TossPayments
@@ -265,7 +266,7 @@ in the sidebar:
 - **Reconciliation**, `/admin/billing/reconciliation`: the daily comparison
   with TossPayments, its mismatches and the latest webhooks.
 
-From there an operator can:
+From the Subscribers page an operator can:
 
 - **Charge again now** a past-due subscription, or a first charge that was
   declined, on the card on file. A decline counts as one of the retries.
@@ -279,6 +280,22 @@ From there an operator can:
 
 Each of these is recorded as an operation attributed to the operator. The page
 never shows a billing key or customer key.
+
+### Pausing new subscriptions
+
+The **New subscriptions** switches on the Overview pause sign-ups through
+TossPayments (Korean cards) and Polar (international cards) separately,
+kept in `billing_settings` and set with `PATCH /billing/signups`. A paused
+provider refuses a checkout, and a Korean card registered for a subscription
+that is not running, with a `409`. The account page drops that provider's
+button, and says new subscriptions are paused when neither is left. That
+includes someone subscribing again after their subscription ended.
+
+Nothing that runs is touched: renewals, retries, plan changes, card changes,
+cancelling and resuming go on as before, as do webhooks for a Polar checkout
+started before the pause. Administrators can still subscribe, to test with
+real cards before reopening. Each change is recorded as a
+`subscription_signups` operation.
 
 ## Emails
 

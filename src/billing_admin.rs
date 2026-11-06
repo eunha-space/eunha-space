@@ -113,6 +113,57 @@ pub(crate) struct Overview {
     last_check: Option<LastCheck>,
     webhooks: Vec<Webhook>,
     polar_webhooks: Vec<PolarWebhook>,
+    signups: Signups,
+}
+
+/// Whether new subscriptions are taken through each provider, and who last
+/// changed that.
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct Signups {
+    toss_signups: bool,
+    polar_signups: bool,
+    #[serde(with = "time::serde::rfc3339")]
+    updated_at: OffsetDateTime,
+    updated_by: Option<String>,
+}
+
+const SIGNUPS: &str = "SELECT b.toss_signups,b.polar_signups,b.updated_at,u.email updated_by FROM billing_settings b LEFT JOIN users u ON u.id=b.updated_by";
+
+#[derive(Deserialize)]
+pub(crate) struct SignupsUpdate {
+    toss_signups: Option<bool>,
+    polar_signups: Option<bool>,
+}
+
+/// Pause or reopen new subscriptions through TossPayments or Polar. Running
+/// subscriptions are not touched.
+pub(crate) async fn set_signups(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<SignupsUpdate>,
+) -> Result<Json<Signups>, ApiError> {
+    let (admin_id, _) = admin_user(&headers, &s.db).await?;
+    let mut tx = s.db.begin().await?;
+    sqlx::query("UPDATE billing_settings SET toss_signups=coalesce($1,toss_signups),polar_signups=coalesce($2,polar_signups),updated_at=now(),updated_by=$3")
+        .bind(body.toss_signups)
+        .bind(body.polar_signups)
+        .bind(admin_id)
+        .execute(&mut *tx)
+        .await?;
+    billing::record(
+        &mut tx,
+        admin_id,
+        "subscription_signups",
+        "succeeded",
+        serde_json::json!({ "toss_signups": body.toss_signups, "polar_signups": body.polar_signups }),
+        None,
+    )
+    .await?;
+    let signups = sqlx::query_as::<_, Signups>(SIGNUPS)
+        .fetch_one(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Json(signups))
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -251,6 +302,9 @@ pub(crate) async fn overview(
         last_check,
         webhooks,
         polar_webhooks,
+        signups: sqlx::query_as::<_, Signups>(SIGNUPS)
+            .fetch_one(&s.db)
+            .await?,
     }))
 }
 

@@ -340,6 +340,8 @@ const ko: Record<string, string> = {
     "무료 체험 종료일:",
   "Polar charges your international card then, and each month after. Cancel before then and you pay nothing.":
     "그때부터 매월 Polar가 해외 카드로 결제합니다. 그 전에 해지하면 요금이 청구되지 않습니다.",
+  "New subscriptions are paused for now. Please try again later.":
+    "지금은 새 구독을 받지 않고 있습니다. 나중에 다시 시도해 주세요.",
   "First charge on":
     "첫 결제일",
   "It starts now, and your free trial carries on until":

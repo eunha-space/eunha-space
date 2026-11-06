@@ -1124,6 +1124,7 @@ pub(crate) async fn checkout(
             "You already have a subscription. Change plans instead.".into(),
         ));
     }
+    crate::billing::signups_open(&s, user_id, "polar").await?;
     let chosen = choice.and_then(|Json(choice)| choice.plan_id);
     let (plan_id, product_id) = sqlx::query_as::<_, (Uuid, String)>(
         "SELECT id,polar_product_id FROM plans WHERE active AND polar_product_id IS NOT NULL AND polar_currency=$2 AND ($1::uuid IS NULL OR id=$1) ORDER BY polar_amount,created_at LIMIT 1",
