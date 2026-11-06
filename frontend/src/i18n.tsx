@@ -452,6 +452,11 @@ const ko: Record<string, string> = {
     "이 결제를 환불할까요?",
   "The full amount goes back to your card. Your subscription is cancelled and your instances go offline immediately. Their data is kept, and subscribing again serves them again.":
     "전액이 카드로 환불되고 구독이 해지되며 인스턴스는 즉시 오프라인으로 전환됩니다. 데이터는 보관되며, 다시 구독하면 다시 서비스됩니다.",
+  "The full amount goes back to your card, and your plan returns to the one before this upgrade, at its price. Your subscription goes on.":
+    "전액이 카드로 환불되고, 요금제는 업그레이드 이전의 요금제와 요금으로 돌아갑니다. 구독은 계속됩니다.",
+  "Keep the upgrade": "업그레이드 유지",
+  "Refunding this upgrade returns your previous plan. Delete instances until you are within its limit first.":
+    "이 업그레이드를 환불하면 이전 요금제로 돌아갑니다. 먼저 이전 요금제의 한도에 맞게 인스턴스를 삭제해 주세요.",
   "This payment can no longer be refunded.":
     "이 결제는 더 이상 환불할 수 없습니다.",
   "A payment is being confirmed. Try again shortly.":

@@ -188,8 +188,28 @@ pub(crate) async fn refund(
     refunded: i64,
     ended: bool,
     offline: bool,
+    back_to: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     let language = language(tx, user_id).await?;
+    // A refunded upgrade puts the plan it moved from back.
+    let back_to = match back_to {
+        Some(plan_id) => {
+            sqlx::query_as::<_, (String, String)>("SELECT name_en,name_ko FROM plans WHERE id=$1")
+                .bind(plan_id)
+                .fetch_optional(&mut **tx)
+                .await?
+                .map(|(en, ko)| match language {
+                    Locale::En => format!(
+                        " Your plan is back to {en}, at its price, and your subscription goes on."
+                    ),
+                    Locale::Ko => {
+                        format!(" 요금제가 {ko}(으)로 돌아갔으며, 구독은 그 요금으로 계속됩니다.")
+                    }
+                })
+                .unwrap_or_default()
+        }
+        None => String::new(),
+    };
     let currency = sqlx::query_scalar::<_, String>(
         "SELECT currency FROM subscription_payments WHERE order_id=$1",
     )
@@ -224,13 +244,13 @@ pub(crate) async fn refund(
         Locale::En => (
             format!("Your eunha space refund: {amount}"),
             format!(
-                "We refunded {amount} for order {order_id} to your card.{ended}{offline}\n\nCard companies usually return the money within three to seven business days."
+                "We refunded {amount} for order {order_id} to your card.{back_to}{ended}{offline}\n\nCard companies usually return the money within three to seven business days."
             ),
         ),
         Locale::Ko => (
             format!("은하공간 환불 안내: {amount}"),
             format!(
-                "주문 {order_id}의 {amount}을 카드로 환불했습니다.{ended}{offline}\n\n카드사에 따라 영업일 기준 3~7일 안에 환불됩니다."
+                "주문 {order_id}의 {amount}을 카드로 환불했습니다.{back_to}{ended}{offline}\n\n카드사에 따라 영업일 기준 3~7일 안에 환불됩니다."
             ),
         ),
     };

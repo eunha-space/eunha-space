@@ -3537,7 +3537,7 @@ async fn a_plan_limits_instances_and_a_downgrade_must_fit(pool: PgPool) {
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
-async fn a_customer_refunding_an_upgrade_ends_the_subscription_and_an_operator_does_not(
+async fn a_customer_refunding_an_upgrade_returns_the_plan_before_it_and_an_operator_changes_nothing(
     pool: PgPool,
 ) {
     let (_toss, base) = toss_stand_in().await;
@@ -3565,13 +3565,54 @@ async fn a_customer_refunding_an_upgrade_ends_the_subscription_and_an_operator_d
     assert_eq!(subscription_status(&pool, user_id).await, "active");
     assert_eq!(lifecycle(&pool, id).await.0, "ready");
 
-    // The customer's own refund of another upgrade ends it all.
+    // The customer's own refund of an upgrade returns the plan it moved from,
+    // and only the latest upgrade can be asked back.
     let bigger = plan(&pool, 29900, None).await;
     let view = change_plan(&state, &headers, bigger).await.unwrap();
-    let upgrade = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
-    let view = refund(&state, &headers, &upgrade).await.unwrap();
-    assert_eq!(view["subscription"]["status"], "canceled");
-    assert_eq!(lifecycle(&pool, id).await.0, "deprovisioning");
+    let earlier = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+    let biggest = plan(&pool, 39900, None).await;
+    let view = change_plan(&state, &headers, biggest).await.unwrap();
+    let latest = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
+    assert_eq!(view["payments"][0]["refundable"], true);
+    assert_eq!(view["payments"][1]["refundable"], false);
+    assert_eq!(
+        refund(&state, &headers, &earlier).await.unwrap_err(),
+        StatusCode::CONFLICT
+    );
+
+    // The plan it returns has to hold the instances.
+    sqlx::query("UPDATE plans SET instance_limit=0 WHERE id=$1")
+        .bind(bigger)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        refund(&state, &headers, &latest).await.unwrap_err(),
+        StatusCode::CONFLICT
+    );
+    sqlx::query("UPDATE plans SET instance_limit=NULL WHERE id=$1")
+        .bind(bigger)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let view = refund(&state, &headers, &latest).await.unwrap();
+    assert_eq!(view["subscription"]["status"], "active");
+    assert_eq!(on_plan(&pool, user_id).await, (Some(bigger), 29900, None));
+    assert_eq!(lifecycle(&pool, id).await.0, "ready");
+    while billing_sync::refund_due(&state, None).await.unwrap() {}
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM subscription_payments WHERE order_id=$1")
+            .bind(&latest)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status, "refunded");
+
+    // Now the earlier one is the latest, and goes back the same way.
+    let view = refund(&state, &headers, &earlier).await.unwrap();
+    assert_eq!(view["subscription"]["status"], "active");
+    assert_eq!(on_plan(&pool, user_id).await, (Some(big), 19900, None));
 }
 
 #[sqlx::test(migrations = "./migrations")]

@@ -209,9 +209,17 @@ asked for while a charge is being confirmed.
 What a refund does depends on who gave it back, which is
 `refund_requested_by`:
 
-- **A customer's own** full refund ends a running subscription at once
-  (`canceled`), retires its card and takes its instances offline with their data
-  kept, whichever payment it was. Subscribing again starts a new period that day
+- **A customer's own** full refund of an upgrade takes the upgrade back: the
+  subscription returns to the plan and price it moved from (`from_plan_id`,
+  `from_amount`) and keeps running. Only the latest upgrade of the period being
+  served can be asked back this way, while the subscription is still on its
+  plan; an earlier one becomes askable once the later ones are refunded. The
+  plan it returns has to hold the account's instances, or the request is refused
+  until some are deleted. Upgrades from a period already over are an operator's
+  call.
+- **A customer's own** full refund of any other payment ends a running
+  subscription at once (`canceled`), retires its card and takes its instances
+  offline with their data kept. Subscribing again starts a new period that day
   at today's price and serves them again. Refunding the renewal for the period
   being served also requests a refund of any upgrade charged for that period.
 - **An operator's**, from `/admin/billing` or the TossPayments dashboard, whose

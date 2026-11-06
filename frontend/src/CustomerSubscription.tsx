@@ -538,11 +538,15 @@ export function SubscriptionSections(
                   : ""}
               </AlertDialogTitle>
               <AlertDialogDescription>
-                {t("The full amount goes back to your card. Your subscription is cancelled and your instances go offline immediately. Their data is kept, and subscribing again serves them again.")}
+                {refunding?.kind === "upgrade"
+                  ? t("The full amount goes back to your card, and your plan returns to the one before this upgrade, at its price. Your subscription goes on.")
+                  : t("The full amount goes back to your card. Your subscription is cancelled and your instances go offline immediately. Their data is kept, and subscribing again serves them again.")}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
-              <AlertDialogCancel>{t("Keep my subscription")}</AlertDialogCancel>
+              <AlertDialogCancel>
+                {refunding?.kind === "upgrade" ? t("Keep the upgrade") : t("Keep my subscription")}
+              </AlertDialogCancel>
               <AlertDialogAction
                 variant="destructive"
                 onClick={() => refunding && void refund(refunding.order_id)}
