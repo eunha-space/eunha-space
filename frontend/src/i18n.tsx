@@ -1,4 +1,5 @@
 import { i18n } from "@lingui/core";
+import { compileMessage } from "@lingui/message-utils/compileMessage";
 import { takeBoot } from "@/api";
 import { I18nProvider, useLingui } from "@lingui/react";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
@@ -176,8 +177,8 @@ const ko: Record<string, string> = {
   "Follow recommendations": "팔로우 추천",
   "Custom emoji": "커스텀 이모지",
   "Tell people how to sign in": "로그인 방법 알려 주기",
-  "Members can use the web, or any Mastodon app: they choose to sign in on another server and enter {domain}.":
-    "회원은 웹이나 마스토돈 앱으로 이용할 수 있습니다. 앱에서는 다른 서버로 로그인을 고른 뒤 {domain} 주소를 입력하면 됩니다.",
+  "Members can use the web, or any Mastodon app: in the app, they tap Log in and enter {domain} in the server search.":
+    "회원은 웹이나 마스토돈 앱으로 이용할 수 있습니다. 앱에서는 로그인을 누른 뒤 서버 검색 칸에 {domain} 주소를 입력하면 됩니다.",
   "Sign in to your instance as its owner to manage it.":
     "소유자로 인스턴스에 로그인하여 관리하세요.",
   Username: "사용자명",
@@ -489,6 +490,10 @@ const ko: Record<string, string> = {
   "When you ask": "환불 신청 시점",
   "Amount refunded": "환불 가능 금액",
 };
+// The catalogs are plain strings, not compiled ones, and Lingui compiles a
+// message only in development unless it is given a compiler: without this, a
+// production build shows "{domain}" rather than the domain.
+i18n.setMessagesCompiler(compileMessage);
 i18n.load("en", en);
 i18n.load("ko", ko);
 export type Locale = "en" | "ko";

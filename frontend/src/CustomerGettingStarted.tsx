@@ -89,7 +89,7 @@ export function CustomerGettingStarted({ domain }: { domain: string }) {
       icon: <Smartphone />,
       title: t("Tell people how to sign in"),
       body: t(
-        "Members can use the web, or any Mastodon app: they choose to sign in on another server and enter {domain}.",
+        "Members can use the web, or any Mastodon app: in the app, they tap Log in and enter {domain} in the server search.",
         { domain },
       ),
       links: [],
