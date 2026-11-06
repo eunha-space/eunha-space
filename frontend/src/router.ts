@@ -52,6 +52,15 @@ export function useRoute(): [View, (view: View) => void] {
   return [view, navigate];
 }
 
+/**
+ * Go to a section's page, telling every route and subroute hook, such as the
+ * sidebar's as well as the section's own.
+ */
+export function goTo(view: View, segments: string[] = []): void {
+  history.pushState(null, "", [pathFor(view), ...segments.map(encodeURIComponent)].join("/"));
+  window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
 /** A section's own pages, kept in the path below the section. */
 export function useSubroute(view: View): [string[], (segments: string[]) => void] {
   const [segments, setSegments] = useState(() => subpathFromPath(view, location.pathname));

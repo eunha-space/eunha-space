@@ -131,7 +131,7 @@ billing keep them running, but cannot add instances without subscribing.
 
 ## Plans
 
-Operators manage plans on `/admin/billing`. A plan has English and Korean names,
+Operators manage plans on `/admin/billing/plans`. A plan has English and Korean names,
 a monthly price and an instance limit. With no limit, the account's own
 `instance_limit` applies. Administrators and exempt accounts always use their
 account's limit.
@@ -221,7 +221,7 @@ Point TossPayments' webhook at `/api/webhooks/tosspayments` for
 
 Every webhook is kept in `toss_webhook_deliveries` with its headers and what it
 was answered, for five years. Billing keys, the `authorization` header and
-cookies are removed first. The billing page shows the latest and whether they
+cookies are removed first. The Reconciliation page shows the latest and whether they
 were signed. TossPayments' documentation disagrees about whether these events
 are signed, and it is not yet known whether they are under live keys.
 
@@ -249,12 +249,21 @@ it waits with `last_error` set, for deletion in the TossPayments dashboard.
 
 ## Operators
 
-`/admin/billing` shows monthly revenue and counts of active, past-due and
-canceling subscriptions, accounts running instances unbilled (such as customers
-from before billing), open refunds, and retired card keys TossPayments has not
-confirmed deleting after three tries. Below that is every account that
-subscribed, is exempt, or runs instances unbilled, with its standing, card,
-renewal date and instances. Selecting one shows its payments.
+The billing section of the console has four pages, listed under **Billing**
+in the sidebar:
+
+- **Overview**, `/admin/billing`: monthly revenue and counts of active,
+  trialing and canceling subscriptions and of accounts running instances
+  unbilled (such as customers from before billing). Under **Needs
+  attention** are past-due subscriptions, open refunds, TossPayments
+  mismatches and retired card keys TossPayments has not confirmed deleting
+  after three tries. Selecting a count opens the page that lists them.
+- **Subscribers**, `/admin/billing/subscribers`: every account that
+  subscribed, is exempt, or runs instances unbilled, with its standing, card,
+  renewal date and instances. Selecting one shows its payments.
+- **Plans**, `/admin/billing/plans`: the plans and their Polar products.
+- **Reconciliation**, `/admin/billing/reconciliation`: the daily comparison
+  with TossPayments, its mismatches and the latest webhooks.
 
 From there an operator can:
 
@@ -315,7 +324,7 @@ tried again after an hour. `toss_transaction_checks` records each day.
 A cancellation the books have not heard of, because its webhook never came, is
 recorded like any other. Anything else is written once to `toss_mismatches` and
 logged as an error, and nothing is changed: only a person can tell whether a
-charge should be honoured or given back. They appear on the billing page until
+charge should be honoured or given back. They appear on the Reconciliation page until
 marked resolved.
 
 | Kind                    | Meaning                                                                     |

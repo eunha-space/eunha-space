@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import {
   Activity,
   CircleAlert,
@@ -23,14 +23,14 @@ import {
   type Tenant,
 } from "@/api";
 import { relativeTime } from "@/format";
-import { Billing } from "@/Billing";
+import { BILLING_PAGES, Billing, billingPage } from "@/Billing";
 import { Usage } from "@/Usage";
 import { Instances } from "@/Instances";
 import { Operations } from "@/Operations";
 import { Releases } from "@/Releases";
 import { Tenants } from "@/Tenants";
 import { Users } from "@/Users";
-import { pathFor, useRoute, type View } from "@/router";
+import { goTo, pathFor, useRoute, useSubroute, type View } from "@/router";
 import { Alert, AlertAction, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -49,6 +49,7 @@ const POLL_INTERVAL = 3000;
 export function App() {
   const [session, setSession] = useState<Session>({ state: "loading" });
   const [view, navigate] = useRoute();
+  const [billingSegments] = useSubroute("billing");
   const [tenants, setTenants] = useState<Tenant[]>([]);
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
   const [operations, setOperations] = useState<Operation[]>([]);
@@ -217,6 +218,7 @@ export function App() {
     { id: "billing", label: "Billing", icon: CreditCard },
     { id: "operations", label: "Operations", icon: Activity },
   ];
+  const currentBillingPage = billingPage(billingSegments);
   const heading = sections.find((section) => section.id === view)?.label ??
     "Tenants";
 
@@ -238,8 +240,8 @@ export function App() {
             className="flex gap-1 md:mt-5 md:grid"
           >
             {sections.map((section) => (
+            <Fragment key={section.id}>
               <Button
-                key={section.id}
                 variant="ghost"
                 render={<a href={pathFor(section.id)} />}
                 aria-current={view === section.id ? "page" : undefined}
@@ -265,6 +267,34 @@ export function App() {
                 <section.icon />
                 <span className="max-md:hidden">{section.label}</span>
               </Button>
+              {section.id === "billing" && view === "billing" && (
+                <div className="hidden gap-0.5 md:mb-1 md:grid md:pl-7">
+                  {BILLING_PAGES.map((page) => (
+                    <a
+                      key={page.id}
+                      href={[pathFor("billing"), page.id].filter(Boolean).join("/")}
+                      aria-current={currentBillingPage === page.id ? "page" : undefined}
+                      onClick={(event) => {
+                        if (
+                          event.metaKey || event.ctrlKey || event.shiftKey ||
+                          event.button !== 0
+                        ) return;
+                        event.preventDefault();
+                        goTo("billing", page.id ? [page.id] : []);
+                      }}
+                      className={cn(
+                        "hover:text-foreground rounded-md px-2 py-1 text-sm",
+                        currentBillingPage === page.id
+                          ? "text-foreground font-medium"
+                          : "text-muted-foreground",
+                      )}
+                    >
+                      {page.label}
+                    </a>
+                  ))}
+                </div>
+              )}
+            </Fragment>
             ))}
           </nav>
           <div className="ml-auto flex items-center gap-2 md:mt-auto md:ml-0 md:justify-between md:border-t md:pt-3">

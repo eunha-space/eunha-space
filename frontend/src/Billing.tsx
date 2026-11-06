@@ -11,6 +11,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { api, errorMessage } from "@/api";
+import { goTo, useSubroute } from "@/router";
 import { absoluteTime, relativeTime } from "@/format";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -754,12 +755,98 @@ function Plans(
   );
 }
 
+/** The billing section's pages, each at /admin/billing/<id>. */
+export const BILLING_PAGES = [
+  { id: "", label: "Overview" },
+  { id: "subscribers", label: "Subscribers" },
+  { id: "plans", label: "Plans" },
+  { id: "reconciliation", label: "Reconciliation" },
+] as const;
+export type BillingPage = (typeof BILLING_PAGES)[number]["id"];
+
+export function billingPage(segments: string[]): BillingPage {
+  return BILLING_PAGES.find((page) => page.id === (segments[0] ?? ""))?.id ?? "";
+}
+
+/** Links between the billing pages, for the phone layout's lack of a sidebar. */
+function BillingPages({ page }: { page: BillingPage }) {
+  return (
+    <nav aria-label="Billing pages" className="flex flex-wrap gap-1 md:hidden">
+      {BILLING_PAGES.map((item) => (
+        <Button
+          key={item.id}
+          size="sm"
+          variant={page === item.id ? "secondary" : "ghost"}
+          aria-current={page === item.id ? "page" : undefined}
+          onClick={() => goTo("billing", item.id ? [item.id] : [])}
+        >
+          {item.label}
+        </Button>
+      ))}
+    </nav>
+  );
+}
+
+type Tile = {
+  label: string;
+  value: string;
+  /** What it counts, in a line. */
+  hint: string;
+  alarming?: boolean;
+  /** Where to look into it. */
+  open?: () => void;
+};
+
+function TileGroup({ title, description, tiles }: { title: string; description: string; tiles: Tile[] }) {
+  return (
+    <Card className="gap-0 overflow-hidden p-0">
+      <CardHeader className="px-4 py-3">
+        <CardTitle className="text-base">{title}</CardTitle>
+        <CardDescription className="text-xs">{description}</CardDescription>
+      </CardHeader>
+      <Separator />
+      <dl className="grid sm:grid-cols-2 lg:grid-cols-3">
+        {tiles.map((tile) => {
+          const body = (
+            <>
+              <dt className="text-muted-foreground text-xs">{tile.label}</dt>
+              <dd
+                className={cn(
+                  "text-xl font-semibold tabular-nums",
+                  tile.alarming && "text-destructive",
+                )}
+              >
+                {tile.value}
+              </dd>
+              <dd className="text-muted-foreground text-xs">{tile.hint}</dd>
+            </>
+          );
+          return tile.open
+            ? (
+              <button
+                key={tile.label}
+                type="button"
+                className="hover:bg-accent/50 cursor-pointer border-b px-4 py-3 text-left sm:border-r"
+                onClick={tile.open}
+              >
+                {body}
+              </button>
+            )
+            : <div key={tile.label} className="border-b px-4 py-3 sm:border-r">{body}</div>;
+        })}
+      </dl>
+    </Card>
+  );
+}
+
 export function Billing() {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [error, setError] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState<string | null>(null);
+  const [segments] = useSubroute("billing");
+  const page = billingPage(segments);
 
   const load = useCallback(async () => {
     try {
@@ -807,25 +894,76 @@ export function Billing() {
   }
 
   const summary = overview.summary;
-  const tiles: [string, string, boolean][] = [
-    [
-      "Monthly revenue",
-      [
+  const subscribers = (show: Filter) => () => {
+    setFilter(show);
+    goTo("billing", ["subscribers"]);
+  };
+  const reconciliation = () => goTo("billing", ["reconciliation"]);
+  const subscriptionTiles: Tile[] = [
+    {
+      label: "Monthly revenue",
+      value: [
         won(summary.monthly_revenue),
         ...overview.revenue
           .filter((revenue) => revenue.currency !== "KRW")
           .map((revenue) => money(revenue.amount, revenue.currency)),
       ].join(" + "),
-      false,
-    ],
-    ["Active", String(summary.active), false],
-    ["In a free trial", String(summary.trialing), false],
-    ["Past due", String(summary.past_due), summary.past_due > 0],
-    ["Canceling", String(summary.canceling), false],
-    ["Unbilled with instances", String(summary.unbilled), false],
-    ["Refunds open", String(summary.refunds_open), summary.refunds_open > 0],
-    ["Keys to delete", String(summary.keys_waiting), summary.keys_waiting > 0],
-    ["TossPayments mismatches", String(summary.mismatches), summary.mismatches > 0],
+      hint: "What running subscriptions bring in each month, before fees. Trials and cancelling ones are left out.",
+    },
+    {
+      label: "Active",
+      value: String(summary.active),
+      hint: "Paying and renewing.",
+      open: subscribers("active"),
+    },
+    {
+      label: "In a free trial",
+      value: String(summary.trialing),
+      hint: "Polar trials: nothing paid yet.",
+      open: subscribers("active"),
+    },
+    {
+      label: "Canceling",
+      value: String(summary.canceling),
+      hint: "Running until their paid period ends, then offline.",
+      open: subscribers("canceling"),
+    },
+    {
+      label: "Unbilled with instances",
+      value: String(summary.unbilled),
+      hint: "Running instances with no subscription or exemption.",
+      open: subscribers("unbilled"),
+    },
+  ];
+  const attentionTiles: Tile[] = [
+    {
+      label: "Past due",
+      value: String(summary.past_due),
+      hint: "A renewal was declined and is being retried.",
+      alarming: summary.past_due > 0,
+      open: subscribers("attention"),
+    },
+    {
+      label: "Refunds open",
+      value: String(summary.refunds_open),
+      hint: "Asked for and not yet confirmed by the provider.",
+      alarming: summary.refunds_open > 0,
+      open: subscribers("attention"),
+    },
+    {
+      label: "TossPayments mismatches",
+      value: String(summary.mismatches),
+      hint: "Where TossPayments' records and ours disagree.",
+      alarming: summary.mismatches > 0,
+      open: reconciliation,
+    },
+    {
+      label: "Keys to delete",
+      value: String(summary.keys_waiting),
+      hint: "Old card keys TossPayments has not confirmed deleting.",
+      alarming: summary.keys_waiting > 0,
+      open: reconciliation,
+    },
   ];
 
   return (
@@ -836,7 +974,7 @@ export function Billing() {
           <AlertDescription>
             Billing is off: set TOSSPAYMENTS_CLIENT_KEY and TOSSPAYMENTS_SECRET_KEY, or
             POLAR_ACCESS_TOKEN and POLAR_WEBHOOK_SECRET, on the control plane, and add a plan
-            below, to start charging. Until then
+            under Plans, to start charging. Until then
             nobody needs a subscription and customers see no subscription card.
           </AlertDescription>
         </Alert>
@@ -847,32 +985,28 @@ export function Billing() {
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
-      <Card className="grid grid-cols-2 gap-0 overflow-hidden p-0 md:grid-cols-4 xl:grid-cols-8">
-        {tiles.map(([label, value, alarming], index) => (
-          <div
-            key={label}
-            className={cn(
-              "border-border px-4 py-2.5",
-              index < tiles.length - 1 && "border-b xl:border-b-0 xl:border-r",
-            )}
-          >
-            <span className="text-muted-foreground block text-xs">{label}</span>
-            <strong
-              className={cn(
-                "block text-xl font-semibold tabular-nums",
-                alarming && "text-destructive",
-              )}
-            >
-              {value}
-            </strong>
-          </div>
-        ))}
-      </Card>
+      <BillingPages page={page} />
 
-      <Plans plans={overview.plans} polar={overview.polar} onChanged={load} />
+      {page === "" && (
+        <>
+          <TileGroup
+            title="Subscriptions"
+            description="Select a count to see those accounts."
+            tiles={subscriptionTiles}
+          />
+          <TileGroup
+            title="Needs attention"
+            description="Anything above zero here is waiting on a provider or on you."
+            tiles={attentionTiles}
+          />
+        </>
+      )}
 
-      <TossRecords overview={overview} onChanged={load} />
+      {page === "plans" && <Plans plans={overview.plans} polar={overview.polar} onChanged={load} />}
 
+      {page === "reconciliation" && <TossRecords overview={overview} onChanged={load} />}
+
+      {page === "subscribers" && (
       <Card className="gap-0 overflow-hidden p-0">
         <CardHeader className="flex flex-col gap-3 px-4 py-3">
           <div>
@@ -1028,6 +1162,7 @@ export function Billing() {
             </div>
           )}
       </Card>
+      )}
     </div>
   );
 }
