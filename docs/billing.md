@@ -174,8 +174,8 @@ Past-due subscriptions must pay first.
   the plan does not change, nothing is retried and the decline does not count
   against the subscription.
 - **Any other plan applies at the next renewal**, recorded in `pending_plan_id`
-  and charged at its price from then on. Choosing the current plan takes it
-  back. It is refused if the account's instances exceed the new limit, and the
+  and charged at its price from then on. **Change plan** lists only the other
+  plans; **Keep {plan}** beside the scheduled change takes it back. It is refused if the account's instances exceed the new limit, and the
   new limit applies to new instances as soon as the move is scheduled.
 
 ## Refunds

@@ -17,6 +17,13 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   Table,
   TableBody,
   TableCell,
@@ -302,6 +309,60 @@ export function SubscriptionSections(
   const canChangePlan = status === "active" && !subscription?.cancel_at_period_end &&
     selectable.length > 1;
 
+  /** The plans to choose from: on signing up, or under Change plan. */
+  const planOptions = () => (
+    <div className="grid gap-2 sm:grid-cols-2">
+      {selectable
+        // Changing plans offers the others only.
+        .filter((plan) => choosing || plan.id !== subscription?.plan_id)
+        .map((plan) => {
+        const scheduled = !choosing && plan.id === nextPlan?.id;
+        const selected = choosing ? plan.id === chosenPlan?.id : scheduled;
+        return (
+          <button
+            key={plan.id}
+            type="button"
+            aria-pressed={selected}
+            disabled={busy || scheduled}
+            onClick={() => {
+                if (choosing) {
+                  setSelectedPlan(plan.id);
+                } else {
+                  setChangingPlan(false);
+                  setSwitching(plan);
+                }
+              }}
+            className={cn(
+              "grid gap-0.5 rounded-lg border p-3 text-left text-sm transition-colors disabled:cursor-default",
+              selected ? "border-primary bg-primary/5" : "hover:bg-muted",
+            )}
+          >
+            <span className="font-medium">
+              {planName(plan)}
+              {scheduled ? ` · ${t("From your next renewal")}` : ""}
+            </span>
+            <span className="tabular-nums">
+              {price(plan)} {t("/ month")}
+            </span>
+            {limitLabel(plan) && (
+              <span className="text-muted-foreground text-xs">{limitLabel(plan)}</span>
+            )}
+          </button>
+        );
+      })}
+      <a
+        href={`mailto:${CONTACT_EMAIL}`}
+        className="hover:bg-muted grid gap-0.5 rounded-lg border p-3 text-left text-sm transition-colors"
+      >
+        <span className="font-medium">{t("Custom")}</span>
+        <span>{t("Contact us")}</span>
+        <span className="text-muted-foreground text-xs">
+          {t("For bigger instances, we'll work out a plan with you.")}
+        </span>
+      </a>
+    </div>
+  );
+
   return (
     <>
     <SectionCard
@@ -323,6 +384,19 @@ export function SubscriptionSections(
           {status === "active" && nextPlan && !subscription?.cancel_at_period_end && (
             <Detail label={t("From your next renewal")}>
               {planName(nextPlan)} · {price(nextPlan)}
+              {/* The current plan is not offered under Change plan, so this
+                  is how a scheduled change is taken back. */}
+              {currentPlan && (
+                <Button
+                  variant="link"
+                  size="sm"
+                  className="block h-auto p-0"
+                  disabled={busy}
+                  onClick={() => setSwitching(currentPlan)}
+                >
+                  {i18n._("Keep {plan}", { plan: planName(currentPlan) })}
+                </Button>
+              )}
             </Detail>
           )}
           {amount != null && (
@@ -380,52 +454,10 @@ export function SubscriptionSections(
           <ErrorAlert message={subscription.last_error} />
         )}
         {error && <ErrorAlert message={error} />}
-        {((choosing && selectable.length > 1) || (canChangePlan && changingPlan)) && (
+        {choosing && selectable.length > 1 && (
           <div className="grid gap-2">
-            <h3 className="text-sm font-medium">{choosing ? t("Choose a plan") : t("Change plan")}</h3>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {selectable.map((plan) => {
-                const isCurrent = !choosing && plan.id === subscription?.plan_id;
-                const selected = choosing ? plan.id === chosenPlan?.id : isCurrent;
-                return (
-                  <button
-                    key={plan.id}
-                    type="button"
-                    aria-pressed={selected}
-                    disabled={busy || (isCurrent && !nextPlan)}
-                    onClick={() => (choosing ? setSelectedPlan(plan.id) : setSwitching(plan))}
-                    className={cn(
-                      "grid gap-0.5 rounded-lg border p-3 text-left text-sm transition-colors disabled:cursor-default",
-                      selected ? "border-primary bg-primary/5" : "hover:bg-muted",
-                    )}
-                  >
-                    <span className="font-medium">
-                      {planName(plan)}
-                      {isCurrent ? ` · ${t("Current plan")}` : ""}
-                    </span>
-                    <span className="tabular-nums">
-                      {/* A subscriber keeps the price they signed up at. */}
-                      {isCurrent && subscription
-                        ? money(subscription.amount, subscription.currency)
-                        : price(plan)} {t("/ month")}
-                    </span>
-                    {limitLabel(plan) && (
-                      <span className="text-muted-foreground text-xs">{limitLabel(plan)}</span>
-                    )}
-                  </button>
-                );
-              })}
-              <a
-                href={`mailto:${CONTACT_EMAIL}`}
-                className="hover:bg-muted grid gap-0.5 rounded-lg border p-3 text-left text-sm transition-colors"
-              >
-                <span className="font-medium">{t("Custom")}</span>
-                <span>{t("Contact us")}</span>
-                <span className="text-muted-foreground text-xs">
-                  {t("For bigger instances, we'll work out a plan with you.")}
-                </span>
-              </a>
-            </div>
+            <h3 className="text-sm font-medium">{t("Choose a plan")}</h3>
+            {planOptions()}
           </div>
         )}
         {paused && (
@@ -453,8 +485,7 @@ export function SubscriptionSections(
           {canChangePlan && (
             <Button
               variant="outline"
-              aria-expanded={changingPlan}
-              onClick={() => setChangingPlan(!changingPlan)}
+              onClick={() => setChangingPlan(true)}
             >
               {t("Change plan")}
             </Button>
@@ -546,6 +577,17 @@ export function SubscriptionSections(
             </AlertDialogFooter>
           </AlertDialogContent>
         </AlertDialog>
+        <Dialog open={changingPlan} onOpenChange={setChangingPlan}>
+          <DialogContent className="sm:max-w-2xl">
+            <DialogHeader>
+              <DialogTitle>{t("Change plan")}</DialogTitle>
+              <DialogDescription>
+                {currentPlan && i18n._("You are on {plan}.", { plan: planName(currentPlan) })}
+              </DialogDescription>
+            </DialogHeader>
+            {planOptions()}
+          </DialogContent>
+        </Dialog>
         <AlertDialog
           open={switching !== null}
           onOpenChange={(open) => !open && setSwitching(null)}
@@ -553,7 +595,11 @@ export function SubscriptionSections(
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>
-                {switching ? i18n._("Change to {plan}?", { plan: planName(switching) }) : ""}
+                {!switching
+                  ? ""
+                  : switching.id === subscription?.plan_id
+                  ? i18n._("Keep {plan}?", { plan: planName(switching) })
+                  : i18n._("Change to {plan}?", { plan: planName(switching) })}
               </AlertDialogTitle>
               <AlertDialogDescription>
                 {switching && switching.id === subscription?.plan_id
