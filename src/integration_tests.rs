@@ -3847,6 +3847,18 @@ async fn ready_tenant(pool: &PgPool, runtime: Uuid) -> Uuid {
     id
 }
 
+/// Record where `head` stands against `base`, as an answer from eunha's
+/// commit graph would be kept, so that no test asks GitHub.
+async fn ordered(pool: &PgPool, base: &str, head: &str, status: &str) {
+    sqlx::query("INSERT INTO eunha_release_order(base,head,status) VALUES($1,$2,$3)")
+        .bind(base)
+        .bind(head)
+        .bind(status)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 async fn deployed(pool: &PgPool, runtime: Uuid, sha: &str) {
     sqlx::query("INSERT INTO eunha_releases(id,git_sha,artifact_path,build_status) VALUES($1,$2,'/tmp','ready') ON CONFLICT DO NOTHING")
         .bind(Uuid::new_v4()).bind(sha).execute(pool).await.unwrap();
@@ -3950,15 +3962,21 @@ async fn a_move_is_admitted_only_where_it_is_safe_and_holds_its_runtimes(pool: P
 
     // Not to an older release than the one that migrated its database.
     deployed(&pool, to, &"0".repeat(40)).await;
-    sqlx::query("UPDATE eunha_releases SET created_at=now()-interval '1 day' WHERE git_sha=$1")
-        .bind("0".repeat(40))
-        .execute(&pool)
+    let refused = tenant_move::begin(&shared, moving, to, None, "127.0.0.1")
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(refused.1.contains("is not known"), "{}", refused.1);
+    ordered(&pool, &"0".repeat(40), &"a".repeat(40), "ahead").await;
     let refused = tenant_move::begin(&shared, moving, to, None, "127.0.0.1")
         .await
         .unwrap_err();
     assert!(refused.1.contains("older release"), "{}", refused.1);
+    deployed(&pool, to, &"1".repeat(40)).await;
+    ordered(&pool, &"a".repeat(40), &"1".repeat(40), "diverged").await;
+    let refused = tenant_move::begin(&shared, moving, to, None, "127.0.0.1")
+        .await
+        .unwrap_err();
+    assert!(refused.1.contains("different histories"), "{}", refused.1);
     deployed(&pool, to, &"a".repeat(40)).await;
 
     // An existing domain is routed by infrastructure, which a move cannot change.
@@ -4104,22 +4122,20 @@ async fn a_rollout_never_takes_a_runtime_back_to_an_older_build(pool: PgPool) {
     // An operator deploys a newer build by hand.
     let newer = "c".repeat(40);
     deployed(&pool, runtime, &newer).await;
-    sqlx::query("UPDATE eunha_releases SET created_at=now()+interval '1 minute' WHERE git_sha=$1")
-        .bind(&newer)
-        .execute(&pool)
-        .await
-        .unwrap();
     let active = rollout::active(&pool).await.unwrap().unwrap();
+    // Until the graph has said which is newer, the runtime is held.
+    let channels = rollout::channels(&pool, &active).await.unwrap();
+    assert!(!channels[1].runtimes[0].on_release);
+    let held = channels[1].runtimes[0].held.clone().unwrap();
+    assert!(held.contains("is not known"), "{held}");
+    ordered(&pool, &rolling, &newer, "ahead").await;
     let channels = rollout::channels(&pool, &active).await.unwrap();
     assert!(channels[1].runtimes[0].on_release);
     // An older one is still taken forward.
     let older = "0".repeat(40);
     deployed(&pool, runtime, &older).await;
-    sqlx::query("UPDATE eunha_releases SET created_at=now()-interval '1 day' WHERE git_sha=$1")
-        .bind(&older)
-        .execute(&pool)
-        .await
-        .unwrap();
+    ordered(&pool, &older, &rolling, "ahead").await;
     let channels = rollout::channels(&pool, &active).await.unwrap();
     assert!(!channels[1].runtimes[0].on_release);
+    assert_eq!(channels[1].runtimes[0].held, None);
 }

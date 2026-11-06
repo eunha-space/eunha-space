@@ -23,7 +23,9 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{ApiError, Shared, admin_user, latest_remote_ref, queue_runtime_release};
+use crate::{
+    ApiError, Shared, admin_user, latest_remote_ref, queue_runtime_release, release_order,
+};
 
 /// How often a rollout is moved along.
 const POLL: Duration = Duration::from_secs(30);
@@ -59,8 +61,9 @@ pub(crate) struct RuntimeState {
     pub last_failure_at: Option<OffsetDateTime>,
     /// Tenants on it, ready and meant to be running, last seen unhealthy.
     pub unhealthy: i64,
-    /// A tenant is moving on or off it.
-    pub held_by_move: bool,
+    /// Why it cannot be released now: a tenant is moving on or off it, or
+    /// whether it runs a newer build than the rollout's is not known.
+    pub held: Option<String>,
 }
 
 impl RuntimeState {
@@ -160,7 +163,7 @@ pub(crate) fn plan(
                 return Action::Wait("Waiting for the release in progress to finish.".into());
             }
             let ready = pending.iter().find(|runtime| {
-                !runtime.held_by_move
+                runtime.held.is_none()
                     && runtime
                         .last_failure_at
                         .is_none_or(|failed| failed + RETRY_AFTER <= now)
@@ -170,10 +173,8 @@ pub(crate) fn plan(
                     channel_id: channel.id,
                     runtime_id: runtime.id,
                 },
-                None => match pending.iter().find(|runtime| runtime.held_by_move) {
-                    Some(runtime) => {
-                        Action::Wait(format!("A tenant is moving on or off {}.", runtime.name))
-                    }
+                None => match pending.iter().find_map(|runtime| runtime.held.clone()) {
+                    Some(held) => Action::Wait(held),
                     None => Action::Wait(format!(
                         "Trying {} again shortly after its failed release.",
                         pending[0].name
@@ -291,7 +292,7 @@ pub(crate) async fn channels(
             String,
             bool,
             bool,
-            bool,
+            Option<String>,
             i64,
             Option<OffsetDateTime>,
             i64,
@@ -300,18 +301,52 @@ pub(crate) async fn channels(
     >(
         "SELECT r.channel_id,r.id,r.name,r.auto_deploy_enabled,
                 EXISTS(SELECT 1 FROM tenants t WHERE t.runtime_id=r.id AND t.lifecycle_state='ready'),
-                r.deployed_ref IS NOT DISTINCT FROM $2 OR r.id IN (SELECT runtime_id FROM runtimes_ahead($1)),
-                (SELECT count(*) FROM runtime_deployments d WHERE d.runtime_id=r.id AND d.rollout_id=$1 AND d.status IN ('failed','rolled_back') AND d.created_at>=$3),
-                (SELECT max(d.finished_at) FROM runtime_deployments d WHERE d.runtime_id=r.id AND d.rollout_id=$1 AND d.status IN ('failed','rolled_back') AND d.created_at>=$3),
+                r.deployed_ref,
+                (SELECT count(*) FROM runtime_deployments d WHERE d.runtime_id=r.id AND d.rollout_id=$1 AND d.status IN ('failed','rolled_back') AND d.created_at>=$2),
+                (SELECT max(d.finished_at) FROM runtime_deployments d WHERE d.runtime_id=r.id AND d.rollout_id=$1 AND d.status IN ('failed','rolled_back') AND d.created_at>=$2),
                 (SELECT count(*) FROM tenants t WHERE t.runtime_id=r.id AND t.lifecycle_state='ready' AND t.desired_state='running' AND t.observed_state='unhealthy'),
                 EXISTS(SELECT 1 FROM tenant_moves m WHERE m.finished_at IS NULL AND r.id IN (m.from_runtime_id,m.to_runtime_id))
          FROM runtimes r WHERE r.channel_id IS NOT NULL ORDER BY r.name",
     )
     .bind(rollout.id)
-    .bind(&rollout.git_sha)
     .bind(rollout.attempts_since)
     .fetch_all(db)
     .await?;
+    let mut states = Vec::with_capacity(runtimes.len());
+    for runtime in runtimes {
+        let (on_release, unordered) = match &runtime.5 {
+            Some(deployed) => match release_order::compare(db, &rollout.git_sha, deployed).await {
+                Ok(order) => (order.at_least(), None),
+                Err(error) => (
+                    false,
+                    Some(format!(
+                        "Whether {} runs a newer build is not known: {error}",
+                        runtime.2
+                    )),
+                ),
+            },
+            None => (false, None),
+        };
+        let held = if runtime.9 {
+            Some(format!("A tenant is moving on or off {}.", runtime.2))
+        } else {
+            unordered
+        };
+        states.push((
+            runtime.0,
+            RuntimeState {
+                id: runtime.1,
+                name: runtime.2,
+                follows: runtime.3,
+                has_tenants: runtime.4,
+                on_release,
+                failures: runtime.6,
+                last_failure_at: runtime.7,
+                unhealthy: runtime.8,
+                held,
+            },
+        ));
+    }
     Ok(channels
         .into_iter()
         .map(
@@ -321,20 +356,10 @@ pub(crate) async fn channels(
                 soak_minutes,
                 completed_at,
                 promoted_at,
-                runtimes: runtimes
+                runtimes: states
                     .iter()
-                    .filter(|runtime| runtime.0 == id)
-                    .map(|runtime| RuntimeState {
-                        id: runtime.1,
-                        name: runtime.2.clone(),
-                        follows: runtime.3,
-                        has_tenants: runtime.4,
-                        on_release: runtime.5,
-                        failures: runtime.6,
-                        last_failure_at: runtime.7,
-                        unhealthy: runtime.8,
-                        held_by_move: runtime.9,
-                    })
+                    .filter(|(channel_id, _)| *channel_id == id)
+                    .map(|(_, runtime)| runtime.clone())
                     .collect(),
             },
         )
@@ -814,10 +839,24 @@ pub(crate) async fn list_rollouts(
         .bind(id)
         .fetch_all(&s.db)
         .await?;
-        let ahead = sqlx::query_scalar("SELECT runtime_id FROM runtimes_ahead($1)")
-            .bind(id)
+        // Only the rollouts still going are compared: a finished one's
+        // runtimes have all moved on.
+        let mut ahead = Vec::new();
+        if matches!(status.as_str(), "rolling" | "paused" | "halted") {
+            let runtimes = sqlx::query_as::<_, (Uuid, String)>(
+                "SELECT id,deployed_ref FROM runtimes WHERE deployed_ref IS NOT NULL AND deployed_ref<>$1",
+            )
+            .bind(&git_sha)
             .fetch_all(&s.db)
             .await?;
+            for (runtime_id, deployed) in runtimes {
+                if release_order::compare(&s.db, &git_sha, &deployed).await
+                    == Ok(release_order::Order::Ahead)
+                {
+                    ahead.push(runtime_id);
+                }
+            }
+        }
         rollouts.push(Rollout {
             id,
             git_sha,
@@ -959,7 +998,7 @@ mod tests {
             failures: 0,
             last_failure_at: None,
             unhealthy: 0,
-            held_by_move: false,
+            held: None,
         }
     }
 
@@ -1103,7 +1142,7 @@ mod tests {
             }
         );
         let mut moving = runtime("moving", false);
-        moving.held_by_move = true;
+        moving.held = Some("A tenant is moving on or off moving.".into());
         let channels = [channel("canary", 0, vec![moving.clone()])];
         assert_eq!(
             plan(&channels, false, now()),

@@ -146,6 +146,23 @@ impl Source {
         }
     }
 
+    /// Where commit `head` stands against commit `base` on eunha's graph:
+    /// `identical`, `ahead`, `behind` or `diverged`.
+    pub async fn compare(&self, base: &str, head: &str) -> Result<String, String> {
+        if !crate::is_git_sha(base) || !crate::is_git_sha(head) {
+            return Err("A release is not a commit.".into());
+        }
+        #[derive(Deserialize)]
+        struct Comparison {
+            status: String,
+        }
+        // One commit of the list is enough; only the status is read.
+        let comparison: Comparison = self
+            .json(&format!("compare/{base}...{head}?per_page=1"))
+            .await?;
+        Ok(comparison.status)
+    }
+
     pub async fn artifact(&self, built: &Built) -> Result<Artifact, String> {
         let artifacts: Artifacts = self
             .json(&format!(

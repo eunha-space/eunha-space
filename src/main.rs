@@ -50,6 +50,7 @@ mod integration_tests;
 mod jobs;
 mod locale;
 mod masquerade;
+mod release_order;
 mod rollout;
 mod service_usage;
 mod smtp;
@@ -4104,6 +4105,29 @@ async fn migrate_tenant_database_on(
         .context("runtime directory has no parent")?
         .to_path_buf();
     let binary = runtime_root.join("current/eunha");
+    // A database another runtime migrated may be ahead of this one's binary,
+    // which a rollback has to live with but a move need not: refuse it.
+    if runtime_id.is_some() {
+        let output = tokio::process::Command::new(&binary)
+            .args(["migrate", "--check-known"])
+            .env("DATABASE_URL", &database_url)
+            .current_dir(runtime_root.join("current"))
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output()
+            .await?;
+        match known_migrations(output.status.code(), &output.stderr) {
+            KnownMigrations::Known => {}
+            KnownMigrations::Unknown => anyhow::bail!(
+                "the database has migrations the new runtime's release does not know; release it first"
+            ),
+            KnownMigrations::Unchecked => tracing::info!(
+                %tenant_id,
+                "the new runtime's release cannot check for migrations it does not know"
+            ),
+            KnownMigrations::Failed => anyhow::bail!("checking the database's migrations failed"),
+        }
+    }
     let status = tokio::process::Command::new(binary)
         .arg("migrate")
         .env("DATABASE_URL", database_url)
@@ -4115,6 +4139,32 @@ async fn migrate_tenant_database_on(
         .await?;
     anyhow::ensure!(status.success(), "tenant migration failed");
     Ok(())
+}
+
+/// What `eunha migrate --check-known` said of a tenant's database.
+#[derive(Debug, PartialEq)]
+enum KnownMigrations {
+    /// The binary knows every migration the database has applied.
+    Known,
+    /// The database is ahead of the binary.
+    Unknown,
+    /// A release from before the flag, which clap refuses as an argument it
+    /// does not know. Such a move is ordered by the commit graph alone.
+    Unchecked,
+    Failed,
+}
+
+fn known_migrations(code: Option<i32>, stderr: &[u8]) -> KnownMigrations {
+    match code {
+        Some(0) => KnownMigrations::Known,
+        Some(1) => KnownMigrations::Unknown,
+        Some(2)
+            if String::from_utf8_lossy(stderr).contains("unexpected argument '--check-known'") =>
+        {
+            KnownMigrations::Unchecked
+        }
+        _ => KnownMigrations::Failed,
+    }
 }
 
 /// Restore the instance's Mastodon dump into the database the previous steps
@@ -6314,9 +6364,28 @@ async fn render_tenant(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_release_without_the_migration_check_is_told_apart_from_a_failure() {
+        assert_eq!(known_migrations(Some(0), b""), KnownMigrations::Known);
+        assert_eq!(known_migrations(Some(1), b""), KnownMigrations::Unknown);
+        assert_eq!(
+            known_migrations(
+                Some(2),
+                b"error: unexpected argument '--check-known' found\n"
+            ),
+            KnownMigrations::Unchecked
+        );
+        assert_eq!(
+            known_migrations(Some(2), b"error: bad"),
+            KnownMigrations::Failed
+        );
+        assert_eq!(known_migrations(None, b""), KnownMigrations::Failed);
+    }
+
     use super::{
-        DomainDnsTargetError, REDACTED, connection_budget_error, domain_reconcile_error_message,
-        is_valid_owner_username, printed_password, redact_connection_url, tenant_redis_key_prefix,
+        DomainDnsTargetError, KnownMigrations, REDACTED, connection_budget_error,
+        domain_reconcile_error_message, is_valid_owner_username, known_migrations,
+        printed_password, redact_connection_url, tenant_redis_key_prefix,
     };
     use uuid::Uuid;
 

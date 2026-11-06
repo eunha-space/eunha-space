@@ -59,8 +59,20 @@ A rollout holds instead of going on when:
 
 A runtime an operator has deployed a newer build to by hand counts as done:
 a rollout never takes a runtime back to an older build. Its reason is shown in
-the console. A runtime that fails to take the build three
+the console. A runtime whose build cannot be compared with the rollout's holds
+the rollout until it can. A runtime that fails to take the build three
 times **halts** the rollout, which then goes no further until an operator acts.
+
+## Which release is newer
+
+A release is a commit on eunha's `main`, and a newer one descends from an older
+one. *src/release_order.rs* asks eunha's commit graph rather than comparing
+when each was built, because an old commit built for the first time after a
+newer one would otherwise look newer. With CI builds it asks GitHub's compare
+API with the CI token, which needs read access to eunha's contents; otherwise
+it asks the central checkout with `git merge-base --is-ancestor`. Two commits'
+order never changes, so each answer is kept in `eunha_release_order` and asked
+for once.
 
 ## Steering a rollout
 
@@ -85,6 +97,8 @@ Each is recorded as a `release_policy` operation, as are changes to channels.
   and whether it was promoted past it.
 - `runtime_deployments.rollout_id`, `tenants_checked` and `tenants_unhealthy`
   link each automatic release to its rollout and record its tenant check.
+- `eunha_release_order`: where commit `head` stands against commit `base`
+  (`identical`, `ahead`, `behind` or `diverged`), kept from the commit graph.
 
 ## What a rollout cannot undo
 

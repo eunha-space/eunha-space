@@ -27,8 +27,8 @@ use uuid::Uuid;
 
 use crate::{
     ApiError, Shared, admin_user, connection_budget_error, healthcheck_url, jobs::Next,
-    migrate_tenant_database_on, reload_runtime_on, render_tenant_on, unrender_tenant_from,
-    verify_offline_at,
+    migrate_tenant_database_on, release_order, reload_runtime_on, render_tenant_on,
+    unrender_tenant_from, verify_offline_at,
 };
 
 /// The steps of a move, in order.
@@ -159,6 +159,19 @@ pub(crate) async fn begin(
     let request = MoveRequest {
         runtime_id: to_runtime_id,
     };
+    // Comparing releases may ask GitHub, which is not done holding the lock
+    // below; the answer is kept, so the check under it is read from the table.
+    if let Some((from_ref, to_ref)) = sqlx::query_as::<_, (Option<String>, Option<String>)>(
+        "SELECT f.deployed_ref,r.deployed_ref FROM tenants t JOIN runtimes f ON f.id=t.runtime_id JOIN runtimes r ON r.id=$2 WHERE t.id=$1",
+    )
+    .bind(id)
+    .bind(to_runtime_id)
+    .fetch_optional(&s.db)
+    .await?
+        && let (Some(from_ref), Some(to_ref)) = (from_ref, to_ref)
+    {
+        let _ = release_order::compare(&s.db, &from_ref, &to_ref).await;
+    }
     let mut tx = s.db.begin().await?;
     // The lock release admission takes: either a release of one of these
     // runtimes is running and this move waits for it, or this move exists and
@@ -255,7 +268,7 @@ pub(crate) async fn begin(
             from.name
         )));
     }
-    release_order(&mut tx, &from, &to).await?;
+    release_order(s, &from, &to).await?;
     // The new runtime's tenants and this one must fit its share of PostgreSQL.
     let (declared, accepted) = sqlx::query_as::<_, (i64, i64)>(
         "SELECT (SELECT COALESCE(SUM(c.database_pool_max_connections),0) FROM tenants peer JOIN tenant_configuration c ON c.tenant_id=peer.id WHERE (peer.runtime_id=$1 OR peer.id=$2) AND peer.lifecycle_state NOT IN ('deprovisioning','retained','purging','purged'))::bigint,current_setting('max_connections')::bigint-current_setting('superuser_reserved_connections')::bigint",
@@ -303,44 +316,37 @@ pub(crate) async fn begin(
     Ok((move_id, operation_id))
 }
 
-/// A tenant may move to a runtime on its own release or a newer one. Its
-/// database is migrated by the new runtime's release; one older than the
-/// database would serve a schema it does not know.
-async fn release_order(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    from: &Target,
-    to: &Target,
-) -> Result<(), ApiError> {
+/// A tenant may move to a runtime on its own release or a newer one, by
+/// eunha's commit graph. Its database is migrated by the new runtime's
+/// release; an older one would serve a schema it does not know. The migrate
+/// step checks that too, against the database itself.
+async fn release_order(s: &Shared, from: &Target, to: &Target) -> Result<(), ApiError> {
     let Some(to_ref) = &to.deployed_ref else {
         return Err(conflict(format!(
             "{} has never been released; release it first.",
             to.name
         )));
     };
-    if from.deployed_ref.as_ref() == Some(to_ref) {
-        return Ok(());
-    }
     let Some(from_ref) = &from.deployed_ref else {
         return Ok(());
     };
-    let built = |reference: &str| {
-        sqlx::query_scalar::<_, OffsetDateTime>(
-            "SELECT created_at FROM eunha_releases WHERE git_sha=$1",
-        )
-        .bind(reference.to_owned())
-    };
-    let from_built = built(from_ref).fetch_optional(&mut **tx).await?;
-    let to_built = built(to_ref).fetch_optional(&mut **tx).await?;
-    match (from_built, to_built) {
-        (Some(from_built), Some(to_built)) if to_built >= from_built => Ok(()),
-        (Some(_), Some(_)) => Err(conflict(format!(
+    match release_order::compare(&s.db, from_ref, to_ref).await {
+        Ok(order) if order.at_least() => Ok(()),
+        Ok(release_order::Order::Behind) => Err(conflict(format!(
             "{} runs an older release than {}; release it first.",
             to.name, from.name
         ))),
-        _ => Err(conflict(format!(
-            "Which of {} and {} runs the newer release is not recorded; release {} first.",
+        Ok(_) => Err(conflict(format!(
+            "{} and {} run releases from different histories; release {} first.",
             from.name, to.name, to.name
         ))),
+        Err(error) => Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "Which of {} and {} runs the newer release is not known: {error}",
+                from.name, to.name
+            ),
+        )),
     }
 }
 

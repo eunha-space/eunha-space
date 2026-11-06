@@ -178,8 +178,11 @@ A move is refused unless:
 - the tenant is ready, has no other lifecycle work in progress, and is not
   already moving;
 - both runtimes are on the instance this control plane manages;
-- the new runtime runs the tenant's release or a newer one. Its release migrates
-  the database, and an older one would serve a schema it does not know;
+- the new runtime runs the tenant's release or a newer one, by eunha's commit
+  graph (see [releases](releases.md#which-release-is-newer)). Its release
+  migrates the database, and an older one would serve a schema it does not
+  know. Releases from different histories are refused too, and so is a move
+  when the graph cannot be asked;
 - the tenant has no existing (`legacy`) domain. Infrastructure routes one of
   those to the runtime it was set up on, so it has to be managed with Cloudflare
   first;
@@ -189,8 +192,11 @@ A move is refused unless:
 
 The steps:
 
-1. **migrate**: the tenant's database is migrated with the new runtime's
-   release.
+1. **migrate**: the new runtime's binary checks, with `eunha migrate
+   --check-known`, that it knows every migration the database has applied, and
+   the move fails if it does not. Then it migrates the database. A binary from
+   before that check refuses the flag, and its move is ordered by the graph
+   alone.
 2. **start**: its file is rendered into the new runtime's directory, the new
    runtime is reloaded, and the tenant is health-checked there.
 3. **switch**: it is rendered again, in case its configuration changed, and
