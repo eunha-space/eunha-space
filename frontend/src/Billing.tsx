@@ -1,4 +1,4 @@
-import { won } from "@/format";
+import { money, won } from "@/format";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import {
   ChevronDown,
@@ -41,6 +41,8 @@ type Account = {
   billing_exempt: boolean;
   status: Status | null;
   amount: number | null;
+  provider: "toss" | "polar" | null;
+  currency: string | null;
   card_company: string | null;
   card_number: string | null;
   has_card: boolean;
@@ -65,13 +67,20 @@ type Plan = {
   media_gb: number | null;
   database_gb: number | null;
   monthly_activities: number | null;
+  polar_product_id: string | null;
+  polar_amount: number | null;
+  polar_currency: string | null;
   active: boolean;
   subscribers: number;
 };
 
 type Overview = {
   enabled: boolean;
+  toss: boolean;
+  polar: boolean;
   plans: Plan[];
+  /** Running subscriptions' monthly amounts, by currency. */
+  revenue: { currency: string; amount: number; subscriptions: number }[];
   summary: {
     active: number;
     past_due: number;
@@ -232,6 +241,8 @@ function TossRecords({ overview, onChanged }: { overview: Overview; onChanged: (
 type Payment = {
   order_id: string;
   amount: number;
+  provider: "toss" | "polar";
+  currency: string;
   status: "pending" | "paid" | "failed" | "expired" | "refunded";
   period_start: string;
   period_end: string;
@@ -307,7 +318,47 @@ function matches(account: Account, filter: Filter): boolean {
   }
 }
 
-function Plans({ plans, onChanged }: { plans: Plan[]; onChanged: () => Promise<void> }) {
+/** The Polar product a plan is sold as, or a field to link one. */
+function PolarProduct(
+  { plan, busy, onLink }: { plan: Plan; busy: boolean; onLink: (productId: string) => void },
+) {
+  const [productId, setProductId] = useState("");
+  if (plan.polar_product_id && plan.polar_amount != null && plan.polar_currency) {
+    return (
+      <span className="tabular-nums" title={plan.polar_product_id}>
+        {money(plan.polar_amount, plan.polar_currency)}
+      </span>
+    );
+  }
+  return (
+    <form
+      className="flex gap-1"
+      onSubmit={(event) => {
+        event.preventDefault();
+        onLink(productId.trim());
+      }}
+    >
+      <Input
+        aria-label={`Polar product for ${plan.name_en}`}
+        placeholder="Product id"
+        className="h-7 w-36 text-xs"
+        maxLength={100}
+        required
+        value={productId}
+        onChange={(event) => setProductId(event.target.value)}
+      />
+      <Button type="submit" size="xs" variant="outline" disabled={busy}>Link</Button>
+    </form>
+  );
+}
+
+function Plans(
+  { plans, polar, onChanged }: {
+    plans: Plan[];
+    polar: boolean;
+    onChanged: () => Promise<void>;
+  },
+) {
   const [nameEn, setNameEn] = useState("");
   const [nameKo, setNameKo] = useState("");
   const [amount, setAmount] = useState("");
@@ -370,6 +421,14 @@ function Plans({ plans, onChanged }: { plans: Plan[]; onChanged: () => Promise<v
       })
     );
 
+  const linkPolar = (plan: Plan, productId: string) =>
+    run(() =>
+      api(`/billing/plans/${plan.id}/polar`, {
+        method: "POST",
+        body: JSON.stringify({ product_id: productId }),
+      })
+    );
+
   return (
     <Card className="gap-0 overflow-hidden p-0">
       <CardHeader className="px-4 py-3">
@@ -390,6 +449,7 @@ function Plans({ plans, onChanged }: { plans: Plan[]; onChanged: () => Promise<v
           <TableRow>
             <TableHead>Name</TableHead>
             <TableHead className="text-right">Monthly</TableHead>
+            {polar && <TableHead>International (Polar)</TableHead>}
             <TableHead className="text-right">Instances</TableHead>
             <TableHead>Shown limits</TableHead>
             <TableHead className="text-right">Subscribers</TableHead>
@@ -401,6 +461,15 @@ function Plans({ plans, onChanged }: { plans: Plan[]; onChanged: () => Promise<v
             <TableRow key={plan.id}>
               <TableCell>{plan.name_en} · {plan.name_ko}</TableCell>
               <TableCell className="text-right tabular-nums">{won(plan.amount)}</TableCell>
+              {polar && (
+                <TableCell>
+                  <PolarProduct
+                    plan={plan}
+                    busy={busy}
+                    onLink={(productId) => void linkPolar(plan, productId)}
+                  />
+                </TableCell>
+              )}
               <TableCell className="text-right tabular-nums">
                 {plan.instance_limit ?? "Account's limit"}
               </TableCell>
@@ -524,7 +593,16 @@ export function Billing() {
 
   const summary = overview.summary;
   const tiles: [string, string, boolean][] = [
-    ["Monthly revenue", won(summary.monthly_revenue), false],
+    [
+      "Monthly revenue",
+      [
+        won(summary.monthly_revenue),
+        ...overview.revenue
+          .filter((revenue) => revenue.currency !== "KRW")
+          .map((revenue) => money(revenue.amount, revenue.currency)),
+      ].join(" + "),
+      false,
+    ],
     ["Active", String(summary.active), false],
     ["Past due", String(summary.past_due), summary.past_due > 0],
     ["Canceling", String(summary.canceling), false],
@@ -540,8 +618,9 @@ export function Billing() {
         <Alert>
           <CreditCard />
           <AlertDescription>
-            Billing is off: set TOSSPAYMENTS_CLIENT_KEY and TOSSPAYMENTS_SECRET_KEY on the
-            control plane, and add a plan below, to start charging. Until then
+            Billing is off: set TOSSPAYMENTS_CLIENT_KEY and TOSSPAYMENTS_SECRET_KEY, or
+            POLAR_ACCESS_TOKEN and POLAR_WEBHOOK_SECRET, on the control plane, and add a plan
+            below, to start charging. Until then
             nobody needs a subscription and customers see no subscription card.
           </AlertDescription>
         </Alert>
@@ -574,7 +653,7 @@ export function Billing() {
         ))}
       </Card>
 
-      <Plans plans={overview.plans} onChanged={load} />
+      <Plans plans={overview.plans} polar={overview.polar} onChanged={load} />
 
       <TossRecords overview={overview} onChanged={load} />
 
@@ -690,7 +769,7 @@ export function Billing() {
                           <TableCell className="text-right align-top tabular-nums">
                             {account.amount != null &&
                                 (account.status === "active" || account.status === "past_due")
-                              ? won(account.amount)
+                              ? money(account.amount, account.currency ?? "KRW")
                               : "—"}
                           </TableCell>
                           <TableCell
@@ -838,7 +917,9 @@ function AccountPanel(
                     <TableCell className="whitespace-nowrap">
                       {day(payment.period_start)} – {day(payment.period_end)}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">{won(payment.amount)}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {money(payment.amount, payment.currency)}
+                    </TableCell>
                     <TableCell className="text-wrap">
                       <PaymentResult payment={payment} />
                     </TableCell>
@@ -857,7 +938,7 @@ function AccountPanel(
                               `/billing/payments/${encodeURIComponent(payment.order_id)}/refund`,
                             )}
                           confirm={{
-                            title: `Refund ${won(payment.amount)} to ${account.email}?`,
+                            title: `Refund ${money(payment.amount, payment.currency)} to ${account.email}?`,
                             description:
                               "The full amount goes back to the card. The subscription carries on and renews as before, and the account's instances stay online.",
                             action: "Refund",

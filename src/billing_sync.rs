@@ -60,6 +60,21 @@ pub(crate) struct PaymentRecord {
 }
 
 impl PaymentRecord {
+    /// A Polar order, in the terms TossPayments' record is read in: what was
+    /// paid and what has been given back of it.
+    pub(crate) fn refunded_by(order_id: &str, total_amount: i64, refunded: i64) -> Self {
+        Self {
+            order_id: order_id.into(),
+            status: if refunded > 0 {
+                "PARTIAL_CANCELED".into()
+            } else {
+                "DONE".into()
+            },
+            total_amount,
+            balance_amount: Some(total_amount - refunded),
+        }
+    }
+
     /// Whether TossPayments is holding money for this payment.
     pub(crate) fn keeps_money(&self) -> bool {
         matches!(self.status.as_str(), "DONE" | "PARTIAL_CANCELED")
@@ -214,7 +229,7 @@ pub(crate) async fn start_refund(
     requested_by: Uuid,
     within_window: bool,
 ) -> Result<Uuid, ApiError> {
-    if s.billing.is_none() {
+    if !billing::billing_on(s) {
         return Err(ApiError(
             StatusCode::SERVICE_UNAVAILABLE,
             "Subscriptions are not available.".into(),
@@ -222,7 +237,7 @@ pub(crate) async fn start_refund(
     }
     let mut tx = s.db.begin().await?;
     let (user_id, refundable) = sqlx::query_as::<_, (Uuid, bool)>(&format!(
-        "SELECT user_id,status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND (NOT $3 OR settled_at>now()-interval '{REFUND_WINDOW}') AND payment_key IS NOT NULL FROM subscription_payments WHERE order_id=$1 AND ($2::uuid IS NULL OR user_id=$2) FOR UPDATE"
+        "SELECT user_id,status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND (NOT $3 OR settled_at>now()-interval '{REFUND_WINDOW}') AND (payment_key IS NOT NULL OR provider='polar') FROM subscription_payments WHERE order_id=$1 AND ($2::uuid IS NULL OR user_id=$2) FOR UPDATE"
     ))
     .bind(order_id)
     .bind(owner)
@@ -276,6 +291,7 @@ pub(crate) async fn start_refund(
 struct DueRefund {
     order_id: String,
     user_id: Uuid,
+    provider: String,
     payment_key: Option<String>,
     toss_mid: Option<String>,
 }
@@ -283,16 +299,18 @@ struct DueRefund {
 /// Carry one requested refund forward, or the given order's. Returns whether
 /// there was one.
 pub(crate) async fn refund_due(s: &Shared, order_id: Option<&str>) -> anyhow::Result<bool> {
-    let Some(billing) = s.billing.as_deref() else {
+    if !billing::billing_on(s) {
         return Ok(false);
-    };
+    }
     let mut tx = s.db.begin().await?;
     // The subscription's lease keeps a refund and a charge for the same
     // account from running at once.
     let Some(due) = sqlx::query_as::<_, DueRefund>(
-        "SELECT p.order_id,p.user_id,p.payment_key,COALESCE(p.toss_mid,s.toss_mid) toss_mid FROM subscription_payments p JOIN subscriptions s ON s.user_id=p.user_id WHERE p.refund_requested_at IS NOT NULL AND p.refunded_at IS NULL AND p.refund_next_attempt_at<=now() AND (s.lease_until IS NULL OR s.lease_until<now()) AND ($1::text IS NULL OR p.order_id=$1) ORDER BY p.refund_next_attempt_at LIMIT 1 FOR UPDATE OF p,s SKIP LOCKED",
+        "SELECT p.order_id,p.user_id,p.provider,p.payment_key,COALESCE(p.toss_mid,s.toss_mid) toss_mid FROM subscription_payments p JOIN subscriptions s ON s.user_id=p.user_id WHERE p.refund_requested_at IS NOT NULL AND p.refunded_at IS NULL AND p.refund_next_attempt_at<=now() AND (s.lease_until IS NULL OR s.lease_until<now()) AND ($1::text IS NULL OR p.order_id=$1) AND (p.provider<>'toss' OR $2) AND (p.provider<>'polar' OR $3) ORDER BY p.refund_next_attempt_at LIMIT 1 FOR UPDATE OF p,s SKIP LOCKED",
     )
     .bind(order_id)
+    .bind(s.billing.is_some())
+    .bind(s.polar.is_some())
     .fetch_optional(&mut *tx)
     .await?
     else {
@@ -308,7 +326,11 @@ pub(crate) async fn refund_due(s: &Shared, order_id: Option<&str>) -> anyhow::Re
         .await?;
     tx.commit().await?;
 
-    let outcome = refund(s, billing, &due).await;
+    let outcome = match (due.provider.as_str(), s.billing.as_deref()) {
+        ("polar", _) => refund_through_polar(s, &due).await,
+        (_, Some(billing)) => refund(s, billing, &due).await,
+        _ => Ok(()),
+    };
     sqlx::query("UPDATE subscriptions SET lease_until=NULL WHERE user_id=$1")
         .bind(due.user_id)
         .execute(&s.db)
@@ -351,6 +373,17 @@ async fn refund(s: &Shared, billing: &billing::Config, due: &DueRefund) -> anyho
         }
         Cancel::Refused(reason) => withdraw_refund(s, due, &reason).await,
         Cancel::Unknown => Ok(()),
+    }
+}
+
+async fn refund_through_polar(s: &Shared, due: &DueRefund) -> anyhow::Result<()> {
+    match crate::billing_polar::refund_step(s, &due.order_id).await? {
+        crate::billing_polar::RefundStep::Refused(reason) => {
+            withdraw_refund(s, due, &customer_message(&reason)).await
+        }
+        crate::billing_polar::RefundStep::Refunded | crate::billing_polar::RefundStep::Waiting => {
+            Ok(())
+        }
     }
 }
 
@@ -424,7 +457,7 @@ pub(crate) async fn apply_cancellation(
     if ends {
         if current_period && kind != "upgrade" {
             // The renewer carries these through like any other refund.
-            sqlx::query("UPDATE subscription_payments SET refund_requested_at=now(),refund_requested_by=$3,refund_next_attempt_at=now(),refund_error=NULL WHERE user_id=$1 AND kind='upgrade' AND period_end=$2 AND status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND payment_key IS NOT NULL")
+            sqlx::query("UPDATE subscription_payments SET refund_requested_at=now(),refund_requested_by=$3,refund_next_attempt_at=now(),refund_error=NULL WHERE user_id=$1 AND kind='upgrade' AND period_end=$2 AND status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND (payment_key IS NOT NULL OR provider='polar')")
                 .bind(user_id)
                 .bind(period_end)
                 .bind(requested_by)

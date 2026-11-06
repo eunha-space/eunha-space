@@ -3,6 +3,17 @@ export function won(amount: number): string {
   return new Intl.NumberFormat("ko-KR", { style: "currency", currency: "KRW" }).format(amount);
 }
 
+/** Currencies whose amounts have no smaller unit, as the server keeps them. */
+const WHOLE_UNITS = new Set(["KRW", "JPY"]);
+
+/** An amount in its currency's smallest unit: "₩9,900", "$6.99". */
+export function money(amount: number, currency: string): string {
+  if (currency === "KRW") return won(amount);
+  return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(
+    WHOLE_UNITS.has(currency) ? amount : amount / 100,
+  );
+}
+
 const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
 
 const UNITS: [Intl.RelativeTimeFormatUnit, number][] = [

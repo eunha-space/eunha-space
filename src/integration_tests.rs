@@ -160,6 +160,7 @@ fn state(pool: PgPool) -> Shared {
         tenant_pooler_client_slots: None,
         cloudflare: None,
         billing: None,
+        polar: None,
         provided_domain_suffixes: vec![],
         customer_email: None,
         runtime_reloads: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -3492,8 +3493,8 @@ async fn visitors_see_the_plans_on_offer_only_when_billing_is_on(pool: PgPool) {
     assert_eq!(
         serde_json::to_value(plans).unwrap(),
         serde_json::json!([
-            {"name_en":"plan 9900","name_ko":"plan 9900","amount":9900,"instance_limit":null,"user_limit":50,"media_gb":10,"database_gb":5,"monthly_activities":100000},
-            {"name_en":"plan 19900","name_ko":"plan 19900","amount":19900,"instance_limit":5,"user_limit":null,"media_gb":null,"database_gb":null,"monthly_activities":null},
+            {"name_en":"plan 9900","name_ko":"plan 9900","amount":9900,"instance_limit":null,"user_limit":50,"media_gb":10,"database_gb":5,"monthly_activities":100000,"polar_amount":null,"polar_currency":null},
+            {"name_en":"plan 19900","name_ko":"plan 19900","amount":19900,"instance_limit":5,"user_limit":null,"media_gb":null,"database_gb":null,"monthly_activities":null,"polar_amount":null,"polar_currency":null},
         ])
     );
 }
@@ -4402,4 +4403,644 @@ async fn the_suffix_sends_webfinger_on_to_the_instance_with_its_handles(pool: Pg
         .await
         .unwrap();
     assert_eq!(ask("eunha.example").await.status(), StatusCode::NOT_FOUND);
+}
+
+// --- Polar -------------------------------------------------------------------
+
+const POLAR_SECRET: &str = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+
+/// Polar's API as far as billing uses it: what it holds, and what it was asked.
+#[derive(Clone, Default)]
+struct PolarStandIn {
+    subscriptions: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
+    orders: Arc<std::sync::Mutex<HashMap<String, serde_json::Value>>>,
+    refunds: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    checkouts: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    /// Every PATCH and DELETE of a subscription, in order.
+    changes: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
+}
+
+fn rfc3339(at: time::OffsetDateTime) -> String {
+    at.format(&time::format_description::well_known::Rfc3339)
+        .unwrap()
+}
+
+impl PolarStandIn {
+    fn holds_subscription(
+        &self,
+        id: &str,
+        user_id: Uuid,
+        status: &str,
+        product: &str,
+        amount: i64,
+    ) {
+        let now = time::OffsetDateTime::now_utc();
+        self.subscriptions.lock().unwrap().insert(
+            id.into(),
+            serde_json::json!({
+                "id": id,
+                "status": status,
+                "amount": amount,
+                "currency": "usd",
+                "current_period_start": rfc3339(now),
+                "current_period_end": rfc3339(now + time::Duration::days(30)),
+                "cancel_at_period_end": false,
+                "ended_at": null,
+                "past_due_at": null,
+                "product_id": product,
+                "customer": {"id": "cus_1", "external_id": user_id.to_string()},
+                "pending_update": null,
+            }),
+        );
+    }
+    fn holds_order(&self, id: &str, user_id: Uuid, subscription: &str, total: i64, tax: i64) {
+        self.orders.lock().unwrap().insert(
+            id.into(),
+            serde_json::json!({
+                "id": id,
+                "status": "paid",
+                "total_amount": total,
+                "net_amount": total - tax,
+                "tax_amount": tax,
+                "refunded_amount": 0,
+                "refunded_tax_amount": 0,
+                "refundable_amount": total - tax,
+                "currency": "usd",
+                "billing_reason": "subscription_create",
+                "created_at": rfc3339(time::OffsetDateTime::now_utc()),
+                "customer": {"id": "cus_1", "external_id": user_id.to_string()},
+                "product_id": "prod_standard",
+                "subscription_id": subscription,
+            }),
+        );
+    }
+    fn set(&self, id: &str, field: &str, value: serde_json::Value) {
+        self.subscriptions.lock().unwrap().get_mut(id).unwrap()[field] = value;
+    }
+    fn changes(&self) -> Vec<(String, serde_json::Value)> {
+        self.changes.lock().unwrap().clone()
+    }
+}
+
+/// Polar names the version it answered in; every request must pin one.
+fn polar_answer(
+    headers: &HeaderMap,
+    status: StatusCode,
+    body: serde_json::Value,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    assert_eq!(headers.get("Polar-Version").unwrap(), "2026-10");
+    assert_eq!(
+        headers.get(header::AUTHORIZATION).unwrap(),
+        "Bearer polar_oat_test"
+    );
+    (status, [("Polar-Version", "2026-10")], Json(body)).into_response()
+}
+
+async fn polar_stand_in() -> (PolarStandIn, String) {
+    use axum::routing::{get, post};
+    let polar = PolarStandIn::default();
+    let missing = || serde_json::json!({"detail": "Not found"});
+    let app = axum::Router::new()
+        .route(
+            "/v1/checkouts/",
+            post(|State(polar): State<PolarStandIn>, headers: HeaderMap, Json(body): Json<serde_json::Value>| async move {
+                polar.checkouts.lock().unwrap().push(body);
+                polar_answer(&headers, StatusCode::CREATED, serde_json::json!({"id": "chk_1", "url": "https://polar.example/checkout/chk_1"}))
+            }),
+        )
+        .route(
+            "/v1/customer-sessions/",
+            post(|headers: HeaderMap, Json(body): Json<serde_json::Value>| async move {
+                assert!(body["external_customer_id"].is_string());
+                polar_answer(&headers, StatusCode::CREATED, serde_json::json!({"customer_portal_url": "https://polar.example/portal"}))
+            }),
+        )
+        .route(
+            "/v1/products/{id}",
+            get(|headers: HeaderMap, Path(id): Path<String>| async move {
+                polar_answer(&headers, StatusCode::OK, serde_json::json!({
+                    "id": id,
+                    "is_recurring": true,
+                    "is_archived": false,
+                    "recurring_interval": "month",
+                    "prices": [{"amount_type": "fixed", "is_archived": false, "price_currency": "usd", "price_amount": if id == "prod_large" { 1499 } else { 699 }}],
+                }))
+            }),
+        )
+        .route(
+            "/v1/subscriptions/",
+            get(|State(polar): State<PolarStandIn>, headers: HeaderMap, Query(query): Query<HashMap<String, String>>| async move {
+                let items: Vec<_> = polar.subscriptions.lock().unwrap().values()
+                    .filter(|s| s["customer"]["external_id"].as_str() == query.get("external_customer_id").map(String::as_str))
+                    .cloned().collect();
+                polar_answer(&headers, StatusCode::OK, serde_json::json!({"items": items, "pagination": {}}))
+            }),
+        )
+        .route(
+            "/v1/subscriptions/{id}",
+            get(move |State(polar): State<PolarStandIn>, headers: HeaderMap, Path(id): Path<String>| async move {
+                match polar.subscriptions.lock().unwrap().get(&id) {
+                    Some(s) => polar_answer(&headers, StatusCode::OK, s.clone()),
+                    None => polar_answer(&headers, StatusCode::NOT_FOUND, missing()),
+                }
+            })
+            .patch(|State(polar): State<PolarStandIn>, headers: HeaderMap, Path(id): Path<String>, Json(body): Json<serde_json::Value>| async move {
+                polar.changes.lock().unwrap().push((id.clone(), body.clone()));
+                let mut subscriptions = polar.subscriptions.lock().unwrap();
+                let s = subscriptions.get_mut(&id).unwrap();
+                if let Some(cancel) = body.get("cancel_at_period_end") {
+                    s["cancel_at_period_end"] = cancel.clone();
+                }
+                if body.get("pending_update").is_some() {
+                    s["pending_update"] = serde_json::Value::Null;
+                }
+                if let Some(product) = body.get("product_id") {
+                    if body["proration_behavior"] == "next_period" {
+                        s["pending_update"] = serde_json::json!({"product_id": product});
+                    } else {
+                        s["product_id"] = product.clone();
+                        s["amount"] = if product == "prod_large" { 1499 } else { 699 }.into();
+                        s["pending_update"] = serde_json::Value::Null;
+                    }
+                }
+                polar_answer(&headers, StatusCode::OK, s.clone())
+            })
+            .delete(|State(polar): State<PolarStandIn>, headers: HeaderMap, Path(id): Path<String>| async move {
+                polar.changes.lock().unwrap().push((id.clone(), serde_json::json!("revoke")));
+                let mut subscriptions = polar.subscriptions.lock().unwrap();
+                let s = subscriptions.get_mut(&id).unwrap();
+                s["status"] = "canceled".into();
+                s["ended_at"] = rfc3339(time::OffsetDateTime::now_utc()).into();
+                polar_answer(&headers, StatusCode::OK, s.clone())
+            }),
+        )
+        .route(
+            "/v1/orders/",
+            get(|State(polar): State<PolarStandIn>, headers: HeaderMap, Query(query): Query<HashMap<String, String>>| async move {
+                let items: Vec<_> = polar.orders.lock().unwrap().values()
+                    .filter(|o| o["customer"]["external_id"].as_str() == query.get("external_customer_id").map(String::as_str))
+                    .cloned().collect();
+                polar_answer(&headers, StatusCode::OK, serde_json::json!({"items": items, "pagination": {}}))
+            }),
+        )
+        .route(
+            "/v1/orders/{id}",
+            get(move |State(polar): State<PolarStandIn>, headers: HeaderMap, Path(id): Path<String>| async move {
+                match polar.orders.lock().unwrap().get(&id) {
+                    Some(o) => polar_answer(&headers, StatusCode::OK, o.clone()),
+                    None => polar_answer(&headers, StatusCode::NOT_FOUND, missing()),
+                }
+            }),
+        )
+        .route(
+            "/v1/refunds/",
+            get(|State(polar): State<PolarStandIn>, headers: HeaderMap, Query(query): Query<HashMap<String, String>>| async move {
+                let items: Vec<_> = polar.refunds.lock().unwrap().iter()
+                    .filter(|r| r["order_id"].as_str() == query.get("order_id").map(String::as_str))
+                    .cloned().collect();
+                polar_answer(&headers, StatusCode::OK, serde_json::json!({"items": items, "pagination": {}}))
+            })
+            .post(|State(polar): State<PolarStandIn>, headers: HeaderMap, Json(body): Json<serde_json::Value>| async move {
+                let order_id = body["order_id"].as_str().unwrap().to_owned();
+                let mut orders = polar.orders.lock().unwrap();
+                let order = orders.get_mut(&order_id).unwrap();
+                // The net amount is refunded with its tax.
+                assert_eq!(body["amount"], order["refundable_amount"]);
+                assert_eq!(body["revoke_benefits"], false);
+                order["refunded_amount"] = body["amount"].clone();
+                order["refunded_tax_amount"] = order["tax_amount"].clone();
+                order["refundable_amount"] = 0.into();
+                order["status"] = "refunded".into();
+                let refund = serde_json::json!({"id": "re_1", "order_id": order_id, "status": "succeeded"});
+                polar.refunds.lock().unwrap().push(refund.clone());
+                polar_answer(&headers, StatusCode::CREATED, refund)
+            }),
+        )
+        .with_state(polar.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (polar, base)
+}
+
+fn polar_state(pool: PgPool, polar_base: &str, toss_base: Option<&str>) -> Shared {
+    let mut state = match toss_base {
+        Some(toss_base) => Arc::into_inner(billed_state(pool, toss_base)).unwrap(),
+        None => Arc::into_inner(state(pool)).unwrap(),
+    };
+    state.polar = Some(Arc::new(
+        billing_polar::Config::new(
+            "polar_oat_test".into(),
+            POLAR_SECRET.into(),
+            polar_base.into(),
+            "https://eunha.space".into(),
+            "usd".into(),
+        )
+        .unwrap(),
+    ));
+    Arc::new(state)
+}
+
+/// The plans the Polar tests sell: a standard one and a dearer one.
+async fn offer_polar_plans(pool: &PgPool) -> (Uuid, Uuid) {
+    let standard = sqlx::query_scalar("INSERT INTO plans(name_en,name_ko,amount,polar_product_id,polar_amount,polar_currency) VALUES('Standard','기본',9900,'prod_standard',699,'USD') RETURNING id")
+        .fetch_one(pool).await.unwrap();
+    let large = sqlx::query_scalar("INSERT INTO plans(name_en,name_ko,amount,polar_product_id,polar_amount,polar_currency) VALUES('Large','대형',19900,'prod_large',1499,'USD') RETURNING id")
+        .fetch_one(pool).await.unwrap();
+    (standard, large)
+}
+
+/// Deliver a webhook as Polar would, signed or not.
+async fn polar_webhook(
+    state: &Shared,
+    kind: &str,
+    data: serde_json::Value,
+    signed: bool,
+) -> StatusCode {
+    let body =
+        serde_json::to_vec(&serde_json::json!({"type": kind, "timestamp": "", "data": data}))
+            .unwrap();
+    let id = format!("msg_{}", Uuid::new_v4().simple());
+    let timestamp = time::OffsetDateTime::now_utc().unix_timestamp().to_string();
+    let signature = if signed {
+        billing_polar::sign(POLAR_SECRET, &id, &timestamp, &body)
+    } else {
+        billing_polar::sign("whsec_c29tZW9uZSBlbHNl", &id, &timestamp, &body)
+    };
+    let mut headers = HeaderMap::new();
+    headers.insert("webhook-id", id.parse().unwrap());
+    headers.insert("webhook-timestamp", timestamp.parse().unwrap());
+    headers.insert("webhook-signature", signature.parse().unwrap());
+    billing_polar::webhook(State(state.clone()), headers, body.into()).await
+}
+
+async fn polar_view(state: &Shared, headers: &HeaderMap) -> serde_json::Value {
+    let Json(view) = billing::get(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    serde_json::to_value(view).unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_polar_checkout_names_the_customer_plan_and_currency(pool: PgPool) {
+    let (polar, base) = polar_stand_in().await;
+    let state = polar_state(pool.clone(), &base, None);
+    let (user_id, mut headers) = billed_customer(&pool).await;
+    let (_, large) = offer_polar_plans(&pool).await;
+    headers.insert("cf-connecting-ip", "203.0.113.9".parse().unwrap());
+    let Json(page) = billing_polar::checkout(
+        State(state.clone()),
+        headers.clone(),
+        Some(Json(
+            serde_json::from_value(serde_json::json!({"plan_id": large})).unwrap(),
+        )),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(page).unwrap()["url"],
+        "https://polar.example/checkout/chk_1"
+    );
+    let sent = polar.checkouts.lock().unwrap()[0].clone();
+    assert_eq!(sent["products"], serde_json::json!(["prod_large"]));
+    assert_eq!(sent["external_customer_id"], user_id.to_string());
+    assert_eq!(sent["customer_email"], "customer@example.com");
+    assert_eq!(sent["currency"], "usd");
+    assert_eq!(sent["customer_ip_address"], "203.0.113.9");
+    assert_eq!(
+        sent["success_url"],
+        "https://eunha.space/account/billing?polar_checkout={CHECKOUT_ID}"
+    );
+    // Billing counts as on with Polar alone, and Korean cards are not offered.
+    let view = polar_view(&state, &headers).await;
+    assert_eq!(
+        (
+            view["enabled"].clone(),
+            view["toss"].clone(),
+            view["polar"].clone()
+        ),
+        (true.into(), false.into(), true.into())
+    );
+    assert_eq!(view["polar_currency"], "USD");
+    assert_eq!(view["plans"][1]["polar_amount"], 1499);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_signed_polar_webhook_starts_the_subscription_and_serves_suspended_instances(
+    pool: PgPool,
+) {
+    let (polar, base) = polar_stand_in().await;
+    let state = polar_state(pool.clone(), &base, None);
+    let (user_id, headers) = billed_customer(&pool).await;
+    let (standard, _) = offer_polar_plans(&pool).await;
+    let id = ready_instance(&pool, user_id).await;
+    sqlx::query(
+        "UPDATE tenants SET lifecycle_state='retained',billing_suspended_at=now() WHERE id=$1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    polar.holds_subscription("sub_1", user_id, "active", "prod_standard", 699);
+
+    // An unsigned delivery is kept, refused and not acted on, whatever it says.
+    let forged = serde_json::json!({"id": "sub_1"});
+    assert_eq!(
+        polar_webhook(&state, "subscription.active", forged.clone(), false).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT true FROM subscriptions WHERE user_id=$1")
+            .bind(user_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    // What a signed one names is read from Polar: the event's own copy is not
+    // trusted, so a stale one cannot undo a newer state.
+    let stale = serde_json::json!({"id": "sub_1", "status": "canceled"});
+    assert_eq!(
+        polar_webhook(&state, "subscription.active", stale, true).await,
+        StatusCode::ACCEPTED
+    );
+    let kept = sqlx::query_as::<_, (bool, i32)>(
+        "SELECT verified,http_status FROM polar_webhook_deliveries ORDER BY received_at",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, vec![(false, 401), (true, 202)]);
+
+    let view = polar_view(&state, &headers).await;
+    let subscription = &view["subscription"];
+    assert_eq!(subscription["status"], "active");
+    assert_eq!(subscription["provider"], "polar");
+    assert_eq!(subscription["currency"], "USD");
+    assert_eq!(subscription["amount"], 699);
+    assert_eq!(subscription["plan_id"], standard.to_string());
+    assert!(
+        billing::require_subscription(&state, &mut pool.begin().await.unwrap(), user_id)
+            .await
+            .is_ok()
+    );
+    assert_eq!(lifecycle(&pool, id).await.0, "provisioning");
+    // Delivered again, it changes nothing.
+    assert_eq!(
+        polar_webhook(&state, "subscription.updated", forged, true).await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM operations WHERE kind='subscription_start'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_polar_subscription_cancels_resumes_changes_plans_and_ends_with_polar(pool: PgPool) {
+    let (polar, base) = polar_stand_in().await;
+    let state = polar_state(pool.clone(), &base, None);
+    let (user_id, headers) = billed_customer(&pool).await;
+    let (standard, large) = offer_polar_plans(&pool).await;
+    polar.holds_subscription("sub_1", user_id, "active", "prod_standard", 699);
+    let _ = billing_polar::refresh(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    let id = ready_instance(&pool, user_id).await;
+
+    let Json(view) = billing::cancel(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    let view = serde_json::to_value(view).unwrap();
+    assert_eq!(view["subscription"]["status"], "active");
+    assert_eq!(view["subscription"]["cancel_at_period_end"], true);
+    let Json(view) = billing::resume(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(view).unwrap()["subscription"]["cancel_at_period_end"],
+        false
+    );
+
+    // A dearer plan applies now, and Polar charges the difference.
+    let choose =
+        |plan: Uuid| Json(serde_json::from_value(serde_json::json!({"plan_id": plan})).unwrap());
+    let Json(view) = billing::change_plan(State(state.clone()), headers.clone(), choose(large))
+        .await
+        .unwrap();
+    let view = serde_json::to_value(view).unwrap();
+    assert_eq!(view["subscription"]["plan_id"], large.to_string());
+    assert_eq!(view["subscription"]["amount"], 1499);
+    // A cheaper one waits for the renewal, and keeping the current plan takes
+    // that back.
+    let Json(view) = billing::change_plan(State(state.clone()), headers.clone(), choose(standard))
+        .await
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(view).unwrap()["subscription"]["pending_plan_id"],
+        standard.to_string()
+    );
+    let Json(view) = billing::change_plan(State(state.clone()), headers.clone(), choose(large))
+        .await
+        .unwrap();
+    assert!(serde_json::to_value(view).unwrap()["subscription"]["pending_plan_id"].is_null());
+    let changes: Vec<serde_json::Value> =
+        polar.changes().into_iter().map(|(_, body)| body).collect();
+    assert_eq!(
+        changes,
+        vec![
+            serde_json::json!({"cancel_at_period_end": true}),
+            serde_json::json!({"cancel_at_period_end": false}),
+            serde_json::json!({"product_id": "prod_large", "proration_behavior": "invoice"}),
+            serde_json::json!({"product_id": "prod_standard", "proration_behavior": "next_period"}),
+            serde_json::json!({"pending_update": null}),
+        ]
+    );
+
+    // Polar retries a declined renewal; the instances keep running meanwhile.
+    polar.set("sub_1", "status", "past_due".into());
+    polar_webhook(
+        &state,
+        "subscription.past_due",
+        serde_json::json!({"id": "sub_1"}),
+        true,
+    )
+    .await;
+    assert_eq!(subscription_status(&pool, user_id).await, "past_due");
+    assert_eq!(lifecycle(&pool, id).await.0, "ready");
+    // When it gives up and revokes, the subscription lapses here, found by the
+    // periodic look even with no webhook.
+    polar.set("sub_1", "status", "canceled".into());
+    polar.set(
+        "sub_1",
+        "ended_at",
+        rfc3339(time::OffsetDateTime::now_utc()).into(),
+    );
+    sqlx::query(
+        "UPDATE subscriptions SET polar_synced_at=now()-interval '2 hours' WHERE user_id=$1",
+    )
+    .bind(user_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(billing_polar::sync_due(&state).await.unwrap());
+    assert!(!billing_polar::sync_due(&state).await.unwrap());
+    assert_eq!(subscription_status(&pool, user_id).await, "lapsed");
+    assert_eq!(lifecycle(&pool, id).await, ("deprovisioning".into(), true));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_polar_payment_is_recorded_and_a_customers_refund_revokes_at_polar(pool: PgPool) {
+    let (polar, base) = polar_stand_in().await;
+    let state = polar_state(pool.clone(), &base, None);
+    let (user_id, headers) = billed_customer(&pool).await;
+    offer_polar_plans(&pool).await;
+    polar.holds_subscription("sub_1", user_id, "active", "prod_standard", 699);
+    polar.holds_order("ord_1", user_id, "sub_1", 769, 70);
+    assert_eq!(
+        polar_webhook(
+            &state,
+            "subscription.created",
+            serde_json::json!({"id": "sub_1"}),
+            true
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    assert_eq!(
+        polar_webhook(
+            &state,
+            "order.paid",
+            serde_json::json!({"id": "ord_1"}),
+            true
+        )
+        .await,
+        StatusCode::ACCEPTED
+    );
+    // Again: recorded once.
+    polar_webhook(
+        &state,
+        "order.updated",
+        serde_json::json!({"id": "ord_1"}),
+        true,
+    )
+    .await;
+    let id = ready_instance(&pool, user_id).await;
+
+    let view = polar_view(&state, &headers).await;
+    assert_eq!(view["payments"].as_array().unwrap().len(), 1);
+    let payment = &view["payments"][0];
+    assert_eq!(
+        (
+            payment["order_id"].clone(),
+            payment["amount"].clone(),
+            payment["currency"].clone(),
+            payment["provider"].clone()
+        ),
+        ("ord_1".into(), 769.into(), "USD".into(), "polar".into())
+    );
+    assert_eq!(payment["refundable"], true);
+    // Polar sends its own receipts.
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM billing_emails WHERE kind='receipt'")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+
+    let view = refund(&state, &headers, "ord_1").await.unwrap();
+    assert_eq!(view["payments"][0]["status"], "refunded");
+    assert_eq!(view["payments"][0]["refunded_amount"], 769);
+    assert_eq!(view["subscription"]["status"], "canceled");
+    assert_eq!(lifecycle(&pool, id).await, ("deprovisioning".into(), true));
+    // Polar is told to stop billing it, once.
+    assert_eq!(
+        polar.changes(),
+        vec![("sub_1".to_owned(), serde_json::json!("revoke"))]
+    );
+    assert_eq!(polar.refunds.lock().unwrap().len(), 1);
+    assert!(
+        !sqlx::query_scalar::<_, bool>("SELECT polar_live FROM subscriptions WHERE user_id=$1")
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    );
+    // The revoked subscription's own webhook changes nothing more.
+    polar_webhook(
+        &state,
+        "subscription.revoked",
+        serde_json::json!({"id": "sub_1"}),
+        true,
+    )
+    .await;
+    assert_eq!(subscription_status(&pool, user_id).await, "canceled");
+    assert_eq!(polar.changes().len(), 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn tosspayments_and_polar_never_bill_the_same_customer(pool: PgPool) {
+    let (toss, toss_base) = toss_stand_in().await;
+    let (polar, polar_base) = polar_stand_in().await;
+    let state = polar_state(pool.clone(), &polar_base, Some(&toss_base));
+    offer_polar_plans(&pool).await;
+
+    // A Korean card's subscription: no Polar checkout on top of it.
+    let (_, korean) = billed_customer(&pool).await;
+    assert_eq!(
+        subscribe(&state, &korean).await["subscription"]["provider"],
+        "toss"
+    );
+    assert_eq!(
+        billing_polar::checkout(State(state.clone()), korean.clone(), None)
+            .await
+            .err()
+            .unwrap()
+            .0,
+        StatusCode::CONFLICT
+    );
+
+    // An international card's: no TossPayments card on top of it, and the
+    // renewer never charges it.
+    let user_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at) VALUES($1,'abroad@example.com','unused',now())")
+        .bind(user_id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO user_sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '1 hour')").bind(token_hash("abroad-session")).bind(user_id).execute(&pool).await.unwrap();
+    let mut abroad = HeaderMap::new();
+    abroad.insert(
+        header::COOKIE,
+        "eunha_space_customer_session=abroad-session"
+            .parse()
+            .unwrap(),
+    );
+    polar.holds_subscription("sub_1", user_id, "active", "prod_standard", 699);
+    let _ = billing_polar::refresh(State(state.clone()), abroad.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        billing::checkout(State(state.clone()), abroad.clone(), None)
+            .await
+            .err()
+            .unwrap()
+            .0,
+        StatusCode::CONFLICT
+    );
+    let charges = toss.charges().len();
+    sqlx::query("UPDATE subscriptions SET next_attempt_at=now()-interval '1 day',current_period_end=now()-interval '1 day' WHERE user_id=$1")
+        .bind(user_id).execute(&pool).await.unwrap();
+    assert!(!billing::charge_due(&state, Some(user_id)).await.unwrap());
+    assert_eq!(toss.charges().len(), charges);
+    assert_eq!(subscription_status(&pool, user_id).await, "active");
 }

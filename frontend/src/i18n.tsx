@@ -320,6 +320,36 @@ const ko: Record<string, string> = {
     "다음 결제 시도",
   "Subscribe with a card":
     "카드로 구독하기",
+  "Subscribe with a Korean card":
+    "국내 카드로 구독하기",
+  "Pay with an international card":
+    "해외 카드로 결제하기",
+  "With an international card":
+    "해외 카드 요금",
+  "International cards:":
+    "해외 카드:",
+  "Manage billing":
+    "결제 관리",
+  "Your international card is charged automatically each month through Polar, which sends your receipts.":
+    "매달 Polar를 통해 해외 카드로 자동 결제되며, 영수증은 Polar가 보내드립니다.",
+  "Your last payment was declined. Polar will try again, and your instances keep running meanwhile. Update your card in the billing portal.":
+    "최근 결제가 거절되었습니다. Polar가 다시 결제를 시도하며, 그동안 인스턴스는 계속 운영됩니다. 결제 관리에서 카드를 변경하세요.",
+  "It starts now, and Polar charges your card the difference for the rest of this period.":
+    "지금 바로 적용되며, 남은 기간에 대한 차액을 Polar가 카드로 결제합니다.",
+  "This subscription is paid by an international card. Manage it in the billing portal.":
+    "이 구독은 해외 카드로 결제되고 있습니다. 결제 관리에서 변경하세요.",
+  "International cards are not available.":
+    "해외 카드 결제를 이용할 수 없습니다.",
+  "This plan is not available with an international card.":
+    "이 요금제는 해외 카드로 결제할 수 없습니다.",
+  "This account does not pay through Polar.":
+    "이 계정은 Polar로 결제하고 있지 않습니다.",
+  "Polar could not be reached. Try again shortly.":
+    "Polar에 연결하지 못했습니다. 잠시 후 다시 시도하세요.",
+  "Polar could not make this refund. Please contact us.":
+    "Polar에서 환불을 처리하지 못했습니다. 문의해 주세요.",
+  "The last payment failed. Update your card in the billing portal.":
+    "최근 결제에 실패했습니다. 결제 관리에서 카드를 변경하세요.",
   "Use another card":
     "다른 카드 사용",
   "Change card":

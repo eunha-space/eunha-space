@@ -22,7 +22,8 @@ pub(crate) struct Summary {
     past_due: i64,
     canceling: i64,
     ended: i64,
-    /// What the active and retried subscriptions bring in each month, in won.
+    /// What the active and retried TossPayments subscriptions bring in each
+    /// month, in won. Polar's are in `revenue`, by currency.
     monthly_revenue: i64,
     /// Accounts running instances with no subscription and no exemption, such
     /// as customers from before billing.
@@ -43,6 +44,8 @@ pub(crate) struct Account {
     /// Null for an account that never subscribed.
     status: Option<String>,
     amount: Option<i64>,
+    provider: Option<String>,
+    currency: Option<String>,
     card_company: Option<String>,
     card_number: Option<String>,
     has_card: bool,
@@ -73,23 +76,53 @@ pub(crate) struct Plan {
     media_gb: Option<i64>,
     database_gb: Option<i64>,
     monthly_activities: Option<i64>,
+    /// The Polar product it is sold as to international cards, and its price.
+    polar_product_id: Option<String>,
+    polar_amount: Option<i64>,
+    polar_currency: Option<String>,
     active: bool,
     /// Running subscriptions on it, or moving to it at their next renewal.
     subscribers: i64,
 }
 
-const PLAN_COLUMNS: &str = "id,name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,active,(SELECT count(*) FROM subscriptions s WHERE s.status IN ('active','past_due') AND plans.id IN (s.plan_id,s.pending_plan_id)) subscribers";
+const PLAN_COLUMNS: &str = "id,name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,polar_product_id,polar_amount,polar_currency,active,(SELECT count(*) FROM subscriptions s WHERE s.status IN ('active','past_due') AND plans.id IN (s.plan_id,s.pending_plan_id)) subscribers";
 
 #[derive(Serialize)]
 pub(crate) struct Overview {
     enabled: bool,
+    toss: bool,
+    polar: bool,
     plans: Vec<Plan>,
     summary: Summary,
+    /// What the running subscriptions bring in each month, by currency.
+    revenue: Vec<Revenue>,
     accounts: Vec<Account>,
     mismatches: Vec<Mismatch>,
     /// The last day compared with TossPayments, and any failure since.
     last_check: Option<LastCheck>,
     webhooks: Vec<Webhook>,
+    polar_webhooks: Vec<PolarWebhook>,
+}
+
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct Revenue {
+    currency: String,
+    amount: i64,
+    subscriptions: i64,
+}
+
+/// A Polar webhook as received. Its payload is Polar's subscription or order,
+/// which holds no card details.
+#[derive(Serialize, sqlx::FromRow)]
+pub(crate) struct PolarWebhook {
+    id: Uuid,
+    #[serde(with = "time::serde::rfc3339")]
+    received_at: OffsetDateTime,
+    webhook_id: Option<String>,
+    event_type: Option<String>,
+    verified: bool,
+    payload: Option<String>,
+    http_status: i32,
 }
 
 /// What the daily comparison found that an operator has to decide.
@@ -135,7 +168,7 @@ pub(crate) async fn overview(
             (SELECT count(*) FROM subscriptions WHERE status='past_due') past_due,
             (SELECT count(*) FROM subscriptions WHERE status='active' AND cancel_at_period_end) canceling,
             (SELECT count(*) FROM subscriptions WHERE status IN ('canceled','lapsed')) ended,
-            (SELECT coalesce(sum(amount),0)::bigint FROM subscriptions WHERE status IN ('active','past_due') AND NOT cancel_at_period_end) monthly_revenue,
+            (SELECT coalesce(sum(amount),0)::bigint FROM subscriptions WHERE status IN ('active','past_due') AND NOT cancel_at_period_end AND currency='KRW') monthly_revenue,
             (SELECT count(*) FROM users u WHERE NOT u.is_admin AND NOT u.billing_exempt
                 AND EXISTS(SELECT 1 FROM tenants t WHERE t.user_id=u.id AND t.lifecycle_state IN ('provisioning','ready','failed'))
                 AND NOT EXISTS(SELECT 1 FROM subscriptions s WHERE s.user_id=u.id AND s.status IN ('active','past_due'))) unbilled,
@@ -146,7 +179,7 @@ pub(crate) async fn overview(
     .fetch_one(&s.db)
     .await?;
     let accounts = sqlx::query_as::<_, Account>(
-        "SELECT u.id user_id,u.email,u.is_admin,u.billing_exempt,s.status,s.amount,s.card_company,s.card_number,
+        "SELECT u.id user_id,u.email,u.is_admin,u.billing_exempt,s.status,s.amount,s.provider,s.currency,s.card_company,s.card_number,
             coalesce(s.billing_key IS NOT NULL,false) has_card,s.current_period_end,s.next_attempt_at,
             coalesce(s.cancel_at_period_end,false) cancel_at_period_end,coalesce(s.failed_attempts,0) failed_attempts,s.last_error,
             (SELECT count(*) FROM tenants t WHERE t.user_id=u.id AND t.lifecycle_state IN ('provisioning','ready','failed')) instances,
@@ -179,19 +212,33 @@ pub(crate) async fn overview(
     )
     .fetch_optional(&s.db)
     .await?;
+    let revenue = sqlx::query_as::<_, Revenue>(
+        "SELECT currency,sum(amount)::bigint amount,count(*) subscriptions FROM subscriptions WHERE status IN ('active','past_due') AND NOT cancel_at_period_end GROUP BY currency ORDER BY currency",
+    )
+    .fetch_all(&s.db)
+    .await?;
+    let polar_webhooks = sqlx::query_as::<_, PolarWebhook>(
+        "SELECT id,received_at,webhook_id,event_type,verified,payload,http_status FROM polar_webhook_deliveries ORDER BY received_at DESC LIMIT 20",
+    )
+    .fetch_all(&s.db)
+    .await?;
     let webhooks = sqlx::query_as::<_, Webhook>(
         "SELECT id,received_at,event_type,order_id,signed,headers,payload,http_status FROM toss_webhook_deliveries ORDER BY received_at DESC LIMIT 20",
     )
     .fetch_all(&s.db)
     .await?;
     Ok(Json(Overview {
-        enabled: s.billing.is_some(),
+        enabled: billing::billing_on(&s),
+        toss: s.billing.is_some(),
+        polar: s.polar.is_some(),
         plans,
         summary,
+        revenue,
         accounts,
         mismatches,
         last_check,
         webhooks,
+        polar_webhooks,
     }))
 }
 
@@ -199,6 +246,8 @@ pub(crate) async fn overview(
 pub(crate) struct Payment {
     order_id: String,
     amount: i64,
+    provider: String,
+    currency: String,
     status: String,
     #[serde(with = "time::serde::rfc3339")]
     period_start: OffsetDateTime,
@@ -241,9 +290,9 @@ pub(crate) async fn account(
 ) -> Result<Json<AccountDetail>, ApiError> {
     admin_user(&headers, &s.db).await?;
     let payments = sqlx::query_as::<_, Payment>(
-        "SELECT order_id,amount,status,period_start,period_end,requested_at,settled_at,receipt_url,failure_code,failure_message,refunded_amount,
+        "SELECT order_id,amount,provider,currency,status,period_start,period_end,requested_at,settled_at,receipt_url,failure_code,failure_message,refunded_amount,
             (refund_requested_at IS NOT NULL AND refunded_at IS NULL) refund_pending,refund_error,
-            (status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND payment_key IS NOT NULL) refundable
+            (status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND (payment_key IS NOT NULL OR provider='polar')) refundable
         FROM subscription_payments WHERE user_id=$1 ORDER BY requested_at DESC LIMIT 100",
     )
     .bind(user_id)
@@ -497,4 +546,92 @@ pub(crate) async fn refund(
     let (admin_id, _) = admin_user(&headers, &s.db).await?;
     billing_sync::start_refund(&s, &order_id, None, admin_id, false).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PolarLink {
+    product_id: String,
+}
+
+/// Sell a plan to international cards as a Polar product. Its price is read
+/// from Polar, and, like the plan's won price, fixed from here on: a plan once
+/// linked cannot be linked to another product.
+pub(crate) async fn link_polar(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PolarLink>,
+) -> Result<Json<Plan>, ApiError> {
+    let (admin_id, _) = admin_user(&headers, &s.db).await?;
+    let polar = crate::billing_polar::config(&s)?;
+    let product_id = body.product_id.trim();
+    if product_id.is_empty() || product_id.len() > 100 {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Enter the Polar product's id.".into(),
+        ));
+    }
+    let product = match polar.product(product_id).await {
+        Ok(product) => product,
+        Err(crate::billing_polar::PolarError::NotFound) => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                "Polar has no product with this id.".into(),
+            ));
+        }
+        Err(_) => {
+            return Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                "Polar could not be reached. Try again shortly.".into(),
+            ));
+        }
+    };
+    let amount = product
+        .monthly_price(&polar.currency)
+        .map_err(|reason| ApiError(StatusCode::BAD_REQUEST, reason))?;
+    let mut tx = s.db.begin().await?;
+    let linked = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT polar_product_id FROM plans WHERE id=$1 FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Plan not found.".into()))?;
+    if linked.is_some() {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "This plan is already sold through Polar. Offer a new plan for a new price.".into(),
+        ));
+    }
+    let taken = sqlx::query_scalar::<_, bool>("SELECT true FROM plans WHERE polar_product_id=$1")
+        .bind(product_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .is_some();
+    if taken {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Another plan is already sold as this product.".into(),
+        ));
+    }
+    let plan = sqlx::query_as::<_, Plan>(&format!(
+        "UPDATE plans SET polar_product_id=$2,polar_amount=$3,polar_currency=$4 WHERE id=$1 RETURNING {PLAN_COLUMNS}"
+    ))
+    .bind(id)
+    .bind(product_id)
+    .bind(amount)
+    .bind(&polar.currency)
+    .fetch_one(&mut *tx)
+    .await?;
+    billing::record(
+        &mut tx,
+        admin_id,
+        "subscription_plan_polar",
+        "succeeded",
+        serde_json::json!({ "plan_id": id, "polar_product_id": product_id, "amount": amount, "currency": polar.currency }),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(Json(plan))
 }

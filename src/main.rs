@@ -41,6 +41,7 @@ mod billing;
 mod billing_admin;
 mod billing_check;
 mod billing_mail;
+mod billing_polar;
 mod billing_sync;
 mod ci_release;
 mod domain_change;
@@ -92,6 +93,9 @@ struct AppState {
     /// TossPayments automatic payments. Unset, nobody is billed and creating
     /// an instance needs no subscription.
     billing: Option<Arc<billing::Config>>,
+    /// Polar, the merchant of record for cards issued outside Korea. Billing
+    /// is on when either this or TossPayments is configured.
+    polar: Option<Arc<billing_polar::Config>>,
     provided_domain_suffixes: Vec<String>,
     customer_email: Option<CustomerEmailConfig>,
     /// One reload at a time per runtime: a second launchd signal that arrives
@@ -856,6 +860,7 @@ async fn main() -> Result<()> {
             _ => None,
         },
         billing: billing::Config::from_env()?.map(Arc::new),
+        polar: billing_polar::Config::from_env()?.map(Arc::new),
         provided_domain_suffixes: std::env::var("EUNHA_PROVIDED_DOMAIN_SUFFIXES")
             .unwrap_or_else(|_| "eunha.space".into())
             .split(',')
@@ -978,7 +983,17 @@ async fn main() -> Result<()> {
             "/customer/billing/payments/{order_id}/refund",
             post(billing_sync::request_refund),
         )
+        .route(
+            "/customer/billing/polar/checkout",
+            post(billing_polar::checkout),
+        )
+        .route("/customer/billing/polar/sync", post(billing_polar::refresh))
+        .route(
+            "/customer/billing/polar/portal",
+            post(billing_polar::portal),
+        )
         .route("/webhooks/tosspayments", post(billing_sync::webhook))
+        .route("/webhooks/polar", post(billing_polar::webhook))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             masquerade::guard,
@@ -1053,6 +1068,7 @@ async fn main() -> Result<()> {
             "/billing/plans/{id}",
             axum::routing::patch(billing_admin::update_plan),
         )
+        .route("/billing/plans/{id}/polar", post(billing_admin::link_polar))
         .route("/billing/accounts/{user_id}", get(billing_admin::account))
         .route(
             "/billing/accounts/{user_id}/retry",

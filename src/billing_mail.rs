@@ -22,7 +22,11 @@ const GIVE_UP_AFTER: &str = "3 days";
 
 /// `₩9,900`.
 pub(crate) fn won(amount: i64) -> String {
-    let digits = amount.unsigned_abs().to_string();
+    money(amount, "KRW")
+}
+
+fn grouped(digits: u64) -> String {
+    let digits = digits.to_string();
     let mut grouped = String::new();
     for (index, digit) in digits.chars().enumerate() {
         if index > 0 && (digits.len() - index) % 3 == 0 {
@@ -30,7 +34,32 @@ pub(crate) fn won(amount: i64) -> String {
         }
         grouped.push(digit);
     }
-    format!("{}₩{grouped}", if amount < 0 { "-" } else { "" })
+    grouped
+}
+
+/// An amount in its currency's smallest unit, written out: `₩9,900`, `$6.99`,
+/// or `6.99 CHF` for a currency without a sign here. Won and yen have no
+/// smaller unit; the rest Polar sells in have cents.
+pub(crate) fn money(amount: i64, currency: &str) -> String {
+    let sign = if amount < 0 { "-" } else { "" };
+    let units = amount.unsigned_abs();
+    let symbol = match currency {
+        "KRW" => Some("₩"),
+        "JPY" => Some("¥"),
+        "USD" => Some("$"),
+        "EUR" => Some("€"),
+        "GBP" => Some("£"),
+        _ => None,
+    };
+    let number = if matches!(currency, "KRW" | "JPY") {
+        grouped(units)
+    } else {
+        format!("{}.{:02}", grouped(units / 100), units % 100)
+    };
+    match symbol {
+        Some(symbol) => format!("{sign}{symbol}{number}"),
+        None => format!("{sign}{number} {currency}"),
+    }
 }
 
 /// The card a charge goes to, by what is known of it: "your 현대 card ending
@@ -161,7 +190,14 @@ pub(crate) async fn refund(
     offline: bool,
 ) -> Result<(), sqlx::Error> {
     let language = language(tx, user_id).await?;
-    let amount = won(refunded);
+    let currency = sqlx::query_scalar::<_, String>(
+        "SELECT currency FROM subscription_payments WHERE order_id=$1",
+    )
+    .bind(order_id)
+    .fetch_optional(&mut **tx)
+    .await?
+    .unwrap_or_else(|| "KRW".into());
+    let amount = money(refunded, &currency);
     let (ended, offline) = (
         if ended {
             match language {
@@ -358,6 +394,11 @@ mod tests {
         assert_eq!(won(900), "₩900");
         assert_eq!(won(9900), "₩9,900");
         assert_eq!(won(1234567), "₩1,234,567");
+        assert_eq!(money(699, "USD"), "$6.99");
+        assert_eq!(money(123456, "EUR"), "€1,234.56");
+        assert_eq!(money(5, "GBP"), "£0.05");
+        assert_eq!(money(1200, "CHF"), "12.00 CHF");
+        assert_eq!(money(500, "JPY"), "¥500");
     }
 
     #[test]

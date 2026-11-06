@@ -4,10 +4,14 @@ Customers subscribe monthly through TossPayments automatic payments (빌링).
 TossPayments stores the card and charges it when asked. It does not schedule
 anything itself, so every renewal is started by the control plane.
 
+TossPayments cannot bill cards issued outside Korea. Those go through Polar,
+described in [International cards](#international-cards).
+
 ## Configuration
 
-Billing is off unless both keys are set. With it off, nobody is billed and
-creating an instance needs no subscription.
+Billing is off unless both TossPayments keys, or both Polar settings, are
+set. With it off, nobody is billed and creating an instance needs no
+subscription.
 
 ```sh
 TOSSPAYMENTS_CLIENT_KEY=live_ck_...        # public; handed to the billing window
@@ -319,3 +323,112 @@ marked resolved.
 
 Payments under another MID are skipped, because the current key can't see them.
 Test orders from other machines sharing a test key appear as `unknown_order`.
+
+## International cards
+
+Cards issued outside Korea pay through [Polar](https://polar.sh), the
+merchant of record. Polar sells the subscription in its own name, collects
+and remits the tax, keeps the renewal schedule and retries failed charges. It
+also mails the receipts and failed-payment notices, so no receipt is written
+here for a Polar payment.
+
+```sh
+POLAR_ACCESS_TOKEN=polar_oat_...           # an organization token; process-only
+POLAR_WEBHOOK_SECRET=whsec_...             # the webhook endpoint's secret
+POLAR_CURRENCY=usd                         # optional; the one currency plans are sold in
+POLAR_API_BASE=https://api.polar.sh        # optional; https://sandbox-api.polar.sh, or a stand-in
+```
+
+The token needs `checkouts:write`, `subscriptions:write`, `orders:read`,
+`refunds:write`, `products:read` and `customer_sessions:write`. Every request
+pins `Polar-Version: 2026-10`. Polar removes a version about nine months
+after it is released, and then answers it with 404. A 404 that does not name a
+version is treated as Polar being unreachable, not as a missing object.
+
+Set Polar up like this:
+
+- Add a webhook endpoint at `https://eunha.space/webhooks/polar` in Raw
+  format, pinned to API version 2026-10, and subscribe it to the
+  `subscription.*`, `order.*` and `refund.*` events.
+- In the customer portal settings, turn off **Enable subscription plan
+  changes** and **Enable subscription pause**. Plan changes are made on the
+  account page, which checks the instance limit before a downgrade. A paused
+  subscription is treated as ended, and a resumed one as a stray to revoke.
+
+### Polar plans
+
+A plan is sold to international cards once an operator links it to a Polar
+product on the billing page. The product must renew every month at a fixed
+price in `POLAR_CURRENCY`. Its price is read from Polar and kept in
+`plans.polar_amount`, in the currency's smallest unit (cents). Like the won
+price, it never changes: a plan cannot be linked to a second product. A new
+price means a new product on a new plan.
+
+### Subscribing through Polar
+
+The account page offers **Pay with an international card** for a plan that
+has a Polar product. The control plane creates a checkout session with the
+product, the account's id as `external_customer_id`, its email, the currency,
+and the visitor's address from `cf-connecting-ip`, so that Polar can work out
+the tax. The customer pays on Polar's page. Polar then sends them back to
+`/account/billing?polar_checkout=…`, and the page calls
+`POST /customer/billing/polar/sync` so that it does not have to wait for the
+webhooks.
+
+A customer has one subscription row, whichever provider bills it. A Polar
+checkout is refused while a TossPayments subscription runs, and a
+TossPayments card cannot be added while a Polar one runs. A Polar
+subscription that starts over an ended TossPayments row takes the row over,
+and its old billing key is retired.
+
+### Keeping in step with Polar
+
+A Polar webhook is a notification, not a fact. Its Standard Webhooks
+signature is checked against both key schemes. Secrets made before 8
+September 2026 sign with the secret's own bytes; newer ones sign with the key
+it encodes. Timestamps more than five minutes off are refused. The
+subscription or order the webhook names is then read from Polar, so events
+that arrive late or out of order settle on Polar's current record. Every
+delivery is kept in `polar_webhook_deliveries`. One whose signature fails is
+answered 401 and not acted on.
+
+Running subscriptions are also read from Polar hourly, in case a webhook
+never arrived.
+
+| Polar status             | Here                                                         |
+| :----------------------- | :----------------------------------------------------------- |
+| `active`, `trialing`     | `active`                                                     |
+| `past_due`               | `past_due`; instances keep running while Polar retries       |
+| `canceled` with an end   | `lapsed` if it was past due here, otherwise `canceled`       |
+| `unpaid`                 | `lapsed`                                                     |
+| `incomplete`             | nothing yet                                                  |
+
+Polar retries a declined renewal after 2, 7, 14 and 21 days, then revokes the
+subscription. That is longer than the TossPayments schedule, and the
+instances keep running throughout. Cancelling sets `cancel_at_period_end` at
+Polar, and Polar ends the subscription when the period ends. Cancelling a past
+due subscription revokes it at once. A second subscription that runs at Polar
+for an account that already has one is left alone. An operation records it,
+so that an operator can refund and revoke it in Polar's dashboard.
+
+### Plan changes, refunds and the portal
+
+An upgrade is sent with `proration_behavior: invoice`, so Polar charges the
+difference at once and applies the change only if that charge succeeds. A
+downgrade is sent with `next_period`, and choosing the current plan again
+clears the pending update. The plan has to be sold in the subscription's
+currency.
+
+A customer's refund follows the same rules as a TossPayments one: within
+seven days, and a full refund ends the subscription and takes the instances
+offline. `refund_sent_at` is written before Polar is asked, so the refund is
+never requested twice. After that, Polar's own record of the order and its
+refunds decides the outcome. The request is sent again only if Polar has no
+refund for the order an hour later. The net amount is refunded and Polar adds
+the tax. Polar's fee is not returned. Once a refund has ended the
+subscription here, the subscription is revoked at Polar, and that is retried
+until Polar agrees. Polar may also refund on its own to head off a chargeback.
+That refund is recorded, and the subscription ends when Polar revokes it.
+
+**Manage billing** opens Polar's customer portal through a customer session.
+There the customer changes their card and finds their invoices.

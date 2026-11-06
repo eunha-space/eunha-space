@@ -1,6 +1,6 @@
-import { won } from "@/format";
+import { money } from "@/format";
 import { useEffect, useState } from "react";
-import { CreditCard, ExternalLink } from "lucide-react";
+import { CreditCard, ExternalLink, Globe } from "lucide-react";
 import { useLingui } from "@lingui/react";
 import { api, type Billing, type Customer, errorMessage, type Plan } from "@/api";
 import { cn } from "cn";
@@ -88,6 +88,19 @@ export function SubscriptionSections(
           } finally {
             if (active) setBusy(false);
           }
+        } else if (query.get("polar_checkout")) {
+          // Back from Polar's checkout: read what it made rather than wait for
+          // its webhooks.
+          setBusy(true);
+          try {
+            const next = await api<Billing>("/customer/billing/polar/sync", { method: "POST" });
+            if (active) setBilling(next);
+            await onChanged();
+          } catch (e) {
+            if (active) setError(errorMessage(e));
+          } finally {
+            if (active) setBusy(false);
+          }
         } else if (query.get("code") && query.get("code") !== "PAY_PROCESS_CANCELED") {
           // TossPayments' own message, written for the customer.
           setError(query.get("message") || t("The card could not be registered."));
@@ -134,6 +147,24 @@ export function SubscriptionSections(
       const code = (e as { code?: string } | null)?.code;
       if (code !== "USER_CANCEL") setError(errorMessage(e));
     } finally {
+      setBusy(false);
+    }
+  }
+
+  /** Polar's checkout or its customer portal, which this page is left for. */
+  async function openPolar(path: "/checkout" | "/portal") {
+    setError("");
+    setBusy(true);
+    try {
+      const page = await api<{ url: string }>(`/customer/billing/polar${path}`, {
+        method: "POST",
+        body: path === "/checkout"
+          ? JSON.stringify({ plan_id: chosenPlan?.id })
+          : undefined,
+      });
+      location.assign(page.url);
+    } catch (e) {
+      setError(errorMessage(e));
       setBusy(false);
     }
   }
@@ -195,16 +226,38 @@ export function SubscriptionSections(
   const subscription = billing.subscription;
   const status = subscription?.status;
   const subscribed = status === "active" || status === "past_due";
+  // Polar keeps the card, the retries and the invoices; this page sends the
+  // customer to its portal for them.
+  const polar = subscribed && subscription?.provider === "polar";
   const pending = billing.payments.some((payment) => payment.status === "pending");
-  const selectable = billing.plans.filter((plan) => plan.active);
+  // A Polar subscription can only move to a plan sold in its own currency.
+  const selectable = billing.plans.filter((plan) =>
+    plan.active && (!polar || plan.polar_currency === subscription?.currency)
+  );
+  /** What a plan costs the way this customer pays, or would pay by default. */
+  const planAmount = (plan: Plan) =>
+    polar && plan.polar_amount != null
+      ? plan.polar_amount
+      : plan.amount;
+  const price = (plan: Plan) =>
+    polar && plan.polar_amount != null && plan.polar_currency
+      ? money(plan.polar_amount, plan.polar_currency)
+      : money(plan.amount, "KRW");
+  const internationalPrice = (plan: Plan) =>
+    plan.polar_amount != null && plan.polar_currency
+      ? money(plan.polar_amount, plan.polar_currency)
+      : null;
   const choosing = !subscribed && !pending;
   const chosenPlan = selectable.find((plan) => plan.id === selectedPlan) ?? selectable[0] ?? null;
   const planName = (plan: Plan) => (i18n.locale === "ko" ? plan.name_ko : plan.name_en);
   const currentPlan = billing.plans.find((plan) => plan.id === subscription?.plan_id) ?? null;
   const nextPlan = billing.plans.find((plan) => plan.id === subscription?.pending_plan_id) ?? null;
   const amount = subscription && subscribed && !choosing
-    ? subscription.amount
-    : chosenPlan?.amount ?? null;
+    ? money(subscription.amount, subscription.currency)
+    : chosenPlan
+    ? price(chosenPlan)
+    : null;
+  const canPayInternationally = billing.polar && chosenPlan?.polar_amount != null;
   const limitLabel = (plan: Plan) => planLimits(plan, i18n.locale === "ko").join(" · ");
 
   let description: string;
@@ -212,8 +265,16 @@ export function SubscriptionSections(
     description = t(
       "Your subscription is cancelled. Your instances keep running until the end of the paid period, then go offline with their data kept.",
     );
+  } else if (status === "active" && polar) {
+    description = t(
+      "Your international card is charged automatically each month through Polar, which sends your receipts.",
+    );
   } else if (status === "active") {
     description = t("Your card is charged automatically each month.");
+  } else if (status === "past_due" && polar) {
+    description = t(
+      "Your last payment was declined. Polar will try again, and your instances keep running meanwhile. Update your card in the billing portal.",
+    );
   } else if (status === "past_due") {
     description = t(
       "Your last payment was declined. We'll try again, and your instances keep running meanwhile. Use another card to pay now.",
@@ -251,10 +312,15 @@ export function SubscriptionSections(
           )}
           {status === "active" && nextPlan && !subscription?.cancel_at_period_end && (
             <Detail label={t("From your next renewal")}>
-              {planName(nextPlan)} · {won(nextPlan.amount)}
+              {planName(nextPlan)} · {price(nextPlan)}
             </Detail>
           )}
-          {amount != null && <Detail label={t("Monthly price")}>{won(amount)}</Detail>}
+          {amount != null && <Detail label={t("Monthly price")}>{amount}</Detail>}
+          {choosing && chosenPlan && canPayInternationally && (
+            <Detail label={t("With an international card")}>
+              {internationalPrice(chosenPlan)}
+            </Detail>
+          )}
           {subscribed && subscription?.has_card && (
             <Detail label={t("Card")}>
               {[subscription.card_company, subscription.card_number].filter(Boolean).join(" ")}
@@ -302,7 +368,7 @@ export function SubscriptionSections(
                       {planName(plan)}
                       {isCurrent ? ` · ${t("Current plan")}` : ""}
                     </span>
-                    <span className="tabular-nums">{won(plan.amount)} {t("/ month")}</span>
+                    <span className="tabular-nums">{price(plan)} {t("/ month")}</span>
                     {limitLabel(plan) && (
                       <span className="text-muted-foreground text-xs">{limitLabel(plan)}</span>
                     )}
@@ -323,10 +389,20 @@ export function SubscriptionSections(
           </div>
         )}
         <div className="flex flex-wrap gap-2">
-          {!subscribed && !pending && (
+          {!subscribed && !pending && billing.toss && (
             <Button disabled={busy || !chosenPlan} onClick={() => void openBillingWindow()}>
               {busy ? <Spinner label={t("Please wait…")} /> : <CreditCard />}
-              {t("Subscribe with a card")}
+              {billing.polar ? t("Subscribe with a Korean card") : t("Subscribe with a card")}
+            </Button>
+          )}
+          {!subscribed && !pending && canPayInternationally && (
+            <Button
+              variant={billing.toss ? "outline" : "default"}
+              disabled={busy}
+              onClick={() => void openPolar("/checkout")}
+            >
+              {!billing.toss && busy ? <Spinner label={t("Please wait…")} /> : <Globe />}
+              {t("Pay with an international card")}
             </Button>
           )}
           {canChangePlan && (
@@ -338,7 +414,17 @@ export function SubscriptionSections(
               {t("Change plan")}
             </Button>
           )}
-          {subscribed && (
+          {polar && (
+            <Button
+              variant={status === "past_due" ? "default" : "outline"}
+              disabled={busy}
+              onClick={() => void openPolar("/portal")}
+            >
+              <ExternalLink />
+              {t("Manage billing")}
+            </Button>
+          )}
+          {subscribed && !polar && (
             <Button
               variant={status === "past_due" ? "default" : "outline"}
               disabled={busy}
@@ -358,7 +444,7 @@ export function SubscriptionSections(
             </Button>
           )}
           {subscribed && status === "active" && subscription?.cancel_at_period_end &&
-            subscription.has_card && (
+            (subscription.has_card || polar) && (
             <Button disabled={busy} onClick={() => void change("/resume")}>
               {t("Keep my subscription")}
             </Button>
@@ -371,7 +457,9 @@ export function SubscriptionSections(
           <AlertDialogContent>
             <AlertDialogHeader>
               <AlertDialogTitle>
-                {refunding ? `${t("Refund this payment?")} ${won(refunding.amount)}` : ""}
+                {refunding
+                  ? `${t("Refund this payment?")} ${money(refunding.amount, refunding.currency)}`
+                  : ""}
               </AlertDialogTitle>
               <AlertDialogDescription>
                 {t("The full amount goes back to your card. Your subscription is cancelled and your instances go offline immediately. Their data is kept, and subscribing again serves them again.")}
@@ -425,9 +513,11 @@ export function SubscriptionSections(
               <AlertDialogDescription>
                 {switching && switching.id === subscription?.plan_id
                   ? t("You stay on your current plan, and the change waiting for your next renewal is dropped.")
+                  : switching && polar && planAmount(switching) > (subscription?.amount ?? 0)
+                  ? `${t("It starts now, and Polar charges your card the difference for the rest of this period.")} ${t("Your renewal date stays the same.")}`
                   : switching?.switch_charge
-                  ? `${t("It starts now, and we charge your card the difference for the rest of this period:")} ${won(switching.switch_charge)}. ${t("Your renewal date stays the same.")}`
-                  : switching && switching.amount > (subscription?.amount ?? 0)
+                  ? `${t("It starts now, and we charge your card the difference for the rest of this period:")} ${money(switching.switch_charge, "KRW")}. ${t("Your renewal date stays the same.")}`
+                  : switching && planAmount(switching) > (subscription?.amount ?? 0)
                   ? t("It starts now at no charge, because so little of this period is left.")
                   : t("It starts at your next renewal. Nothing changes until then, and you can change your mind.")}
               </AlertDialogDescription>
@@ -460,7 +550,7 @@ export function SubscriptionSections(
                       {day(payment.period_start)} – {day(payment.period_end)}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">
-                      {won(payment.amount)}
+                      {money(payment.amount, payment.currency)}
                     </TableCell>
                     <TableCell>
                       {payment.status === "refunded"

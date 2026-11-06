@@ -572,7 +572,7 @@ pub(crate) async fn require_subscription(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: Uuid,
 ) -> Result<(), ApiError> {
-    if s.billing.is_none() {
+    if !billing_on(s) {
         return Ok(());
     }
     let allowed = sqlx::query_scalar::<_, bool>(
@@ -593,7 +593,7 @@ pub(crate) async fn require_subscription(
 
 /// What the customer portal needs to know before showing instance actions.
 pub(crate) async fn subscription_required(s: &Shared, user_id: Uuid) -> Result<bool, ApiError> {
-    if s.billing.is_none() {
+    if !billing_on(s) {
         return Ok(false);
     }
     Ok(sqlx::query_scalar::<_, bool>(
@@ -602,6 +602,12 @@ pub(crate) async fn subscription_required(s: &Shared, user_id: Uuid) -> Result<b
     .bind(user_id)
     .fetch_one(&s.db)
     .await?)
+}
+
+/// Whether customers pay at all: with neither TossPayments nor Polar
+/// configured, nobody is billed.
+pub(crate) fn billing_on(s: &Shared) -> bool {
+    s.billing.is_some() || s.polar.is_some()
 }
 
 fn billing_config(s: &Shared) -> Result<&Config, ApiError> {
@@ -617,6 +623,9 @@ fn billing_config(s: &Shared) -> Result<&Config, ApiError> {
 pub(crate) struct SubscriptionView {
     status: String,
     amount: i64,
+    /// `toss` or `polar`: which of them bills it.
+    provider: String,
+    currency: String,
     plan_id: Option<Uuid>,
     /// The plan the next renewal moves to.
     pending_plan_id: Option<Uuid>,
@@ -647,6 +656,9 @@ pub(crate) struct PlanView {
     media_gb: Option<i64>,
     database_gb: Option<i64>,
     monthly_activities: Option<i64>,
+    /// What Polar charges for it, in `polar_currency`, if it is sold there.
+    polar_amount: Option<i64>,
+    polar_currency: Option<String>,
     /// Whether it can be chosen. A retired plan is listed only for those on it.
     active: bool,
     /// What moving to this plan charges now, for an upgrade.
@@ -658,6 +670,8 @@ pub(crate) struct PlanView {
 pub(crate) struct PaymentView {
     order_id: String,
     amount: i64,
+    provider: String,
+    currency: String,
     kind: String,
     status: String,
     #[serde(with = "time::serde::rfc3339")]
@@ -679,6 +693,11 @@ pub(crate) struct PaymentView {
 #[derive(Serialize)]
 pub(crate) struct BillingView {
     enabled: bool,
+    /// Whether a Korean card can be added, through TossPayments.
+    toss: bool,
+    /// Whether an international card can pay, through Polar, and in what.
+    polar: bool,
+    polar_currency: Option<String>,
     /// What can be subscribed to, cheapest first. An existing subscription
     /// keeps the amount it was started at.
     plans: Vec<PlanView>,
@@ -688,26 +707,27 @@ pub(crate) struct BillingView {
 
 pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiError> {
     let subscription = sqlx::query_as::<_, SubscriptionView>(
-        &format!("SELECT status,amount,plan_id,pending_plan_id,card_company,card_number,billing_key IS NOT NULL has_card,current_period_end,cancel_at_period_end,next_attempt_at,{} renews_at,last_error,anchor_at+make_interval(months => GREATEST(periods_paid-1,0)) period_start FROM subscriptions WHERE user_id=$1", renewal_time("current_period_end")),
+        &format!("SELECT status,amount,provider,currency,plan_id,pending_plan_id,card_company,card_number,billing_key IS NOT NULL has_card,current_period_end,cancel_at_period_end,next_attempt_at,{} renews_at,last_error,anchor_at+make_interval(months => GREATEST(periods_paid-1,0)) period_start FROM subscriptions WHERE user_id=$1", renewal_time("current_period_end")),
     )
     .bind(user_id)
     .fetch_optional(&s.db)
     .await?;
     let payments = sqlx::query_as::<_, PaymentView>(
-        &format!("SELECT order_id,amount,kind,status,period_start,period_end,receipt_url,failure_message,requested_at,(status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND settled_at>now()-interval '{}' AND payment_key IS NOT NULL) refundable,(refund_requested_at IS NOT NULL AND refunded_at IS NULL) refund_pending,refunded_amount,refund_error FROM subscription_payments WHERE user_id=$1 AND status<>'expired' ORDER BY requested_at DESC LIMIT 24", crate::billing_sync::REFUND_WINDOW),
+        &format!("SELECT order_id,amount,provider,currency,kind,status,period_start,period_end,receipt_url,failure_message,requested_at,(status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND settled_at>now()-interval '{}' AND (payment_key IS NOT NULL OR provider='polar')) refundable,(refund_requested_at IS NOT NULL AND refunded_at IS NULL) refund_pending,refunded_amount,refund_error FROM subscription_payments WHERE user_id=$1 AND status<>'expired' ORDER BY requested_at DESC LIMIT 24", crate::billing_sync::REFUND_WINDOW),
     )
     .bind(user_id)
     .fetch_all(&s.db)
     .await?;
     let mut plans = sqlx::query_as::<_, PlanView>(
-        "SELECT id,name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,active FROM plans WHERE active OR id IN (SELECT plan_id FROM subscriptions WHERE user_id=$1 UNION SELECT pending_plan_id FROM subscriptions WHERE user_id=$1) ORDER BY amount,created_at",
+        "SELECT id,name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,polar_amount,polar_currency,active FROM plans WHERE active OR id IN (SELECT plan_id FROM subscriptions WHERE user_id=$1 UNION SELECT pending_plan_id FROM subscriptions WHERE user_id=$1) ORDER BY amount,created_at",
     )
     .bind(user_id)
     .fetch_all(&s.db)
     .await?;
+    // Polar works out its own proration, and charges it itself.
     if let Some(running) = subscription
         .as_ref()
-        .filter(|running| running.status == "active")
+        .filter(|running| running.status == "active" && running.provider == "toss")
         && let (Some(start), Some(end)) = (running.period_start, running.current_period_end)
     {
         let now = OffsetDateTime::now_utc();
@@ -716,7 +736,10 @@ pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiEr
         }
     }
     Ok(BillingView {
-        enabled: s.billing.is_some(),
+        enabled: billing_on(s),
+        toss: s.billing.is_some(),
+        polar: s.polar.is_some(),
+        polar_currency: s.polar.as_ref().map(|polar| polar.currency.clone()),
         plans,
         subscription,
         payments,
@@ -741,6 +764,8 @@ pub(crate) struct PublicPlan {
     media_gb: Option<i64>,
     database_gb: Option<i64>,
     monthly_activities: Option<i64>,
+    polar_amount: Option<i64>,
+    polar_currency: Option<String>,
 }
 
 /// The plans on offer, cheapest first, for visitors who have no account yet.
@@ -748,11 +773,11 @@ pub(crate) struct PublicPlan {
 pub(crate) async fn public_plans(
     State(s): State<Shared>,
 ) -> Result<Json<Vec<PublicPlan>>, ApiError> {
-    if s.billing.is_none() {
+    if !billing_on(&s) {
         return Ok(Json(vec![]));
     }
     let plans = sqlx::query_as::<_, PublicPlan>(
-        "SELECT name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities FROM plans WHERE active ORDER BY amount,created_at",
+        "SELECT name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,polar_amount,polar_currency FROM plans WHERE active ORDER BY amount,created_at",
     )
     .fetch_all(&s.db)
     .await?;
@@ -838,6 +863,7 @@ pub(crate) async fn checkout(
 ) -> Result<Json<Checkout>, ApiError> {
     let (user_id, _) = customer(&headers, &s.db).await?;
     let billing = billing_config(&s)?;
+    polar_not_running(&s, user_id).await?;
     let running = sqlx::query_as::<_, (Uuid, bool)>(
         "SELECT customer_key,status IN ('active','past_due') OR EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=s.user_id AND p.status='pending') FROM subscriptions s WHERE user_id=$1",
     )
@@ -893,6 +919,7 @@ pub(crate) async fn authorize(
 ) -> Result<Json<BillingView>, ApiError> {
     let (user_id, _) = customer(&headers, &s.db).await?;
     let billing = billing_config(&s)?;
+    polar_not_running(&s, user_id).await?;
     let auth_key = body.auth_key.trim();
     if auth_key.is_empty() || auth_key.len() > 300 {
         return Err(ApiError(
@@ -1017,12 +1044,36 @@ pub(crate) async fn authorize(
     Ok(Json(view(&s, user_id).await?))
 }
 
+/// A card cannot be added through TossPayments while Polar bills the
+/// subscription: there would be two charging it.
+async fn polar_not_running(s: &Shared, user_id: Uuid) -> Result<(), ApiError> {
+    let running = sqlx::query_scalar::<_, bool>(
+        "SELECT true FROM subscriptions WHERE user_id=$1 AND provider='polar' AND status IN ('active','past_due')",
+    )
+    .bind(user_id)
+    .fetch_optional(&s.db)
+    .await?
+    .is_some();
+    if running {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "This subscription is paid by an international card. Manage it in the billing portal."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Stop renewing. The instances keep running until the paid period ends.
 pub(crate) async fn cancel(
     State(s): State<Shared>,
     headers: HeaderMap,
 ) -> Result<Json<BillingView>, ApiError> {
     let (user_id, _) = customer(&headers, &s.db).await?;
+    if let Some(subscription_id) = crate::billing_polar::billed_by_polar(&s, user_id).await? {
+        crate::billing_polar::cancel(&s, user_id, &subscription_id).await?;
+        return Ok(Json(view(&s, user_id).await?));
+    }
     let mut tx = s.db.begin().await?;
     // A declined renewal's period is already over, so cancelling it ends the
     // subscription now instead of after the retries.
@@ -1058,6 +1109,10 @@ pub(crate) async fn resume(
     headers: HeaderMap,
 ) -> Result<Json<BillingView>, ApiError> {
     let (user_id, _) = customer(&headers, &s.db).await?;
+    if let Some(subscription_id) = crate::billing_polar::billed_by_polar(&s, user_id).await? {
+        crate::billing_polar::resume(&s, user_id, &subscription_id).await?;
+        return Ok(Json(view(&s, user_id).await?));
+    }
     let mut tx = s.db.begin().await?;
     let resumed = sqlx::query_scalar::<_, bool>(
         "UPDATE subscriptions SET cancel_at_period_end=false,updated_at=now() WHERE user_id=$1 AND status='active' AND cancel_at_period_end AND billing_key IS NOT NULL RETURNING true",
@@ -1100,6 +1155,10 @@ pub(crate) async fn change_plan(
     Json(body): Json<PlanChoice>,
 ) -> Result<Json<BillingView>, ApiError> {
     let (user_id, _) = customer(&headers, &s.db).await?;
+    if let Some(subscription_id) = crate::billing_polar::billed_by_polar(&s, user_id).await? {
+        crate::billing_polar::change_plan(&s, user_id, &subscription_id, body.plan_id).await?;
+        return Ok(Json(view(&s, user_id).await?));
+    }
     billing_config(&s)?;
     let mut tx = s.db.begin().await?;
     let current = sqlx::query_as::<_, (String, i64, Option<Uuid>, bool, bool, Option<OffsetDateTime>, Option<OffsetDateTime>)>(
@@ -1274,7 +1333,7 @@ pub(crate) async fn record(
 
 pub async fn renewer(state: Shared) {
     loop {
-        if state.billing.is_some() {
+        if billing_on(&state) {
             for _ in 0..MAX_PER_PASS {
                 match crate::billing_sync::refund_due(&state, None).await {
                     Ok(true) => continue,
@@ -1285,6 +1344,18 @@ pub async fn renewer(state: Shared) {
                     }
                 }
             }
+        }
+        for _ in 0..MAX_PER_PASS {
+            match crate::billing_polar::sync_due(&state).await {
+                Ok(true) => continue,
+                Ok(false) => break,
+                Err(_error) => {
+                    tracing::warn!("could not read subscriptions from Polar");
+                    break;
+                }
+            }
+        }
+        if state.billing.is_some() {
             for _ in 0..MAX_PER_PASS {
                 match charge_due(&state, None).await {
                     Ok(true) => continue,
@@ -1376,7 +1447,7 @@ pub(crate) async fn charge_due(s: &Shared, user_id: Option<Uuid>) -> Result<bool
     };
     let mut tx = s.db.begin().await?;
     let Some(due) = sqlx::query_as::<_, Due>(
-        &format!("SELECT s.user_id,s.customer_key,s.status,s.cancel_at_period_end,s.billing_key,s.toss_mid,u.email FROM subscriptions s JOIN users u ON u.id=s.user_id WHERE s.next_attempt_at<=now() AND (s.lease_until IS NULL OR s.lease_until<now()) AND s.status IN ('incomplete','active','past_due') AND NOT EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=s.user_id AND p.refund_requested_at IS NOT NULL AND p.refunded_at IS NULL) AND ($1::uuid IS NULL OR s.user_id=$1) AND ($1::uuid IS NOT NULL OR s.status='incomplete' OR s.cancel_at_period_end OR s.billing_key IS NULL OR s.next_attempt_at<={LATEST_CHARGE_TIME} OR EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=s.user_id AND p.status='pending')) ORDER BY s.next_attempt_at LIMIT 1 FOR UPDATE OF s SKIP LOCKED"),
+        &format!("SELECT s.user_id,s.customer_key,s.status,s.cancel_at_period_end,s.billing_key,s.toss_mid,u.email FROM subscriptions s JOIN users u ON u.id=s.user_id WHERE s.provider='toss' AND s.next_attempt_at<=now() AND (s.lease_until IS NULL OR s.lease_until<now()) AND s.status IN ('incomplete','active','past_due') AND NOT EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=s.user_id AND p.refund_requested_at IS NOT NULL AND p.refunded_at IS NULL) AND ($1::uuid IS NULL OR s.user_id=$1) AND ($1::uuid IS NOT NULL OR s.status='incomplete' OR s.cancel_at_period_end OR s.billing_key IS NULL OR s.next_attempt_at<={LATEST_CHARGE_TIME} OR EXISTS(SELECT 1 FROM subscription_payments p WHERE p.user_id=s.user_id AND p.status='pending')) ORDER BY s.next_attempt_at LIMIT 1 FOR UPDATE OF s SKIP LOCKED"),
     )
     .bind(user_id)
     .fetch_optional(&mut *tx)
@@ -1715,7 +1786,7 @@ pub(crate) async fn end_subscription(
 /// customer's instance limit allows. One that cannot come back, such as one
 /// whose custom domain another instance took meanwhile, stays retained for the
 /// customer to see.
-async fn restore_suspended(
+pub(crate) async fn restore_suspended(
     s: &Shared,
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     user_id: Uuid,

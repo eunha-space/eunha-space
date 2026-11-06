@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Page, PageHeader } from "@/components/customer/page";
-import { won } from "@/format";
+import { money, won } from "@/format";
 import { CONTACT_EMAIL, planLimits } from "@/planLimits";
 
 const TERMS = [
@@ -54,6 +54,12 @@ export function Pricing({ customer }: { customer: Customer | null | undefined })
                   {won(plan.amount)}
                 </span>{" "}
                 <span className="text-muted-foreground text-sm">{t("/ month")}</span>
+                {plan.polar_amount != null && plan.polar_currency && (
+                  <span className="text-muted-foreground block text-sm tabular-nums">
+                    {t("International cards:")} {money(plan.polar_amount, plan.polar_currency)}{" "}
+                    {t("/ month")}
+                  </span>
+                )}
               </p>
               <ul className="text-muted-foreground grid gap-1 text-sm">
                 {planLimits(plan, korean).map((limit) => <li key={limit}>{limit}</li>)}

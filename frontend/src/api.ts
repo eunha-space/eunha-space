@@ -147,9 +147,12 @@ export type Plan = {
   media_gb: number | null;
   database_gb: number | null;
   monthly_activities: number | null;
+  /** What Polar charges for it, for international cards, if it is sold there. */
+  polar_amount: number | null;
+  polar_currency: string | null;
   /** False for a retired plan, listed only for those on it. */
   active: boolean;
-  /** What moving to this plan charges now, for an upgrade. */
+  /** What moving to this plan charges now, for a TossPayments upgrade. */
   switch_charge: number | null;
 };
 
@@ -164,15 +167,25 @@ export type PublicPlan = Pick<
   | "media_gb"
   | "database_gb"
   | "monthly_activities"
+  | "polar_amount"
+  | "polar_currency"
 >;
 
 export type Billing = {
   enabled: boolean;
+  /** Korean cards, through TossPayments. */
+  toss: boolean;
+  /** International cards, through Polar, in `polar_currency`. */
+  polar: boolean;
+  polar_currency: string | null;
   /** Cheapest first. */
   plans: Plan[];
   subscription: {
     status: SubscriptionStatus;
     amount: number;
+    /** Which of them bills it: TossPayments, or Polar for international cards. */
+    provider: "toss" | "polar";
+    currency: string;
     plan_id: string | null;
     /** The plan the next renewal moves to. */
     pending_plan_id: string | null;
@@ -190,6 +203,8 @@ export type Billing = {
   payments: {
     order_id: string;
     amount: number;
+    provider: "toss" | "polar";
+    currency: string;
     kind: "renewal" | "upgrade";
     status: "pending" | "paid" | "failed" | "refunded";
     period_start: string;
