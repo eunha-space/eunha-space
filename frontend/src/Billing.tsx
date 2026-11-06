@@ -6,7 +6,9 @@ import {
   CircleAlert,
   CreditCard,
   ExternalLink,
+  Pencil,
   RotateCcw,
+  Trash2,
 } from "lucide-react";
 import { api, errorMessage } from "@/api";
 import { absoluteTime, relativeTime } from "@/format";
@@ -18,6 +20,15 @@ import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/ca
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import {
   Table,
   TableBody,
@@ -72,6 +83,8 @@ type Plan = {
   polar_currency: string | null;
   active: boolean;
   subscribers: number;
+  /** Nothing refers to it, so it can be deleted rather than retired. */
+  deletable: boolean;
 };
 
 type Overview = {
@@ -318,6 +331,140 @@ function matches(account: Account, filter: Filter): boolean {
   }
 }
 
+/** A limit field's value: empty means none. */
+const limitValue = (value: string) => (value.trim() === "" ? null : Number(value));
+const limitText = (value: number | null) => (value == null ? "" : String(value));
+
+/** Rename a plan and change its limits. Its price never changes. */
+function EditPlanDialog(
+  { plan, busy, onSave }: {
+    plan: Plan;
+    busy: boolean;
+    onSave: (body: Record<string, unknown>) => Promise<boolean>;
+  },
+) {
+  const [open, setOpen] = useState(false);
+  const [nameEn, setNameEn] = useState(plan.name_en);
+  const [nameKo, setNameKo] = useState(plan.name_ko);
+  const [limit, setLimit] = useState(limitText(plan.instance_limit));
+  const [users, setUsers] = useState(limitText(plan.user_limit));
+  const [media, setMedia] = useState(limitText(plan.media_gb));
+  const [database, setDatabase] = useState(limitText(plan.database_gb));
+  const [activities, setActivities] = useState(limitText(plan.monthly_activities));
+  const reset = () => {
+    setNameEn(plan.name_en);
+    setNameKo(plan.name_ko);
+    setLimit(limitText(plan.instance_limit));
+    setUsers(limitText(plan.user_limit));
+    setMedia(limitText(plan.media_gb));
+    setDatabase(limitText(plan.database_gb));
+    setActivities(limitText(plan.monthly_activities));
+  };
+  const fields: [string, string, string, (value: string) => void, string?][] = [
+    ["users", "Users shown", users, setUsers],
+    ["media", "Media GB shown", media, setMedia],
+    ["database", "Database GB shown", database, setDatabase],
+    ["activities", "Activities a month shown", activities, setActivities],
+  ];
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (next) reset();
+        setOpen(next);
+      }}
+    >
+      <DialogTrigger
+        render={<Button size="icon-sm" variant="ghost" aria-label={`Edit ${plan.name_en}`} />}
+      >
+        <Pencil />
+      </DialogTrigger>
+      <DialogContent>
+        <form
+          className="grid gap-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void onSave({
+              name_en: nameEn,
+              name_ko: nameKo,
+              instance_limit: limitValue(limit),
+              user_limit: limitValue(users),
+              media_gb: limitValue(media),
+              database_gb: limitValue(database),
+              monthly_activities: limitValue(activities),
+              active: plan.active,
+            }).then((saved) => saved && setOpen(false));
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>Edit {plan.name_en}</DialogTitle>
+            <DialogDescription>
+              {won(plan.amount)} a month, which cannot change. Only the instance limit is
+              enforced; the others are shown to customers. Leave one empty for no limit.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid gap-1">
+              <Label htmlFor={`edit-${plan.id}-en`}>English name</Label>
+              <Input id={`edit-${plan.id}-en`} required maxLength={60} value={nameEn} onChange={(event) => setNameEn(event.target.value)} />
+            </div>
+            <div className="grid gap-1">
+              <Label htmlFor={`edit-${plan.id}-ko`}>Korean name</Label>
+              <Input id={`edit-${plan.id}-ko`} required maxLength={60} value={nameKo} onChange={(event) => setNameKo(event.target.value)} />
+            </div>
+            <div className="grid gap-1">
+              <Label htmlFor={`edit-${plan.id}-limit`}>Instance limit</Label>
+              <Input id={`edit-${plan.id}-limit`} type="number" min={0} placeholder="Account's" value={limit} onChange={(event) => setLimit(event.target.value)} />
+            </div>
+            {fields.map(([key, label, value, set]) => (
+              <div key={key} className="grid gap-1">
+                <Label htmlFor={`edit-${plan.id}-${key}`}>{label}</Label>
+                <Input id={`edit-${plan.id}-${key}`} type="number" min={0} placeholder="No limit" value={value} onChange={(event) => set(event.target.value)} />
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button type="submit" disabled={busy}>Save</Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/** Delete a plan nothing has used. One that was used can only be retired. */
+function DeletePlanDialog(
+  { plan, busy, onDelete }: { plan: Plan; busy: boolean; onDelete: () => Promise<boolean> },
+) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger
+        render={<Button size="icon-sm" variant="ghost" aria-label={`Delete ${plan.name_en}`} />}
+      >
+        <Trash2 />
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Delete {plan.name_en}?</DialogTitle>
+          <DialogDescription>
+            No subscription or payment has used it, so nothing is lost. This cannot be undone.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button
+            variant="destructive"
+            disabled={busy}
+            onClick={() => void onDelete().then((deleted) => deleted && setOpen(false))}
+          >
+            Delete plan
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 /** The Polar product a plan is sold as, or a field to link one. */
 function PolarProduct(
   { plan, busy, onLink }: { plan: Plan; busy: boolean; onLink: (productId: string) => void },
@@ -370,14 +517,16 @@ function Plans(
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  async function run(action: () => Promise<unknown>) {
+  async function run(action: () => Promise<unknown>): Promise<boolean> {
     setBusy(true);
     setError("");
     try {
       await action();
       await onChanged();
+      return true;
     } catch (failure) {
       setError(errorMessage(failure));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -421,6 +570,12 @@ function Plans(
       })
     );
 
+  const savePlan = (plan: Plan, body: Record<string, unknown>) =>
+    run(() => api(`/billing/plans/${plan.id}`, { method: "PATCH", body: JSON.stringify(body) }));
+
+  const deletePlan = (plan: Plan) =>
+    run(() => api(`/billing/plans/${plan.id}`, { method: "DELETE" }));
+
   const linkPolar = (plan: Plan, productId: string) =>
     run(() =>
       api(`/billing/plans/${plan.id}/polar`, {
@@ -454,6 +609,7 @@ function Plans(
             <TableHead>Shown limits</TableHead>
             <TableHead className="text-right">Subscribers</TableHead>
             <TableHead>Offered</TableHead>
+            <TableHead className="w-0"><span className="sr-only">Actions</span></TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -489,6 +645,14 @@ function Plans(
                   disabled={busy}
                   onCheckedChange={(active) => void setActive(plan, active)}
                 />
+              </TableCell>
+              <TableCell>
+                <div className="flex justify-end">
+                  <EditPlanDialog plan={plan} busy={busy} onSave={(body) => savePlan(plan, body)} />
+                  {plan.deletable && (
+                    <DeletePlanDialog plan={plan} busy={busy} onDelete={() => deletePlan(plan)} />
+                  )}
+                </div>
               </TableCell>
             </TableRow>
           ))}

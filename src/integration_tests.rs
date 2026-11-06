@@ -5044,3 +5044,82 @@ async fn tosspayments_and_polar_never_bill_the_same_customer(pool: PgPool) {
     assert_eq!(toss.charges().len(), charges);
     assert_eq!(subscription_status(&pool, user_id).await, "active");
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn operators_edit_shown_limits_and_delete_only_unused_plans(pool: PgPool) {
+    let (_, headers) = fixture(&pool).await;
+    let state = state(pool.clone());
+    let used = plan(&pool, 9900, None).await;
+    let unused = plan(&pool, 19900, None).await;
+    sqlx::query("UPDATE plans SET user_limit=50,media_gb=10 WHERE id=$1")
+        .bind(used)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let update = |body: serde_json::Value| Json(serde_json::from_value(body).unwrap());
+
+    // Sent as null, a shown limit is cleared; left out, it stays.
+    let Json(edited) = billing_admin::update_plan(
+        State(state.clone()),
+        headers.clone(),
+        Path(used),
+        update(serde_json::json!({"name_en":"Personal","name_ko":"개인","instance_limit":1,"active":true,"user_limit":3,"media_gb":null})),
+    )
+    .await
+    .unwrap();
+    let edited = serde_json::to_value(edited).unwrap();
+    assert_eq!(
+        (
+            edited["name_ko"].clone(),
+            edited["instance_limit"].clone(),
+            edited["user_limit"].clone(),
+            edited["media_gb"].clone(),
+            edited["amount"].clone()
+        ),
+        (
+            "개인".into(),
+            1.into(),
+            3.into(),
+            serde_json::Value::Null,
+            9900.into()
+        )
+    );
+    let Json(again) = billing_admin::update_plan(
+        State(state.clone()),
+        headers.clone(),
+        Path(used),
+        update(serde_json::json!({"name_en":"Personal","name_ko":"개인","instance_limit":1,"active":true})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(serde_json::to_value(again).unwrap()["user_limit"], 3);
+
+    // A plan a subscription ever used is retired, not deleted.
+    let (user_id, _) = billed_customer(&pool).await;
+    sqlx::query("INSERT INTO subscriptions(user_id,customer_key,amount,status,plan_id) VALUES($1,$2,9900,'canceled',$3)")
+        .bind(user_id)
+        .bind(Uuid::new_v4())
+        .bind(used)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        billing_admin::delete_plan(State(state.clone()), headers.clone(), Path(used))
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        billing_admin::delete_plan(State(state.clone()), headers.clone(), Path(unused))
+            .await
+            .unwrap(),
+        StatusCode::NO_CONTENT
+    );
+    let left: Vec<Uuid> = sqlx::query_scalar("SELECT id FROM plans")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, vec![used]);
+}

@@ -83,9 +83,11 @@ pub(crate) struct Plan {
     active: bool,
     /// Running subscriptions on it, or moving to it at their next renewal.
     subscribers: i64,
+    /// Whether nothing refers to it, so it can be deleted rather than retired.
+    deletable: bool,
 }
 
-const PLAN_COLUMNS: &str = "id,name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,polar_product_id,polar_amount,polar_currency,active,(SELECT count(*) FROM subscriptions s WHERE s.status IN ('active','past_due') AND plans.id IN (s.plan_id,s.pending_plan_id)) subscribers";
+const PLAN_COLUMNS: &str = "id,name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,polar_product_id,polar_amount,polar_currency,active,(SELECT count(*) FROM subscriptions s WHERE s.status IN ('active','past_due') AND plans.id IN (s.plan_id,s.pending_plan_id)) subscribers,NOT EXISTS(SELECT 1 FROM subscriptions s WHERE plans.id IN (s.plan_id,s.pending_plan_id)) AND NOT EXISTS(SELECT 1 FROM subscription_payments p WHERE plans.id IN (p.plan_id,p.from_plan_id)) deletable";
 
 #[derive(Serialize)]
 pub(crate) struct Overview {
@@ -435,20 +437,33 @@ pub(crate) async fn create_plan(
     Ok(Json(plan))
 }
 
+/// A field that may be left out (`None`), sent as null to clear it
+/// (`Some(None)`), or sent with a value.
+fn present<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Option<i64>>, D::Error> {
+    Option::<i64>::deserialize(deserializer).map(Some)
+}
+
 #[derive(Deserialize)]
 pub(crate) struct PlanUpdate {
     name_en: String,
     name_ko: String,
     instance_limit: Option<i64>,
-    user_limit: Option<i64>,
-    media_gb: Option<i64>,
-    database_gb: Option<i64>,
-    monthly_activities: Option<i64>,
+    #[serde(default, deserialize_with = "present")]
+    user_limit: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "present")]
+    media_gb: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "present")]
+    database_gb: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "present")]
+    monthly_activities: Option<Option<i64>>,
     active: bool,
 }
 
 /// Rename a plan, change its limits, or retire or bring it back. A displayed
-/// limit left out of the request stays as it is. Retiring leaves
+/// limit left out of the request stays as it is, and one sent as null is
+/// cleared, shown as no limit. Its price never changes. Retiring leaves
 /// those on it where they are; it only stops anyone new choosing it.
 pub(crate) async fn update_plan(
     State(s): State<Shared>,
@@ -457,32 +472,38 @@ pub(crate) async fn update_plan(
     Json(body): Json<PlanUpdate>,
 ) -> Result<Json<Plan>, ApiError> {
     let (admin_id, _) = admin_user(&headers, &s.db).await?;
-    let limits = [
-        body.instance_limit,
+    let shown = [
         body.user_limit,
         body.media_gb,
         body.database_gb,
         body.monthly_activities,
     ];
-    if limits.iter().flatten().any(|limit| *limit < 0) {
+    if body.instance_limit.is_some_and(|limit| limit < 0)
+        || shown.iter().flatten().flatten().any(|limit| *limit < 0)
+    {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "A plan cannot have a negative limit.".into(),
         ));
     }
+    let given = |field: Option<Option<i64>>| (field.is_some(), field.flatten());
     let mut tx = s.db.begin().await?;
     let plan = sqlx::query_as::<_, Plan>(&format!(
-        "UPDATE plans SET name_en=$2,name_ko=$3,instance_limit=$4,active=$5,user_limit=coalesce($6,user_limit),media_gb=coalesce($7,media_gb),database_gb=coalesce($8,database_gb),monthly_activities=coalesce($9,monthly_activities) WHERE id=$1 RETURNING {PLAN_COLUMNS}"
+        "UPDATE plans SET name_en=$2,name_ko=$3,instance_limit=$4,active=$5,user_limit=CASE WHEN $6 THEN $7 ELSE user_limit END,media_gb=CASE WHEN $8 THEN $9 ELSE media_gb END,database_gb=CASE WHEN $10 THEN $11 ELSE database_gb END,monthly_activities=CASE WHEN $12 THEN $13 ELSE monthly_activities END WHERE id=$1 RETURNING {PLAN_COLUMNS}"
     ))
     .bind(id)
     .bind(plan_name(&body.name_en)?)
     .bind(plan_name(&body.name_ko)?)
     .bind(body.instance_limit)
     .bind(body.active)
-    .bind(body.user_limit)
-    .bind(body.media_gb)
-    .bind(body.database_gb)
-    .bind(body.monthly_activities)
+    .bind(given(body.user_limit).0)
+    .bind(given(body.user_limit).1)
+    .bind(given(body.media_gb).0)
+    .bind(given(body.media_gb).1)
+    .bind(given(body.database_gb).0)
+    .bind(given(body.database_gb).1)
+    .bind(given(body.monthly_activities).0)
+    .bind(given(body.monthly_activities).1)
     .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Plan not found.".into()))?;
@@ -491,7 +512,7 @@ pub(crate) async fn update_plan(
         admin_id,
         "subscription_plan_update",
         "succeeded",
-        serde_json::json!({ "plan_id": id, "instance_limit": body.instance_limit, "active": body.active }),
+        serde_json::json!({ "plan_id": id, "instance_limit": body.instance_limit, "active": body.active, "user_limit": body.user_limit, "media_gb": body.media_gb, "database_gb": body.database_gb, "monthly_activities": body.monthly_activities }),
         None,
     )
     .await?;
@@ -545,6 +566,44 @@ pub(crate) async fn refund(
 ) -> Result<StatusCode, ApiError> {
     let (admin_id, _) = admin_user(&headers, &s.db).await?;
     billing_sync::start_refund(&s, &order_id, None, admin_id, false).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Delete a plan nothing refers to: no subscription, running or ended, and no
+/// payment. One that was ever used is retired instead, so its history keeps
+/// its name.
+pub(crate) async fn delete_plan(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let (admin_id, _) = admin_user(&headers, &s.db).await?;
+    let mut tx = s.db.begin().await?;
+    let found = sqlx::query_scalar::<_, String>("SELECT name_en FROM plans WHERE id=$1 FOR UPDATE")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Plan not found.".into()))?;
+    let deleted = sqlx::query("DELETE FROM plans WHERE id=$1 AND NOT EXISTS(SELECT 1 FROM subscriptions s WHERE $1 IN (s.plan_id,s.pending_plan_id)) AND NOT EXISTS(SELECT 1 FROM subscription_payments p WHERE $1 IN (p.plan_id,p.from_plan_id))")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    if deleted.rows_affected() == 0 {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "A subscription or payment refers to this plan. Retire it instead.".into(),
+        ));
+    }
+    billing::record(
+        &mut tx,
+        admin_id,
+        "subscription_plan_delete",
+        "succeeded",
+        serde_json::json!({ "plan_id": id, "name_en": found }),
+        None,
+    )
+    .await?;
+    tx.commit().await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

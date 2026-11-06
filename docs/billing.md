@@ -140,6 +140,11 @@ A plan also states limits on registered users, media and database storage, and
 ActivityPub activities a month, shown to customers as a fair-use limit. These are
 only displayed so far: nothing measures or enforces them.
 
+Names, the instance limit and the shown limits can be edited at any time; a
+shown limit left empty is shown as no limit. A plan nothing has used, no
+subscription running or ended and no payment, can be deleted. One that was
+used can only be retired, so that its history keeps its name.
+
 A plan's price never changes, because subscriptions and upgrade charges are
 worked out from it. To change a price, add a plan and stop offering the old one.
 Those on a retired plan stay on it, at their price, until they move.

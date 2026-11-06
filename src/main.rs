@@ -1066,7 +1066,7 @@ async fn main() -> Result<()> {
         .route("/billing/plans", post(billing_admin::create_plan))
         .route(
             "/billing/plans/{id}",
-            axum::routing::patch(billing_admin::update_plan),
+            axum::routing::patch(billing_admin::update_plan).delete(billing_admin::delete_plan),
         )
         .route("/billing/plans/{id}/polar", post(billing_admin::link_polar))
         .route("/billing/accounts/{user_id}", get(billing_admin::account))
