@@ -486,6 +486,7 @@ function PurgeDialog({ tenant, busy, act }: { tenant: Tenant; busy: boolean; act
 function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy: boolean; act: Props["act"] }) {
   const [open, setOpen] = useState(false);
   const [subdomain, setSubdomain] = useState("");
+  const [ownerUsername, setOwnerUsername] = useState("");
   const [handleDomain, setHandleDomain] = useState("");
   const [runtimeId, setRuntimeId] = useState("");
   const selectedRuntime = runtimeId || runtimes[0]?.id || "";
@@ -493,10 +494,10 @@ function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     const ok = await act("/tenants", "create-tenant", {
-      subdomain, runtime_id: selectedRuntime,
+      subdomain, runtime_id: selectedRuntime, owner_username: ownerUsername,
       ...(handleDomain.trim() ? { handle_domain: handleDomain.trim() } : {}),
     });
-    if (ok) { setOpen(false); setSubdomain(""); setHandleDomain(""); }
+    if (ok) { setOpen(false); setSubdomain(""); setOwnerUsername(""); setHandleDomain(""); }
   }
 
   return (
@@ -510,6 +511,11 @@ function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
           </DialogHeader>
           <div className="grid gap-4">
             <div className="grid gap-2"><Label htmlFor="tenant-subdomain">Eunha hostname</Label><div className="flex items-center"><Input id="tenant-subdomain" className="rounded-r-none" value={subdomain} onChange={(e) => setSubdomain(e.target.value.toLowerCase())} placeholder="example" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" required /><span className="border-input bg-muted text-muted-foreground flex h-9 items-center rounded-r-md border border-l-0 px-3 text-sm">.eunha.space</span></div></div>
+            <div className="grid gap-2">
+              <Label htmlFor="tenant-owner-username">Owner username</Label>
+              <Input id="tenant-owner-username" value={ownerUsername} onChange={(e) => setOwnerUsername(e.target.value)} pattern="[A-Za-z0-9_]{1,30}" maxLength={30} required />
+              <p className="text-muted-foreground text-sm">The Owner uses your email. Manage its password from Instances after setup.</p>
+            </div>
             <div className="grid gap-2"><Label htmlFor="tenant-handle-domain">Handle domain</Label><Input id="tenant-handle-domain" value={handleDomain} onChange={(e) => setHandleDomain(e.target.value.toLowerCase())} placeholder="eunha.space" /><p className="text-muted-foreground text-sm">Optional, for eunha space's own instances: handles such as @nyx@eunha.space while the instance is served at its hostname. Neither can be changed afterwards.</p></div>
             <div className="grid gap-2"><Label htmlFor="tenant-runtime">Runtime</Label><select id="tenant-runtime" className="border-input bg-background h-9 rounded-md border px-3 text-sm" value={selectedRuntime} onChange={(e) => setRuntimeId(e.target.value)} required>{runtimes.map((runtime) => <option key={runtime.id} value={runtime.id}>{runtime.host_name} / {runtime.name}</option>)}</select></div>
           </div>

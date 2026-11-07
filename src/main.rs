@@ -318,6 +318,13 @@ struct NewTenant {
     handle_domain: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct OperatorTenantRequest {
+    #[serde(flatten)]
+    tenant: NewTenant,
+    owner_username: String,
+}
+
 /// An existing Mastodon instance taken over rather than created.
 ///
 /// Everything creation generates, an import has to be given instead, because
@@ -1676,10 +1683,26 @@ fn generate_vapid_keypair() -> Result<(String, String)> {
 async fn create_tenant(
     State(s): State<Shared>,
     headers: HeaderMap,
-    Json(body): Json<NewTenant>,
+    Json(body): Json<OperatorTenantRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
-    let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
-    create_tenant_inner(&s, body, Some(admin_user_id), None, None, None, None).await
+    let (admin_user_id, email) = admin_user(&headers, &s.db).await?;
+    let owner_username = body.owner_username.trim().to_owned();
+    if !is_valid_owner_username(&owner_username) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Use up to 30 letters, numbers, and underscores for the admin username.".into(),
+        ));
+    }
+    create_tenant_inner(
+        &s,
+        body.tenant,
+        Some(admin_user_id),
+        Some(admin_user_id),
+        None,
+        Some(owner_username),
+        Some(email),
+    )
+    .await
 }
 
 async fn customer_create_tenant(
