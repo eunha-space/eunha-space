@@ -124,9 +124,10 @@ kept as `handle_domain_verified_at`. The seven-day window covers this wait
 too: an instance whose custom domain connected but whose redirect never
 appeared is deleted like one whose domain never validated. A handle domain
 belongs to one instance and is never another's domain, and it stays reserved
-on the tenant row as its domain does. The handle domain is fixed once
-chosen, and so is the web domain: a domain change would move every account to
-handles on the new domain, so one is refused for these instances. Health
+on the tenant row as its domain does, until the instance is purged. The handle
+domain is fixed once chosen, and so is the web domain: a domain change would
+move every account to handles on the new domain, so one is refused for these
+instances. Health
 checks expect `/api/v2/instance` to name the handle domain, which is what
 Eunha reports as the instance's `domain`.
 
@@ -201,8 +202,8 @@ the database and role must carry the names provisioning derives from the tenant
 id, and the media and Redis prefixes must be the tenant's own. Anything else,
 such as an imported tenant's database, is left in place and noted on the
 operation. If Redis refuses, the purge notes it and continues rather than
-blocking. The tenant row stays as `purged`, keeping its domain reserved, because
-remote servers still remember the accounts that lived there.
+blocking. The tenant row stays as `purged`, and its domain and handle domain
+are released for a new instance.
 
 `EUNHA_PROVIDED_DOMAIN_SUFFIXES` is a comma-separated, primary-first list of
 platform domains (default `eunha.space`). Provisioning `garden` with

@@ -1750,9 +1750,10 @@ async fn create_tenant_inner(
                 "Enter a valid externally owned custom domain.".into(),
             ));
         }
-        // Another instance's handle domain is that instance's, served or not.
+        // Another instance's handle domain is that instance's, served or not,
+        // until it is purged.
         if sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM tenants WHERE handle_domain=$1)",
+            "SELECT EXISTS(SELECT 1 FROM tenants WHERE handle_domain=$1 AND lifecycle_state <> 'purged')",
         )
         .bind(custom_domain)
         .fetch_one(&s.db)
@@ -2271,7 +2272,7 @@ async fn adopt_legacy_domain(
 /// a web domain the customer owns can leave eunha.space with them, so a handle
 /// domain is accepted only beside a custom domain. It must be a domain of its
 /// own: never a provided hostname, never the web domain, never another
-/// instance's.
+/// live instance's: a purged one's is free again.
 ///
 /// eunha space's own instances are the exception, and only an operator may
 /// make one: handles on a provided suffix itself, such as `@nyx@eunha.space`,
@@ -2317,7 +2318,7 @@ async fn validate_handle_domain(
         }
     }
     if sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM tenants WHERE (domain=$1 OR handle_domain=$1 OR $1=ANY(aliases) OR $1=ANY(previous_domains))) OR EXISTS(SELECT 1 FROM tenant_domains WHERE hostname=$1)",
+        "SELECT EXISTS(SELECT 1 FROM tenants WHERE lifecycle_state <> 'purged' AND (domain=$1 OR handle_domain=$1 OR $1=ANY(aliases) OR $1=ANY(previous_domains))) OR EXISTS(SELECT 1 FROM tenant_domains WHERE hostname=$1)",
     )
     .bind(&handle_domain)
     .fetch_one(&s.db)

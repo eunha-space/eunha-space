@@ -4404,6 +4404,25 @@ async fn a_handle_domain_needs_a_custom_domain_of_its_own(pool: PgPool) {
             "{handle}"
         );
     }
+    // A purged instance's domains are released with it.
+    sqlx::query("UPDATE tenants SET lifecycle_state='purged' WHERE id=$1")
+        .bind(taken)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for handle in ["taken.example", "taken-handle.example"] {
+        assert_eq!(
+            check(handle, Some("social.example.com")).await,
+            Ok(Some(handle.into())),
+            "{handle}"
+        );
+    }
+    let replacement = tenant(&pool, runtime).await;
+    sqlx::query("UPDATE tenants SET domain='again.example',handle_domain='taken-handle.example' WHERE id=$1")
+        .bind(replacement)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 #[sqlx::test(migrations = "./migrations")]

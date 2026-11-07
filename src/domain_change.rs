@@ -191,7 +191,7 @@ async fn start(
         ));
     }
     if sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM tenants WHERE handle_domain=ANY($1))",
+        "SELECT EXISTS(SELECT 1 FROM tenants WHERE handle_domain=ANY($1) AND lifecycle_state <> 'purged')",
     )
     .bind(&hostnames)
     .fetch_one(&mut *tx)
