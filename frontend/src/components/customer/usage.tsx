@@ -10,6 +10,25 @@ export type OverLimit = Pick<LimitReading,"tenant_id"|"domain"|"resource"|"value
 function resourceLabel(resource:LimitReading["resource"],ko:boolean) {
  return (ko?{users:"사용자",media:"로컬 미디어",database:"데이터베이스",activities:"이번 달 외부 전송 (UTC)"}:{users:"Users",media:"Local media",database:"Database",activities:"Outbound deliveries this month (UTC)"})[resource];
 }
+/** How close a reading is to its allowance; exempt and unmeasured readings count as safe. */
+type UsageLevel = "safe" | "near" | "over";
+const NEAR_LIMIT = 0.8;
+function usageLevel(row: LimitReading): UsageLevel {
+  if (row.exempt || row.value === null || row.allowance === null) return "safe";
+  if (row.enforced || row.value >= row.allowance) return "over";
+  return row.value >= row.allowance * NEAR_LIMIT ? "near" : "safe";
+}
+const LEVEL_RANK: Record<UsageLevel, number> = { safe: 0, near: 1, over: 2 };
+const CARD_TONE: Record<UsageLevel, string> = {
+  safe: "bg-success/10 ring-success/40",
+  near: "bg-warning/10 ring-warning/50",
+  over: "bg-destructive/10 ring-destructive/50",
+};
+const BAR_TONE: Record<UsageLevel, string> = {
+  safe: "bg-success",
+  near: "bg-warning",
+  over: "bg-destructive",
+};
 export function usageAmount(value:number|null,resource:string) {
   if(value===null) return "—";
   return resource==="media" || resource==="database" ? `${(value/1e9).toLocaleString(undefined,{maximumFractionDigits:2})} GB` : value.toLocaleString();
@@ -29,10 +48,10 @@ export function MemberUsage({tenantId}:{tenantId?:string}) {
  const selected=rows.filter(row=>!tenantId||row.tenant_id===tenantId);const ids=[...new Set(selected.map(row=>row.tenant_id))];
  if(!ids.length&&!error) return null;
  const labels=ko?{users:"사용자",media:"로컬 미디어",database:"데이터베이스",activities:"이번 달 외부 전송 (UTC)"}:{users:"Users",media:"Local media",database:"Database",activities:"Outbound deliveries this month (UTC)"};
- return <div className="grid gap-3">{error&&<p role="status" className="text-destructive text-sm">{ko?"사용량을 불러오지 못했습니다. 이전 측정값은 오래되었을 수 있습니다.":"Usage could not be refreshed. Previous readings may be stale."}</p>}{ids.map(id=>{const readings=selected.filter(row=>row.tenant_id===id);return <Card key={id}><CardContent className="grid gap-4">
+ return <div className="grid gap-3">{error&&<p role="status" className="text-destructive text-sm">{ko?"사용량을 불러오지 못했습니다. 이전 측정값은 오래되었을 수 있습니다.":"Usage could not be refreshed. Previous readings may be stale."}</p>}{ids.map(id=>{const readings=selected.filter(row=>row.tenant_id===id);const level=readings.map(usageLevel).reduce<UsageLevel>((worst,next)=>LEVEL_RANK[next]>LEVEL_RANK[worst]?next:worst,"safe");return <Card key={id} className={CARD_TONE[level]}><CardContent className="grid gap-4">
  <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="font-semibold">{readings[0].domain} · {ko?"요금제 사용량":"Plan usage"}</h3><Button size="sm" variant="outline" disabled={queued===id} onClick={async()=>{try{await api(`/customer/tenants/${id}/usage/check`,{method:"POST"});setQueued(id);setTimeout(()=>setQueued(null),30000);}catch{setError(true);}}}>{queued===id?(ko?"측정 요청됨":"Check queued"):(ko?"지금 측정":"Check now")}</Button></div>
  <div className="grid gap-4 sm:grid-cols-2">{readings.map(row=><div key={row.resource} className="grid gap-1.5"><div className="flex justify-between gap-2 text-sm"><span>{labels[row.resource]}</span><span className="tabular-nums">{usageAmount(row.value,row.resource)}{row.allowance===null?"":` / ${usageAmount(row.allowance,row.resource)}`}</span></div>
- {row.allowance!==null&&row.value!==null&&<Progress aria-label={labels[row.resource]} value={Math.min(100,row.allowance===0?100:row.value/row.allowance*100)} />}
+ {row.allowance!==null&&row.value!==null&&<Progress aria-label={labels[row.resource]} indicatorClassName={BAR_TONE[usageLevel(row)]} value={Math.min(100,row.allowance===0?100:row.value/row.allowance*100)} />}
  <p className="text-muted-foreground text-xs">{row.sampled_at===null?(ko?"측정값 없음":"Not measured"):new Date(row.sampled_at).toLocaleString()}{row.value===null?` · ${ko?"측정 불가":"Unavailable"}`:!row.fresh&&row.sampled_at!==null?` · ${ko?"오래된 측정값":"Stale"}`:""}{row.exempt?` · ${ko?"제한 면제":"Exempt from limits"}`:""}{["database","activities"].includes(row.resource)?` · ${ko?"공정 이용":"Fair use"}`:""}</p>
  {row.enforced&&<p className="text-destructive text-xs">{row.resource==="users"?(ko?"새 가입이 제한되었습니다.":"New registrations are restricted."):(ko?"새 미디어 업로드가 제한되었습니다.":"New media uploads are restricted.")}</p>}
  {!row.enforced&&row.grace_until&&<p className="text-xs">{ko?"유예 종료":"Grace ends"}: {new Date(row.grace_until).toLocaleString()}</p>}

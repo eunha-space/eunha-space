@@ -34,9 +34,10 @@
   --input: oklch(0.887 0.023 87.2);
   --ring: oklch(0.521 0.09 176.7);
 
-  /* Eunha additions: a pending/queued tone and a healthy tone. */
+  /* Eunha additions: a pending/queued tone, a healthy tone, and a nearing-a-limit tone. */
   --pending: oklch(0.503 0.156 297.1);
   --success: oklch(0.521 0.09 176.7);
+  --warning: oklch(0.6 0.14 60);
 
   --chart-1: oklch(0.521 0.09 176.7);
   --chart-2: oklch(0.503 0.156 297.1);
@@ -80,6 +81,7 @@
 
   --pending: var(--lilac);
   --success: var(--mint);
+  --warning: oklch(0.8 0.13 70);
 
   --chart-1: var(--mint);
   --chart-2: var(--lilac);
@@ -115,6 +117,7 @@
   --color-chart-1: var(--chart-1);
   --color-pending: var(--pending);
   --color-success: var(--success);
+  --color-warning: var(--warning);
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-border: var(--border);
