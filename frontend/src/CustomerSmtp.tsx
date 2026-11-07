@@ -84,21 +84,32 @@ export function CustomerSmtp({ tenantId }: { tenantId: string }) {
     setError("");
     setEditing(false);
   }
-  const showForm = loaded && (editing || !configured);
+  const showForm = editing || !configured;
+  // Until the settings arrive the card can't say which state it is in, so it
+  // waits rather than show a plain card that turns green or red a moment later.
+  if (!loaded) {
+    return error
+      ? (
+        <SectionCard title={t("Email delivery")}>
+          <ErrorAlert message={error} />
+        </SectionCard>
+      )
+      : null;
+  }
   return (
     <SectionCard
-      highlight={loaded && !configured}
-      tone={loaded && configured ? "success" : undefined}
+      highlight={!configured}
+      tone={configured ? "success" : undefined}
       title={t("Email delivery")}
-      badge={loaded && (configured
+      badge={configured
         ? (
           <StateBadge tone="success">
             <CircleCheck />
             {t("Configured")}
           </StateBadge>
         )
-        : <StateBadge tone="problem">{t("Not configured")}</StateBadge>)}
-      description={!loaded || configured
+        : <StateBadge tone="problem">{t("Not configured")}</StateBadge>}
+      description={configured
         ? editing
           ? t("Enter the credentials again whenever you change these settings; saved credentials are never displayed.")
           : t("Your instance sends email through this SMTP server.")
@@ -183,25 +194,19 @@ export function CustomerSmtp({ tenantId }: { tenantId: string }) {
         )
         : (
           <>
-            {loaded && (
-              <dl className="grid gap-4 sm:grid-cols-2">
-                <Detail label={t("SMTP server")}>{saved.host}:{saved.port}</Detail>
-                <Detail label={t("Sender email")}>{saved.from}</Detail>
-              </dl>
-            )}
-            {!loaded && error && <ErrorAlert message={error} />}
+            <dl className="grid gap-4 sm:grid-cols-2">
+              <Detail label={t("SMTP server")}>{saved.host}:{saved.port}</Detail>
+              <Detail label={t("Sender email")}>{saved.from}</Detail>
+            </dl>
             {message && <SuccessAlert>{message}</SuccessAlert>}
-            {loaded && (
-              <div>
-                <Button variant="outline" onClick={startEditing}>
-                  <Pencil />
-                  {t("Change settings")}
-                </Button>
-              </div>
-            )}
+            <div>
+              <Button variant="outline" onClick={startEditing}>
+                <Pencil />
+                {t("Change settings")}
+              </Button>
+            </div>
           </>
         )}
-
     </SectionCard>
   );
 }
