@@ -5725,3 +5725,109 @@ async fn an_upgrade_charges_only_the_amount_the_customer_was_shown(pool: PgPool)
         shown["switch_charge"].as_i64().unwrap()
     );
 }
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn capacity_collection_is_private_nullable_throttled_and_retained(pool: PgPool) {
+    let (runtime, headers) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    sqlx::query("UPDATE tenants SET lifecycle_state='retained' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,media_storage_region,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url) VALUES($1,'postgresql://tenant:private-secret@127.0.0.1:1/missing','redis://127.0.0.1','smtp.example.com',465,'smtp-user','private-key','test@example','auto','private-id','private-media-secret','https://media.example')").bind(id).execute(&pool).await.unwrap();
+    sqlx::query("INSERT INTO tenant_imports(tenant_id,dump_path,external_media) VALUES($1,'/tmp/test.dump',true)").bind(id).execute(&pool).await.unwrap();
+    let s = state(pool.clone());
+    instance_usage::collect(&s).await.unwrap();
+    instance_usage::collect(&s).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tenant_usage")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    let Json(rows) = instance_usage::latest(State(s.clone()), headers.clone())
+        .await
+        .unwrap();
+    assert_eq!(rows[0]["database_bytes"], serde_json::Value::Null);
+    assert_eq!(rows[0]["users"], serde_json::Value::Null);
+    assert_eq!(rows[0]["lifecycle_state"], "retained");
+    assert_eq!(rows[0]["media_exempt"], true);
+    assert!(!rows.to_string().contains("private"));
+    assert_eq!(
+        instance_usage::latest(State(s.clone()), HeaderMap::new())
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let Json(history) = instance_usage::history(State(s), headers, Path(id))
+        .await
+        .unwrap();
+    assert_eq!(history.len(), 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn delivery_rollups_are_idempotent_and_exclude_resets_gaps_and_midnight(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    // 2026-11-01 UTC. The last pair straddles the December boundary.
+    let base = 1793491200000i64;
+    for (at, epoch, value) in [
+        (base, "a", 10.),
+        (base + 10000, "a", 15.),
+        (base + 10000, "a", 15.),
+        (base + 20000, "b", 2.),
+        (base + 30000, "b", 5.),
+        (base + 40000, "b", 1.),
+        (base + 80000, "b", 20.),
+        (base + 90000, "b", 25.),
+        (base + 30 * 86400000 - 10000, "b", 30.),
+        (base + 30 * 86400000, "b", 40.),
+    ] {
+        let rows =
+            serde_json::json!([{"tenant_id":id,"sampled_at":at,"epoch":epoch,"deliveries":value}]);
+        sqlx::query(include_str!("delivery_usage.sql"))
+            .bind(SqlJson(rows))
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let late =
+        serde_json::json!([{"tenant_id":id,"sampled_at":base+5000,"epoch":"a","deliveries":12.}]);
+    sqlx::query(include_str!("delivery_usage.sql"))
+        .bind(SqlJson(late))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let total = sqlx::query_as::<_, (f64, i64)>(
+        "SELECT sum(deliveries),sum(observed_ms)::bigint FROM tenant_delivery_daily",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(total, (13., 30000));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tenant_delivery_daily")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn capacity_media_uses_bigints_and_separates_local_and_remote(pool: PgPool) {
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::raw_sql("CREATE TEMP TABLE media_attachments(file_file_size integer,thumbnail_file_size integer,remote_url text); CREATE TEMP TABLE accounts(avatar_file_size integer,header_file_size integer,domain text); CREATE TEMP TABLE custom_emojis(image_file_size integer,domain text)").execute(&mut *tx).await.unwrap();
+    sqlx::raw_sql("INSERT INTO media_attachments VALUES(2000000000,2000000000,''),(100,20,'https://remote'); INSERT INTO accounts VALUES(10,20,NULL),(30,40,'remote'); INSERT INTO custom_emojis VALUES(5,NULL),(6,'remote')").execute(&mut *tx).await.unwrap();
+    let sizes = sqlx::query_as::<_, (i64, i64)>(include_str!("instance_usage_media.sql"))
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert_eq!(sizes, (4000000035, 196));
+}

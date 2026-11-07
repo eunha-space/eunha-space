@@ -46,6 +46,7 @@ mod billing_sync;
 mod ci_release;
 mod domain_change;
 mod health;
+mod instance_usage;
 #[cfg(test)]
 mod integration_tests;
 mod jobs;
@@ -879,6 +880,11 @@ async fn main() -> Result<()> {
     health::supervise(state.clone(), "usage::sampler", usage::sampler);
     health::supervise(
         state.clone(),
+        "instance_usage::sampler",
+        instance_usage::sampler,
+    );
+    health::supervise(
+        state.clone(),
         "service_usage::sampler",
         service_usage::sampler,
     );
@@ -1002,6 +1008,8 @@ async fn main() -> Result<()> {
         .route("/tenants", get(tenants).post(create_tenant))
         .route("/usage", get(usage::usage))
         .route("/usage/history", get(usage::aggregate_history))
+        .route("/usage/capacity", get(instance_usage::latest))
+        .route("/tenants/{id}/usage/capacity", get(instance_usage::history))
         .route("/usage/service/history", get(service_usage::history))
         .route("/tenants/{id}/usage/history", get(usage::history))
         .route("/tenants/import", post(import_tenant))
@@ -2109,10 +2117,11 @@ async fn import_tenant(
     sqlx::query("INSERT INTO tenant_domains(id,tenant_id,hostname,kind,status,is_primary,cname_target) VALUES($1,$2,$3,'custom','pending',true,$4)")
         .bind(Uuid::new_v4()).bind(tenant_id).bind(&domain).bind(&cname_target).execute(&mut *tx).await
         .map_err(|error| if error.as_database_error().and_then(|e| e.constraint()) == Some("tenant_domains_hostname_key") { ApiError(StatusCode::CONFLICT, "That domain is already managed.".into()) } else { ApiError::from(error) })?;
-    sqlx::query("INSERT INTO tenant_imports(tenant_id,dump_path,media_path) VALUES($1,$2,$3)")
+    sqlx::query("INSERT INTO tenant_imports(tenant_id,dump_path,media_path,external_media) VALUES($1,$2,$3,$4)")
         .bind(tenant_id)
         .bind(&dump_path)
         .bind(&media_path)
+        .bind(brings_own_media)
         .execute(&mut *tx)
         .await
         .map_err(

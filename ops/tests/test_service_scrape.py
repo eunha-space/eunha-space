@@ -31,6 +31,19 @@ eunha_http_response_duration_seconds_bucket{tenant="a.example",le="+Inf"} 12
         self.assertNotIn("private-path", str(rows))
         self.assertNotIn("foreign.example", str(rows))
 
+    def test_delivery_metrics_are_optional_and_count_only_successful_sends(self):
+        self.assertIsNone(scrape.parse_metrics(self.gauges, ["a.example"])["a.example"]["deliveries"])
+        text = self.gauges + '\n'.join([
+            'ojak_delivery_attempts_total{tenant="a.example",outcome="delivered"} 23',
+            'ojak_delivery_attempts_total{tenant="a.example",outcome="failed"} 9',
+            'ojak_delivery_attempts_total{tenant="a.example",outcome="held"} 11',
+            'ojak_delivery_attempts_total{tenant="unknown.example",outcome="delivered"} 100',
+        ])
+        self.assertEqual(scrape.parse_metrics(text, ["a.example"])["a.example"]["deliveries"], 23)
+        for value in ("NaN", "-1", "+Inf"):
+            with self.assertRaises(ValueError):
+                scrape.parse_metrics(self.gauges + f'ojak_delivery_attempts_total{{tenant="a.example",outcome="delivered"}} {value}', ["a.example"])
+
     def test_partial_gauges_and_invalid_values_are_not_successful_samples(self):
         self.assertEqual(scrape.parse_metrics(self.gauges.splitlines()[0], ["a.example"]), {})
         for value in ("NaN", "+Inf", "-1"):

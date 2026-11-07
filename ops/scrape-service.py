@@ -22,9 +22,11 @@ def parse_metrics(text, domains):
     }
     rows = {domain: dict.fromkeys([*fields.values(), "errors"], 0.0) for domain in domains}
     present = {domain: set() for domain in domains}
+    for row in rows.values():
+        row["deliveries"] = None
     for line in text.splitlines():
         match = re.fullmatch(r'(\w+)\{(.*)\}\s+([^\s]+)', line)
-        if not match or match[1] not in fields:
+        if not match or match[1] not in {*fields, "ojak_delivery_attempts_total"}:
             continue
         labels = match[2]
         tenant = re.search(r'(?:^|,)tenant=("(?:\\.|[^"\\])*")(?:,|$)', labels)
@@ -36,6 +38,10 @@ def parse_metrics(text, domains):
         value = float(match[3])
         if not math.isfinite(value) or value < 0:
             raise ValueError("invalid metric value")
+        if match[1] == "ojak_delivery_attempts_total":
+            if re.search(r'(?:^|,)outcome="delivered"(?:,|$)', labels):
+                rows[domain]["deliveries"] = (rows[domain]["deliveries"] or 0) + value
+            continue
         rows[domain][fields[match[1]]] += value
         if fields[match[1]] in ("pool", "pool_idle", "in_flight"):
             present[domain].add(fields[match[1]])

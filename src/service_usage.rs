@@ -17,6 +17,8 @@ pub(crate) struct Sample {
     pub in_flight: Option<f64>,
     pub pool: Option<f64>,
     pub pool_idle: Option<f64>,
+    #[serde(default)]
+    pub deliveries: Option<f64>,
 }
 
 #[derive(Default, Deserialize)]
@@ -181,6 +183,9 @@ async fn scrape(target: &Target, domains: &[String]) -> Option<HashMap<String, S
             {
                 return None;
             }
+            if row.deliveries.is_some_and(|n| !n.is_finite() || n < 0.0) {
+                return None;
+            }
             rows.insert(domain.clone(), row);
         }
     }
@@ -229,7 +234,17 @@ pub(crate) async fn collect(s: &Shared) -> Result<(), ApiError> {
         })
         .collect::<Vec<_>>();
     let mut tx = s.db.begin().await?;
-    sqlx::query("INSERT INTO tenant_service_samples SELECT * FROM jsonb_populate_recordset(NULL::tenant_service_samples,$1) ON CONFLICT DO NOTHING").bind(SqlJson(rows)).execute(&mut *tx).await?;
+    // Multiple control planes may scrape together. Serialize delta accounting;
+    // the statement also rejects a scrape older than one already committed.
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended('tenant-delivery-rollups',0))")
+        .execute(&mut *tx)
+        .await?;
+    // A single transaction advances the samples and rollups. Retrying the same
+    // timestamp inserts nothing and cannot add a counter delta twice.
+    sqlx::query(include_str!("delivery_usage.sql"))
+        .bind(SqlJson(rows))
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("DELETE FROM tenant_service_samples WHERE sampled_at<$1")
         .bind(sampled_at - usage_range::RETENTION_MS)
         .execute(&mut *tx)

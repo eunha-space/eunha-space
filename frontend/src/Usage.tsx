@@ -9,6 +9,7 @@ import { NativeSelect } from "@/components/ui/native-select";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { AggregateUsage, formatBytes as bytes, formatNumber } from "@/components/console/aggregate-usage";
+import { CapacityUsage, CapacityHistory } from "@/components/console/capacity-usage";
 import { ServiceUsage } from "@/components/console/service-usage";
 import { pathFor, useSubroute } from "@/router";
 import { cn } from "cn";
@@ -96,7 +97,7 @@ export function Usage({ tenants, runtimes }: { tenants: Tenant[]; runtimes: Runt
         </NativeSelect>
       </label>
     </div>
-    <p className="text-muted-foreground text-xs">Live database and Eunha service metrics, collected privately in the background about every 10 seconds. CPU, RAM, media storage, and bandwidth are not measured. Database connections reflect PostgreSQL backends; service pool charts show application connections. Long ranges use coarser chart samples, and history is retained for 28 days. Current cards always show live readings.</p>
+    <p className="text-muted-foreground text-xs">Live database and Eunha service metrics, collected privately in the background about every 10 seconds. Capacity is measured separately every 15 minutes. CPU, RAM, and bandwidth are not measured. Database connections reflect PostgreSQL backends; service pool charts show application connections. Long ranges use coarser chart samples, and history is retained for 28 days. Current cards always show live readings.</p>
     {error && <Alert variant="destructive"><AlertDescription>Usage refresh failed. Previous readings may be stale. {error}</AlertDescription></Alert>}
     {page === "fleet" && <FleetUsage tenants={tenants} readings={readings} minutes={minutes} now={now} loaded={loaded} />}
     {page === "servers" && <ServerUsage tenants={tenants} runtimes={runtimes} readings={readings} minutes={minutes} now={now} loaded={loaded}
@@ -113,6 +114,7 @@ function FleetUsage({ tenants, readings, minutes, now, loaded }: Scope) {
   return <section className="grid gap-3" aria-labelledby="fleet-usage-title">
     <div><h2 id="fleet-usage-title" className="font-semibold">Fleet-wide usage</h2><p className="text-muted-foreground text-xs">Database and service usage across every hosting server and runtime.</p></div>
     <AggregateUsage minutes={minutes} readings={readings.filter(row => ids.has(row.tenant_id))} expected={ids.size} now={now} loaded={loaded} />
+    <CapacityUsage now={now} />
     <ServiceUsage minutes={minutes} now={now} />
   </section>;
 }
@@ -156,6 +158,8 @@ function TenantUsage({ tenants, readings, minutes, now, loaded, tenantId, onSele
       </label>
     </div>
     {selected && <>
+      <CapacityUsage key={`capacity-${selected.id}`} tenantId={selected.id} now={now} />
+      <CapacityHistory key={`daily-${selected.id}`} tenantId={selected.id} />
       <TenantTrends key={selected.id} tenantId={selected.id} minutes={minutes} now={now} />
       <ServiceUsage minutes={minutes} key={`service-${selected.id}`} tenantId={selected.id} now={now} />
     </>}
