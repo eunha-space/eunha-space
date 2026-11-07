@@ -880,11 +880,6 @@ async fn main() -> Result<()> {
     health::supervise(state.clone(), "usage::sampler", usage::sampler);
     health::supervise(
         state.clone(),
-        "instance_usage::sampler",
-        instance_usage::sampler,
-    );
-    health::supervise(
-        state.clone(),
         "service_usage::sampler",
         service_usage::sampler,
     );

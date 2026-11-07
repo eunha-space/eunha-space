@@ -1,7 +1,6 @@
 //! Capacity observations; no enforcement and no private connection details in output.
 use super::*;
-use futures::{StreamExt, stream};
-use sqlx::{Connection, PgConnection};
+use sqlx::PgConnection;
 
 #[derive(Serialize, sqlx::FromRow)]
 pub(crate) struct Reading {
@@ -46,27 +45,41 @@ pub(crate) async fn history(
         .bind(id).fetch_all(&s.db).await?))
 }
 
-pub(crate) async fn collect(s: &Shared) -> Result<(), ApiError> {
+/// Uses the health probe's connection after its reading has been captured.
+/// The caller supplies a deadline so capacity cannot keep extending a late pass.
+pub(crate) async fn probe(
+    tenant_id: Uuid,
+    connection: Option<&mut PgConnection>,
+    deadline: tokio::time::Instant,
+) -> Reading {
+    let mut row = Reading {
+        tenant_id,
+        sampled_at: (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64,
+        users: None,
+        local_media_bytes: None,
+        remote_media_bytes: None,
+        database_bytes: None,
+    };
+    if let Some(db) = connection {
+        // Preserve already collected fields if a later query fails or times out.
+        // Capacity has its own budget, independent of the health query timeout.
+        let _ = tokio::time::timeout_at(deadline, async {
+            row.database_bytes = sqlx::query_scalar("SELECT pg_database_size(current_database())")
+                .fetch_one(&mut *db).await.ok();
+            row.users = sqlx::query_scalar("SELECT count(*) FROM users u JOIN accounts a ON a.id=u.account_id WHERE a.domain IS NULL AND a.id <> -99 AND u.confirmed_at IS NOT NULL AND u.approved AND NOT u.disabled AND a.suspended_at IS NULL")
+                .fetch_one(&mut *db).await.ok();
+            if let Ok((local, remote)) = sqlx::query_as::<_, (i64, i64)>(include_str!("instance_usage_media.sql"))
+                .fetch_one(&mut *db).await {
+                row.local_media_bytes = Some(local);
+                row.remote_media_bytes = Some(remote);
+            }
+        }).await;
+    }
+    row
+}
+
+pub(crate) async fn persist(s: &Shared, rows: &[Reading]) -> Result<(), ApiError> {
     let now = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
-    let targets = sqlx::query_as::<_, (Uuid, String)>("SELECT t.id,c.database_url FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id WHERE t.lifecycle_state IN ('ready','failed','retained') AND NOT EXISTS(SELECT 1 FROM tenant_usage u WHERE u.tenant_id=t.id AND u.sampled_at>$1)")
-        .bind(now-900_000).fetch_all(&s.db).await?;
-    let rows = stream::iter(targets.into_iter().map(|(tenant_id,url)| async move {
-        // Each query is independently nullable: an incompatible media schema
-        // must not hide a valid database size or account count.
-        let values = tokio::time::timeout(Duration::from_secs(4), async {
-            let mut db = PgConnection::connect(&url).await.ok()?;
-            let users = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM users u JOIN accounts a ON a.id=u.account_id WHERE a.domain IS NULL AND a.id <> -99 AND u.confirmed_at IS NOT NULL AND u.approved AND NOT u.disabled AND a.suspended_at IS NULL").fetch_one(&mut db).await.ok();
-            let media = sqlx::query_as::<_, (i64,i64)>(include_str!("instance_usage_media.sql")).fetch_one(&mut db).await.ok();
-            let size = sqlx::query_scalar::<_,i64>("SELECT pg_database_size(current_database())").fetch_one(&mut db).await.ok();
-            let _ = db.close().await;
-            Some((users,media,size))
-        }).await.ok().flatten();
-        Reading { tenant_id, sampled_at: now,
-            users: values.as_ref().and_then(|v|v.0),
-            local_media_bytes: values.as_ref().and_then(|v|v.1.map(|v|v.0)),
-            remote_media_bytes: values.as_ref().and_then(|v|v.1.map(|v|v.1)),
-            database_bytes: values.and_then(|v|v.2) }
-    })).buffer_unordered(8).collect::<Vec<_>>().await;
     let mut tx = s.db.begin().await?;
     sqlx::query("INSERT INTO tenant_usage SELECT * FROM jsonb_populate_recordset(NULL::tenant_usage,$1) ON CONFLICT DO NOTHING").bind(SqlJson(&rows)).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO tenant_usage_daily SELECT u.*,(to_timestamp(sampled_at/1000.0) AT TIME ZONE 'UTC')::date FROM jsonb_populate_recordset(NULL::tenant_usage,$1) u ON CONFLICT (tenant_id,day) DO UPDATE SET sampled_at=EXCLUDED.sampled_at,users=EXCLUDED.users,local_media_bytes=EXCLUDED.local_media_bytes,remote_media_bytes=EXCLUDED.remote_media_bytes,database_bytes=EXCLUDED.database_bytes WHERE tenant_usage_daily.sampled_at<EXCLUDED.sampled_at").bind(SqlJson(&rows)).execute(&mut *tx).await?;
@@ -84,13 +97,4 @@ pub(crate) async fn collect(s: &Shared) -> Result<(), ApiError> {
     .await?;
     tx.commit().await?;
     Ok(())
-}
-
-pub(crate) async fn sampler(s: Shared) {
-    loop {
-        if collect(&s).await.is_err() {
-            tracing::warn!("capacity sampling failed");
-        }
-        tokio::time::sleep(Duration::from_secs(60)).await;
-    }
 }

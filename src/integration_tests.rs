@@ -5746,8 +5746,8 @@ async fn capacity_collection_is_private_nullable_throttled_and_retained(pool: Pg
     sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,media_storage_region,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url) VALUES($1,'postgresql://tenant:private-secret@127.0.0.1:1/missing','redis://127.0.0.1','smtp.example.com',465,'smtp-user','private-key','test@example','auto','private-id','private-media-secret','https://media.example')").bind(id).execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO tenant_imports(tenant_id,dump_path,external_media) VALUES($1,'/tmp/test.dump',true)").bind(id).execute(&pool).await.unwrap();
     let s = state(pool.clone());
-    instance_usage::collect(&s).await.unwrap();
-    instance_usage::collect(&s).await.unwrap();
+    usage::collect(&s).await.unwrap();
+    usage::collect(&s).await.unwrap();
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tenant_usage")
             .fetch_one(&pool)
@@ -5837,4 +5837,110 @@ async fn capacity_media_uses_bigints_and_separates_local_and_remote(pool: PgPool
         .await
         .unwrap();
     assert_eq!(sizes, (4000000035, 196));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn capacity_timeout_preserves_completed_fields_on_the_supplied_connection(pool: PgPool) {
+    use sqlx::Connection;
+    let mut db = pool.acquire().await.unwrap().detach();
+    sqlx::raw_sql("CREATE TEMP TABLE accounts(id bigint,domain text,suspended_at timestamp); CREATE TEMP TABLE users(account_id bigint,confirmed_at timestamp,approved boolean,disabled boolean); INSERT INTO accounts VALUES(1,NULL,NULL); INSERT INTO users VALUES(1,now(),true,false); CREATE TEMP VIEW media_attachments AS SELECT 1::integer file_file_size,0::integer thumbnail_file_size,''::text remote_url FROM pg_sleep(2); CREATE TEMP TABLE custom_emojis(image_file_size integer,domain text)")
+        .execute(&mut db).await.unwrap();
+    // Profile columns are present, so only the deliberately slow attachment
+    // query prevents the media reading from finishing.
+    sqlx::raw_sql("ALTER TABLE accounts ADD COLUMN avatar_file_size integer; ALTER TABLE accounts ADD COLUMN header_file_size integer")
+        .execute(&mut db).await.unwrap();
+    let row = instance_usage::probe(
+        Uuid::new_v4(),
+        Some(&mut db),
+        tokio::time::Instant::now() + Duration::from_millis(250),
+    )
+    .await;
+    let row = serde_json::to_value(row).unwrap();
+    assert!(row["database_bytes"].as_i64().unwrap() > 0);
+    assert_eq!(row["users"], 1);
+    assert!(row["local_media_bytes"].is_null());
+    assert!(row["remote_media_bytes"].is_null());
+    // The temporary tables above are visible only on the supplied connection.
+    let _ = db.close().await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn capacity_persistence_failure_does_not_discard_health_and_retries_next_pass(pool: PgPool) {
+    use sqlx::ConnectOptions;
+    let (runtime, headers) = fixture(&pool).await;
+    let id = tenant(&pool, runtime).await;
+    let url = pool.connect_options().to_url_lossy().to_string();
+    sqlx::query("INSERT INTO tenant_configuration(tenant_id,database_url,redis_url,smtp_host,smtp_port,smtp_username,smtp_password,smtp_from,media_storage_region,media_storage_access_key_id,media_storage_secret_access_key,media_storage_base_url) VALUES($1,$2,'redis://127.0.0.1','smtp.example.com',465,'smtp-user','private-key','test@example','auto','private-id','private-media-secret','https://media.example')").bind(id).bind(url).execute(&pool).await.unwrap();
+    sqlx::query(
+        "ALTER TABLE tenant_usage_daily ADD CONSTRAINT simulate_failure CHECK (false) NOT VALID",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let s = state(pool.clone());
+    usage::collect(&s).await.unwrap();
+    let Json(health) = usage::usage(State(s.clone()), headers.clone())
+        .await
+        .unwrap();
+    assert!(
+        serde_json::to_value(health).unwrap()[0]["database_bytes"]
+            .as_i64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tenant_usage_samples")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tenant_usage")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    sqlx::query("ALTER TABLE tenant_usage_daily DROP CONSTRAINT simulate_failure")
+        .execute(&pool)
+        .await
+        .unwrap();
+    usage::collect(&s).await.unwrap();
+    let Json(rows) = instance_usage::latest(State(s.clone()), headers)
+        .await
+        .unwrap();
+    assert!(rows[0]["database_bytes"].as_i64().unwrap() > 0);
+    // The control-plane database lacks the tenant account/media schema. Those
+    // failed capacity queries must not hide health or the measured size.
+    assert!(rows[0]["users"].is_null());
+    usage::collect(&s).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tenant_usage")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
+    // Conversely, a failed health insert must not suppress capacity storage.
+    sqlx::query("DELETE FROM tenant_usage")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "ALTER TABLE tenant_usage_samples ADD CONSTRAINT simulate_failure CHECK (false) NOT VALID",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    assert!(usage::collect(&s).await.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM tenant_usage")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        1
+    );
 }

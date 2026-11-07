@@ -148,51 +148,81 @@ pub(crate) async fn sampler(s: Shared) {
         .bind(now_millis() - usage_range::RETENTION_MS).fetch_all(&s.db).await {
         s.usage.lock().await.rows = rows;
     }
+    let mut interval = tokio::time::interval(Duration::from_secs(10));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        interval.tick().await;
         if collect(&s).await.is_err() {
             tracing::warn!("usage sampling failed; retaining previous readings");
         } else {
             s.health.tick("usage-sampler");
         }
-        tokio::time::sleep(Duration::from_secs(10)).await;
     }
 }
 
 pub(crate) async fn collect(s: &Shared) -> Result<(), ApiError> {
-    let tenants = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT t.id,c.database_url FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id WHERE t.lifecycle_state IN ('ready','failed','retained') ORDER BY t.domain",
-    ).fetch_all(&s.db).await.map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Usage inventory unavailable.".into()))?;
-    let rows = stream::iter(tenants.into_iter().map(|(tenant_id, url)| async move {
+    let tenants = sqlx::query_as::<_, (Uuid, String, bool)>(
+        "SELECT t.id,c.database_url,COALESCE(u.sampled_at <= $1,true) FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id LEFT JOIN LATERAL (SELECT sampled_at FROM tenant_usage WHERE tenant_id=t.id ORDER BY sampled_at DESC LIMIT 1) u ON true WHERE t.lifecycle_state IN ('ready','failed','retained') ORDER BY u.sampled_at NULLS FIRST,t.domain",
+    ).bind(now_millis()-900_000).fetch_all(&s.db).await.map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Usage inventory unavailable.".into()))?;
+    // Stop starting capacity work after eight seconds. Oldest capacity readings
+    // go first, so a large fleet rotates rather than starving its last tenants.
+    let capacity_deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let results = stream::iter(tenants.into_iter().map(|(tenant_id, url, capacity_due)| async move {
         let sample = tokio::time::timeout(Duration::from_secs(4), async {
-            let mut connection = PgConnection::connect(&url).await?;
+            let mut connection = PgConnection::connect(&url).await.ok()?;
             let values = sqlx::query_as::<_, (i64, i64, i64, i64, Option<String>)>(
                 "SELECT pg_database_size(current_database()), (SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()), (SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid() AND state='active'), xact_commit+xact_rollback, stats_reset::text FROM pg_stat_database WHERE datname=current_database()",
-            ).fetch_one(&mut connection).await;
-            // Explicit close also on a query failure; timeout drops the connection.
-            let _ = connection.close().await;
-            values
-        }).await;
-        let values = sample.ok().and_then(Result::ok);
-        Usage {
+            ).fetch_one(&mut connection).await.ok();
+            Some((connection, values))
+        }).await.ok().flatten();
+        let (mut connection, values) = match sample {
+            Some((connection, values)) => (Some(connection), values),
+            None => (None, None),
+        };
+        // Capture health before running any capacity query; its timestamp and
+        // values survive a capacity error, timeout, or persistence failure.
+        let health = Usage {
             tenant_id,
             rate: None,
-            sampled_at: (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64,
+            sampled_at: now_millis(),
             database_bytes: values.as_ref().map(|v| v.0),
             connections: values.as_ref().map(|v| v.1),
             active_connections: values.as_ref().map(|v| v.2),
             transactions: values.as_ref().map(|v| v.3),
             stats_reset: values.and_then(|v| v.4),
+        };
+        let now = tokio::time::Instant::now();
+        let capacity = if capacity_due && now < capacity_deadline {
+            Some(instance_usage::probe(tenant_id, connection.as_mut(),
+                capacity_deadline.min(now + Duration::from_secs(4))).await)
+        } else { None };
+        if let Some(connection) = connection {
+            // Also bound close after an interrupted capacity query.
+            let _ = tokio::time::timeout(Duration::from_secs(1), connection.close()).await;
         }
+        (health, capacity)
     })).buffer_unordered(8).collect::<Vec<_>>().await;
+    let (rows, capacity): (Vec<_>, Vec<_>) = results.into_iter().unzip();
+    let health_result = persist(s, &rows).await;
+    if health_result.is_ok() {
+        s.usage.lock().await.rows = rows;
+    }
+    let capacity = capacity.into_iter().flatten().collect::<Vec<_>>();
+    if instance_usage::persist(s, &capacity).await.is_err() {
+        tracing::warn!("capacity persistence failed independently of health sampling");
+    }
+    health_result
+}
+
+async fn persist(s: &Shared, rows: &[Usage]) -> Result<(), ApiError> {
     let mut tx = s.db.begin().await?;
     // One fixed insert; samples contain identifiers and numbers, never URLs.
     sqlx::query("INSERT INTO tenant_usage_samples SELECT tenant_id,sampled_at,database_bytes,connections,active_connections,transactions,stats_reset FROM jsonb_populate_recordset(NULL::tenant_usage_samples,$1) ON CONFLICT DO NOTHING")
-        .bind(SqlJson(&rows)).execute(&mut *tx).await?;
+        .bind(SqlJson(rows)).execute(&mut *tx).await?;
     sqlx::query("DELETE FROM tenant_usage_samples WHERE sampled_at < $1")
         .bind(now_millis() - usage_range::RETENTION_MS)
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    s.usage.lock().await.rows = rows;
     Ok(())
 }

@@ -6,9 +6,14 @@ four weeks of measurements and a review of the limits and pricing.
 Implementation review
 ---------------------
 
-- The capacity sampler runs independently of the ten-second PostgreSQL health
-  probe. It checks for due tenants each minute and collects at most once per
-  fifteen minutes, with eight probes in flight and a four-second tenant budget.
+- The ten-second PostgreSQL health sampler also runs capacity queries when
+  due, reusing its tenant connection at most once per fifteen minutes, with
+  eight probes in flight. Health is captured first with its own four-second
+  budget. Capacity has a separate four-second budget and stops when the pass
+  reaches eight seconds; skipped tenants stay due, oldest readings first.
+  Health and capacity retain separate timestamps and persistence. A capacity
+  failure cannot discard a health reading or fields already measured. The
+  sampler skips missed timer ticks instead of issuing catch-up bursts.
   Users exclude suspended accounts as well as unconfirmed, unapproved and
   disabled users. Media sums cast each size to bigint before adding.
 - Raw capacity samples live for 28 days. Daily capacity readings retain the
