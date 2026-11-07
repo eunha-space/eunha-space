@@ -504,8 +504,11 @@ function PolarProduct(
         <span className="tabular-nums" title={plan.polar_product_id ?? undefined}>
           {money(plan.polar_amount!, plan.polar_currency!)}
         </span>
+        {/* Checkouts turn it off (`allow_trial: false`): shown so it is not a surprise. */}
         {trialLength(plan, false) && (
-          <span className="text-muted-foreground text-xs">{trialLength(plan, false)}</span>
+          <span className="text-muted-foreground text-xs">
+            {trialLength(plan, false)} in Polar, not offered
+          </span>
         )}
         <Button
           size="icon-xs"

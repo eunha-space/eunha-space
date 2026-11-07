@@ -216,6 +216,8 @@ export type Billing = {
     last_error: string | null;
     /** When the Polar free trial it is in ends; nothing is charged before. */
     trial_ends_at: string | null;
+    /** Polar: the plan an upgrade not billed yet moved from, which cancelling returns. */
+    unbilled_from_plan_id: string | null;
   } | null;
   payments: {
     order_id: string;

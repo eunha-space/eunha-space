@@ -355,8 +355,6 @@ const ko: Record<string, string> = {
     "그 전에는 결제되지 않습니다.",
   "It starts now and ends your free trial, because this plan's trial is shorter or there is none. Polar charges your card this plan's price now:":
     "이 요금제는 체험 기간이 더 짧거나 없어서, 지금 바로 적용되며 무료 체험이 끝납니다. Polar가 이 요금제의 요금을 지금 카드로 결제합니다:",
-  "It starts now, and Polar charges your card the difference for the rest of this period.":
-    "지금 바로 적용되며, 남은 기간에 대한 차액을 Polar가 카드로 결제합니다.",
   "This subscription is paid by an international card. Manage it in the billing portal.":
     "이 구독은 해외 카드로 결제되고 있습니다. 결제 관리에서 변경하세요.",
   "International cards are not available.":
@@ -454,6 +452,11 @@ const ko: Record<string, string> = {
   "The full amount goes back to your card, and your plan returns to the one before this upgrade, at its price. Your subscription goes on.":
     "전액이 카드로 환불되고, 요금제는 업그레이드 이전의 요금제와 요금으로 돌아갑니다. 구독은 계속됩니다.",
   "Keep the upgrade": "업그레이드 유지",
+  "First payment: full refund within 7 days": "첫 결제: 7일 이내 전액 환불",
+  "It starts now, and the difference for the rest of this period is added to your next renewal.":
+    "지금 바로 적용되며, 이번 기간의 남은 차액은 다음 정기 결제에 함께 청구됩니다.",
+  "Your upgrade this period has not been billed yet, so cancelling also returns you to {plan} now.":
+    "이번 기간의 업그레이드는 아직 청구되지 않았으므로, 해지하면 지금 {plan} 요금제로 돌아갑니다.",
   "The full amount goes back to your card, and your plan returns to {plan}, at its price. Your subscription goes on and your instances keep running.":
     "전액이 카드로 환불되고, 요금제는 {plan}(으)로 돌아가 그 요금이 적용됩니다. 구독은 계속되며 인스턴스도 계속 실행됩니다.",
   "Refunding this upgrade returns your previous plan. Delete instances until you are within its limit first.":

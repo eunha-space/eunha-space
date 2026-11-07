@@ -36,7 +36,7 @@ const REFUND_POLICY_KO = [
   ],
   [
     "해외 카드",
-    "해외 카드 결제는 Polar가 판매자(Merchant of Record)로 처리합니다. 계정 페이지에서 직접 환불을 신청할 수 있는 것은 계정의 첫 해외 카드 결제뿐이며, 이전에 환불을 받은 적이 없는 경우에 한합니다. 무료 체험이 있는 요금제는 체험이 끝난 뒤의 첫 결제가 이에 해당합니다. 그 밖의 결제는 결제 후 7일 이내에 hello@eunha.space로 문의해 주시면 검토 후 환불해 드립니다.",
+    "해외 카드 결제는 Polar가 판매자(Merchant of Record)로 처리합니다. 계정 페이지에서 직접 환불을 신청할 수 있는 것은 계정의 첫 해외 카드 결제뿐이며, 이전에 환불을 받은 적이 없는 경우에 한합니다. 그 밖의 결제는 결제 후 7일 이내에 hello@eunha.space로 문의해 주시면 검토 후 환불해 드립니다.",
   ],
   [
     "장애 시 환불",
@@ -68,7 +68,7 @@ const REFUND_POLICY_EN = [
   ],
   [
     "International cards",
-    "Payments by international card are handled by Polar, our merchant of record. You can ask for a refund yourself from your account page only for your account's first payment by international card, and only if you have not had a refund before. On a plan with a free trial, that is the first payment after the trial. For any other payment, write to hello@eunha.space within 7 days of paying, and we will look at it and refund you where it is fair.",
+    "Payments by international card are handled by Polar, our merchant of record. You can ask for a refund yourself from your account page only for your account's first payment by international card, and only if you have not had a refund before. For any other payment, write to hello@eunha.space within 7 days of paying, and we will look at it and refund you where it is fair.",
   ],
   [
     "Refunds for outages",

@@ -644,6 +644,9 @@ pub(crate) struct SubscriptionView {
     /// When the free trial it is in ends, for a Polar subscription in one.
     #[serde(with = "time::serde::rfc3339::option")]
     trial_ends_at: Option<OffsetDateTime>,
+    /// For Polar, the plan an upgrade not billed yet moved from: cancelling
+    /// returns it.
+    unbilled_from_plan_id: Option<Uuid>,
     #[serde(skip)]
     period_start: Option<OffsetDateTime>,
 }
@@ -732,7 +735,7 @@ pub(crate) struct BillingView {
 
 pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiError> {
     let subscription = sqlx::query_as::<_, SubscriptionView>(
-        &format!("SELECT status,amount,provider,currency,plan_id,pending_plan_id,card_company,card_number,billing_key IS NOT NULL has_card,current_period_end,cancel_at_period_end,next_attempt_at,{} renews_at,last_error,CASE WHEN trial_ends_at>now() THEN trial_ends_at END trial_ends_at,anchor_at+make_interval(months => GREATEST(periods_paid-1,0)) period_start FROM subscriptions WHERE user_id=$1", renewal_time("current_period_end")),
+        &format!("SELECT status,amount,provider,currency,plan_id,pending_plan_id,card_company,card_number,billing_key IS NOT NULL has_card,current_period_end,cancel_at_period_end,next_attempt_at,{} renews_at,last_error,CASE WHEN trial_ends_at>now() THEN trial_ends_at END trial_ends_at,CASE WHEN unbilled_from_plan_id IS DISTINCT FROM plan_id THEN unbilled_from_plan_id END unbilled_from_plan_id,anchor_at+make_interval(months => GREATEST(periods_paid-1,0)) period_start FROM subscriptions WHERE user_id=$1", renewal_time("current_period_end")),
     )
     .bind(user_id)
     .fetch_optional(&s.db)
@@ -744,7 +747,7 @@ pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiEr
     .fetch_all(&s.db)
     .await?;
     let mut plans = sqlx::query_as::<_, PlanView>(
-        "SELECT id,name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,polar_amount,polar_currency,polar_trial_interval,polar_trial_interval_count,(SELECT CASE WHEN t.trial_ends_at>now() AND t.trial_started_at+(polar_trial_interval_count||' '||polar_trial_interval)::interval>now() THEN t.trial_started_at+(polar_trial_interval_count||' '||polar_trial_interval)::interval END FROM subscriptions t WHERE t.user_id=$1) trial_until,active FROM plans WHERE active OR id IN (SELECT plan_id FROM subscriptions WHERE user_id=$1 UNION SELECT pending_plan_id FROM subscriptions WHERE user_id=$1) ORDER BY amount,created_at",
+        "SELECT id,name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,polar_amount,polar_currency,polar_trial_interval,polar_trial_interval_count,(SELECT CASE WHEN t.trial_ends_at>now() AND t.trial_started_at+(polar_trial_interval_count||' '||polar_trial_interval)::interval>now() THEN t.trial_started_at+(polar_trial_interval_count||' '||polar_trial_interval)::interval END FROM subscriptions t WHERE t.user_id=$1) trial_until,active FROM plans WHERE active OR id IN (SELECT plan_id FROM subscriptions WHERE user_id=$1 UNION SELECT pending_plan_id FROM subscriptions WHERE user_id=$1 UNION SELECT unbilled_from_plan_id FROM subscriptions WHERE user_id=$1) ORDER BY amount,created_at",
     )
     .bind(user_id)
     .fetch_all(&s.db)
@@ -1853,7 +1856,7 @@ pub(crate) async fn end_subscription(
         .bind(user_id)
         .execute(&mut **tx)
         .await?;
-    sqlx::query("UPDATE subscriptions SET status=$2,billing_key=NULL,toss_mid=NULL,next_attempt_at=NULL,cancel_at_period_end=false,lease_until=NULL,pending_plan_id=NULL,trial_started_at=NULL,trial_ends_at=NULL,updated_at=now() WHERE user_id=$1")
+    sqlx::query("UPDATE subscriptions SET status=$2,billing_key=NULL,toss_mid=NULL,next_attempt_at=NULL,cancel_at_period_end=false,lease_until=NULL,pending_plan_id=NULL,trial_started_at=NULL,trial_ends_at=NULL,unbilled_from_plan_id=NULL,unbilled_since=NULL,updated_at=now() WHERE user_id=$1")
         .bind(user_id)
         .bind(status)
         .execute(&mut **tx)

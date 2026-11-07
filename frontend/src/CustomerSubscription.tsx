@@ -1,4 +1,4 @@
-import { money, trialLength } from "@/format";
+import { money } from "@/format";
 import { useEffect, useState } from "react";
 import { CreditCard, ExternalLink, Globe } from "lucide-react";
 import { useLingui } from "@lingui/react";
@@ -260,6 +260,7 @@ export function SubscriptionSections(
   const planName = (plan: Plan) => (i18n.locale === "ko" ? plan.name_ko : plan.name_en);
   const currentPlan = billing.plans.find((plan) => plan.id === subscription?.plan_id) ?? null;
   const nextPlan = billing.plans.find((plan) => plan.id === subscription?.pending_plan_id) ?? null;
+  const unbilledFrom = billing.plans.find((plan) => plan.id === subscription?.unbilled_from_plan_id) ?? null;
   const amount = subscription && subscribed && !choosing
     ? money(subscription.amount, subscription.currency)
     : chosenPlan
@@ -483,11 +484,10 @@ export function SubscriptionSections(
                 {!tossOpen && busy ? <Spinner label={t("Please wait…")} /> : <Globe />}
                 {t("Pay with an international card")}
               </Button>
-              {chosenPlan && trialLength(chosenPlan, i18n.locale === "ko") && (
-                <span className="text-muted-foreground text-xs">
-                  {trialLength(chosenPlan, i18n.locale === "ko")}
-                </span>
-              )}
+              {/* POLAR_SELF_REFUND: the account's first such payment. */}
+              <span className="text-muted-foreground text-xs">
+                {t("First payment: full refund within 7 days")}
+              </span>
             </div>
           )}
           {canChangePlan && (
@@ -592,6 +592,12 @@ export function SubscriptionSections(
                   : t(
                     "Your instances keep running until the end of the paid period, then go offline. Their data is kept, and subscribing again serves them again.",
                   )}
+                {status !== "past_due" && unbilledFrom && ` ${
+                  i18n._(
+                    "Your upgrade this period has not been billed yet, so cancelling also returns you to {plan} now.",
+                    { plan: planName(unbilledFrom) },
+                  )
+                }`}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
@@ -637,7 +643,7 @@ export function SubscriptionSections(
                   : switching && polar && subscription?.trial_ends_at
                   ? `${t("It starts now and ends your free trial, because this plan's trial is shorter or there is none. Polar charges your card this plan's price now:")} ${price(switching)}.`
                   : switching && polar && planAmount(switching) > (subscription?.amount ?? 0)
-                  ? `${t("It starts now, and Polar charges your card the difference for the rest of this period.")} ${t("Your renewal date stays the same.")}`
+                  ? `${t("It starts now, and the difference for the rest of this period is added to your next renewal.")} ${t("Your renewal date stays the same.")}`
                   : switching?.switch_charge
                   ? `${
                     i18n._(

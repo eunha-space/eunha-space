@@ -4812,6 +4812,8 @@ async fn a_polar_checkout_names_the_customer_plan_and_currency(pool: PgPool) {
     assert_eq!(sent["external_customer_id"], user_id.to_string());
     assert_eq!(sent["customer_email"], "customer@example.com");
     assert_eq!(sent["currency"], "usd");
+    // No free trial, whatever the product says.
+    assert_eq!(sent["allow_trial"], false);
     assert_eq!(sent["customer_ip_address"], "203.0.113.9");
     assert_eq!(
         sent["success_url"],
@@ -4935,7 +4937,7 @@ async fn a_polar_subscription_cancels_resumes_changes_plans_and_ends_with_polar(
         false
     );
 
-    // A dearer plan applies now, and Polar charges the difference.
+    // A dearer plan applies now, and its difference goes on the next renewal.
     let choose =
         |plan: Uuid| Json(serde_json::from_value(serde_json::json!({"plan_id": plan})).unwrap());
     let Json(view) = billing::change_plan(State(state.clone()), headers.clone(), choose(large))
@@ -4964,11 +4966,60 @@ async fn a_polar_subscription_cancels_resumes_changes_plans_and_ends_with_polar(
         vec![
             serde_json::json!({"cancel_at_period_end": true}),
             serde_json::json!({"cancel_at_period_end": false}),
-            serde_json::json!({"product_id": "prod_large", "proration_behavior": "invoice"}),
+            serde_json::json!({"product_id": "prod_large", "proration_behavior": "prorate"}),
             serde_json::json!({"product_id": "prod_standard", "proration_behavior": "next_period"}),
             serde_json::json!({"pending_update": null}),
         ]
     );
+    let view = polar_view(&state, &headers).await;
+    assert_eq!(
+        view["subscription"]["unbilled_from_plan_id"],
+        standard.to_string()
+    );
+
+    // Cancelling before that renewal returns the plan that was paid for.
+    let Json(view) = billing::cancel(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+    let view = serde_json::to_value(view).unwrap();
+    assert_eq!(view["subscription"]["plan_id"], standard.to_string());
+    assert!(view["subscription"]["unbilled_from_plan_id"].is_null());
+    let changes: Vec<serde_json::Value> =
+        polar.changes().into_iter().map(|(_, body)| body).collect();
+    assert_eq!(
+        changes[changes.len() - 2..],
+        [
+            serde_json::json!({"product_id": "prod_standard", "proration_behavior": "prorate"}),
+            serde_json::json!({"cancel_at_period_end": true}),
+        ]
+    );
+    let _ = billing::resume(State(state.clone()), headers.clone())
+        .await
+        .unwrap();
+
+    // Upgraded again, the renewal that bills it settles it: cancelling keeps
+    // the plan then.
+    let _ = billing::change_plan(State(state.clone()), headers.clone(), choose(large))
+        .await
+        .unwrap();
+    polar.holds_order("ord_cycle", user_id, "sub_1", 1499, 0);
+    {
+        let mut orders = polar.orders.lock().unwrap();
+        let order = orders.get_mut("ord_cycle").unwrap();
+        order["billing_reason"] = "subscription_cycle".into();
+        order["product_id"] = "prod_large".into();
+        order["created_at"] =
+            rfc3339(time::OffsetDateTime::now_utc() + time::Duration::seconds(5)).into();
+    }
+    polar_webhook(
+        &state,
+        "order.paid",
+        serde_json::json!({"id": "ord_cycle"}),
+        true,
+    )
+    .await;
+    let view = polar_view(&state, &headers).await;
+    assert!(view["subscription"]["unbilled_from_plan_id"].is_null());
 
     // Polar retries a declined renewal; the instances keep running meanwhile.
     polar.set("sub_1", "status", "past_due".into());
@@ -5417,6 +5468,7 @@ async fn a_polar_free_trial_is_shown_and_a_plan_change_during_it_charges_nothing
     let view = serde_json::to_value(view).unwrap();
     assert_eq!(view["subscription"]["plan_id"], large.to_string());
     assert!(view["subscription"]["pending_plan_id"].is_null());
+    // During a trial nothing is billed either way.
     assert_eq!(
         polar.changes()[0].1,
         serde_json::json!({"product_id": "prod_large", "proration_behavior": "invoice"})

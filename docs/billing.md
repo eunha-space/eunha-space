@@ -434,16 +434,17 @@ against production every hour and logged as unknown.
 
 ### Free trials
 
-A trial is set on the Polar product, never here: Polar takes the card at
-checkout, charges nothing until the trial ends, emails a reminder three days
-before, and then bills the first period. The checkout does not override the
-product's trial. Linking a product, its `product.updated` webhook and
-**Refresh** read its trial into `plans.polar_trial_interval` and
-`polar_trial_interval_count`, which Pricing, the account page and the
-billing page show. TossPayments has no trial, so Korean cards pay from the
-first day.
+International subscriptions have no free trial. The checkout is created with
+`allow_trial: false`, so a trial set on the Polar product is not offered.
+A trial's first charge is the one card holders forget and dispute, and each
+dispute costs $15 at Polar whatever its outcome, against a refund's lost fee
+of well under a dollar. The first payment's seven-day refund takes the
+trial's place, as the refund window does for Korean cards. Linking a product,
+its `product.updated` webhook and **Refresh** still read its trial into
+`plans.polar_trial_interval` and `polar_trial_interval_count`, which the
+Plans page shows as "not offered".
 
-A subscription Polar calls `trialing` runs its instances like an active one.
+Subscriptions that started a trial before this keep it. A subscription Polar calls `trialing` runs its instances like an active one.
 Its `trial_started_at` and `trial_ends_at` are mirrored while the trial
 lasts. The account page then names the trial's end as the first charge. The
 billing page counts it under **In a free trial** rather than **Active**, and
@@ -501,9 +502,23 @@ so that an operator can refund and revoke it in Polar's dashboard.
 
 ### Plan changes, refunds and the portal
 
-An upgrade is sent with `proration_behavior: invoice`, so Polar charges the
-difference at once and applies the change only if that charge succeeds. A
-downgrade is sent with `next_period`, and choosing the current plan again
+An upgrade is sent with `proration_behavior: prorate`: it applies at once, and
+Polar adds the difference for the rest of the period to the next renewal's
+invoice. That keeps international cards to one charge a month, each one a
+fee and a chance of a dispute. TossPayments upgrades are still charged at
+once (above): Korean card fees have no fixed part and disputes are rare.
+
+Until that renewal is paid, the plan the upgrade moved from is kept in
+`subscriptions.unbilled_from_plan_id` (the earliest of the period, with
+`unbilled_since`). Polar does not say what happens to a carried difference
+when a subscription is cancelled before the renewal that bills it, so
+cancelling first moves the subscription back to that plan, also with
+`prorate`, so the credit nets out the difference. Otherwise an upgrade
+followed by a cancellation would be free until the period ends. The cancel
+confirmation says so. A paid `subscription_cycle` order created after
+`unbilled_since` clears it, as does the subscription ending.
+
+A downgrade is sent with `next_period`, and choosing the current plan again
 clears the pending update. The plan has to be sold in the subscription's
 currency.
 
@@ -516,10 +531,9 @@ new plan's price at once. The confirmation says which, from the plan's
 `trial_until`.
 
 A customer can ask back only the account's first Polar payment (its first
-`renewal`, which after a free trial is the first charge), within seven days,
-and only if the account has never had a refund of its own. Polar keeps its
-fee on every refund, and the trial is where an international card tries the
-service, so this is for one who forgot to cancel. Any other Polar payment is
+`renewal`), within seven days, and only if the account has never had a
+refund of its own. Polar keeps its fee on every refund, so this is the trial
+an international card gets: one try, given back if it doesn't suit. Any other Polar payment is
 an operator's call from `/admin/billing`, which is bound by none of this.
 TossPayments payments are not limited this way. The rule is
 `POLAR_SELF_REFUND` in *src/billing_sync.rs*, shown on Pricing and the

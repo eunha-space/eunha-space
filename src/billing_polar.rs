@@ -962,6 +962,14 @@ pub(crate) async fn sync_order(s: &Shared, order: &Order) -> Result<()> {
         .bind(order.currency.to_ascii_uppercase())
         .execute(&mut *tx)
         .await?;
+    // A renewal invoiced after an upgrade carries its difference: paid now.
+    if order.billing_reason == "subscription_cycle" {
+        sqlx::query("UPDATE subscriptions SET unbilled_from_plan_id=NULL,unbilled_since=NULL WHERE user_id=$1 AND unbilled_since<$2")
+            .bind(user_id)
+            .bind(order.created_at)
+            .execute(&mut *tx)
+            .await?;
+    }
     if inserted.rows_affected() > 0 {
         record(
             &mut tx,
@@ -1145,6 +1153,9 @@ pub(crate) async fn checkout(
         .await?;
     let mut body = serde_json::json!({
         "products": [product_id],
+        // International subscriptions have no free trial, whatever the
+        // product says: a trial's first charge is what gets disputed.
+        "allow_trial": false,
         "external_customer_id": user_id.to_string(),
         "customer_email": email,
         "currency": polar.currency.to_ascii_lowercase(),
@@ -1261,6 +1272,35 @@ pub(crate) async fn cancel(
             StatusCode::CONFLICT,
             "There is no subscription to cancel.".into(),
         ));
+    }
+    // An upgrade not billed yet would otherwise be kept for free until the
+    // period ends: cancelling returns the plan that was paid for. Its credit
+    // nets out the upgrade's difference on an invoice that never comes.
+    let unbilled = sqlx::query_scalar::<_, String>(
+        "SELECT p.polar_product_id FROM subscriptions s JOIN plans p ON p.id=s.unbilled_from_plan_id WHERE s.user_id=$1 AND s.unbilled_from_plan_id IS DISTINCT FROM s.plan_id AND p.polar_product_id IS NOT NULL",
+    )
+    .bind(user_id)
+    .fetch_optional(&s.db)
+    .await?;
+    if let (Some(product_id), "active") = (unbilled, status.as_str()) {
+        polar
+            .update_subscription(
+                subscription_id,
+                serde_json::json!({ "product_id": product_id, "proration_behavior": "prorate" }),
+            )
+            .await
+            .map_err(|error| error.into_api("This subscription"))?;
+        let mut tx = s.db.begin().await?;
+        record(
+            &mut tx,
+            user_id,
+            "subscription_plan",
+            "succeeded",
+            serde_json::json!({ "provider": "polar", "change": "unbilled_upgrade_returned" }),
+            None,
+        )
+        .await?;
+        tx.commit().await?;
     }
     let subscription = if status == "past_due" {
         polar.revoke(subscription_id).await
@@ -1383,10 +1423,13 @@ pub(crate) async fn change_plan(
         .ok_or_else(|| ApiError(StatusCode::CONFLICT, "This plan is not available.".into()))?;
         // During a trial Polar moves the trial to the new product, so the
         // change starts now and nothing is charged until the trial ends.
+        // Otherwise an upgrade starts now and its difference goes on the next
+        // renewal's invoice: one charge a month, each one a card charge
+        // that can be disputed.
         if new_amount > amount && !trialing {
             (
-                "now",
-                serde_json::json!({ "product_id": product_id, "proration_behavior": "invoice" }),
+                "upgrade",
+                serde_json::json!({ "product_id": product_id, "proration_behavior": "prorate" }),
             )
         } else {
             let mut tx = s.db.begin().await?;
@@ -1416,6 +1459,14 @@ pub(crate) async fn change_plan(
         .await
         .map_err(|error| error.into_api("This plan"))?;
     let mut tx = s.db.begin().await?;
+    if change == "upgrade" {
+        // The earliest plan of the period stays: that is what was paid for.
+        sqlx::query("UPDATE subscriptions SET unbilled_from_plan_id=COALESCE(unbilled_from_plan_id,$2),unbilled_since=COALESCE(unbilled_since,now()) WHERE user_id=$1")
+            .bind(user_id)
+            .bind(current_plan)
+            .execute(&mut *tx)
+            .await?;
+    }
     record(
         &mut tx,
         user_id,
