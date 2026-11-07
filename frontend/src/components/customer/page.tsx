@@ -74,17 +74,25 @@ export function BackLink({ href, label }: { href: string; label: string }) {
 
 /** One topic on a page. */
 export function SectionCard(
-  { title, badge, description, highlight = false, children }: {
+  { title, badge, description, highlight = false, success = false, children }: {
     title: ReactNode;
     badge?: ReactNode;
     description?: ReactNode;
     /** For the section the reader has to act on first. */
     highlight?: boolean;
+    /** For a section whose setup is done, tinted so it reads at a glance. */
+    success?: boolean;
     children?: ReactNode;
   },
 ) {
   return (
-    <Card className={highlight ? "ring-primary/40" : undefined}>
+    <Card
+      className={highlight
+        ? "ring-primary/40"
+        : success
+        ? "bg-success/10 ring-success/40"
+        : undefined}
+    >
       <CardHeader>
         <CardTitle>
           <h2 className="flex flex-wrap items-center gap-2">
@@ -204,6 +212,7 @@ export function Detail({ label, children }: { label: string; children: ReactNode
 
 const BADGE_TONE = {
   ok: { variant: "secondary", className: undefined },
+  success: { variant: "outline", className: "border-success/40 bg-success/10 text-success" },
   waiting: { variant: "outline", className: "text-pending" },
   problem: { variant: "destructive", className: undefined },
   neutral: { variant: "outline", className: "text-muted-foreground" },

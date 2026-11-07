@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useLingui } from "@lingui/react";
+import { CircleCheck } from "lucide-react";
 import { api, errorMessage } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -60,9 +61,15 @@ export function CustomerSmtp({ tenantId }: { tenantId: string }) {
   return (
     <SectionCard
       highlight={loaded && !configured}
+      success={loaded && configured}
       title={t("Email delivery")}
       badge={loaded && (configured
-        ? <StateBadge tone="ok">{t("Configured")}</StateBadge>
+        ? (
+          <StateBadge tone="success">
+            <CircleCheck />
+            {t("Configured")}
+          </StateBadge>
+        )
         : <StateBadge tone="problem">{t("Not configured")}</StateBadge>)}
       description={!loaded || configured
         ? t("Your instance sends email through the SMTP server below. To change it, enter the credentials again and save.")
