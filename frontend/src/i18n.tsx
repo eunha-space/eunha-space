@@ -142,10 +142,11 @@ const ko: Record<string, string> = {
   "Custom domain setup": "커스텀 도메인 설정",
   Connected: "연결됨",
   "Waiting for DNS": "DNS 설정 대기 중",
+  "Check DNS again": "DNS 다시 확인",
+  "DNS check requested. This page updates automatically.": "DNS 확인을 요청했습니다. 결과는 이 페이지에 자동으로 표시됩니다.",
   "Add this CNAME record at your DNS provider.":
     "도메인의 DNS 설정에 다음 CNAME 레코드를 추가하세요.",
-  "If requested, also add this verification record.":
-    "요청되는 경우 다음 확인 레코드도 추가하세요.",
+  "Add this TXT record to verify domain ownership.": "도메인 소유권 확인을 위해 아래 TXT 레코드도 추가해 주세요.",
   "Instance setup": "인스턴스 설정",
   "Your instance is ready to use.": "인스턴스를 사용할 수 있습니다.",
   "This page updates automatically while we set things up.":

@@ -1005,6 +1005,10 @@ async fn main() -> Result<()> {
             "/customer/tenants/{id}/domain-change/cancel",
             post(domain_change::customer_cancel),
         )
+        .route(
+            "/customer/tenants/{id}/dns-check",
+            post(customer_recheck_dns),
+        )
         .route("/customer/dns-check", get(customer_dns_check))
         .route("/customer/plans", get(billing::public_plans))
         .route("/customer/billing", get(billing::get))
@@ -3038,6 +3042,27 @@ const RETENTION_BEFORE_PURGE: &str = "7 days";
 #[derive(Deserialize)]
 struct DnsCheckQuery {
     hostname: String,
+}
+
+async fn customer_recheck_dns(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    let (user_id, _) = customer(&headers, &s.db).await?;
+    // Keep the reconciler's minimum interval and bring forward its next retry.
+    sqlx::query(
+        "UPDATE tenant_domains d SET next_check_at=now()
+         FROM tenants t
+         WHERE d.tenant_id=t.id AND t.id=$1 AND t.user_id=$2
+           AND t.lifecycle_state IN ('provisioning','ready','failed')
+           AND d.kind='custom' AND d.status='pending' AND d.next_check_at > now()",
+    )
+    .bind(id)
+    .bind(user_id)
+    .execute(&s.db)
+    .await?;
+    Ok(StatusCode::ACCEPTED)
 }
 
 /// Whether a hostname's CNAME already points at the custom-hostname target, so

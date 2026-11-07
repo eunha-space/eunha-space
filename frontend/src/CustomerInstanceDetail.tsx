@@ -714,6 +714,24 @@ function CustomDomainSetup(
 ) {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
+  const [checking, setChecking] = useState(false);
+  const [checkRequested, setCheckRequested] = useState(false);
+  const [checkError, setCheckError] = useState("");
+
+  async function checkAgain() {
+    setChecking(true);
+    setCheckRequested(false);
+    setCheckError("");
+    try {
+      await api(`/customer/tenants/${tenant.id}/dns-check`, { method: "POST" });
+      setCheckRequested(true);
+    } catch (failure) {
+      setCheckError(errorMessage(failure));
+    } finally {
+      setChecking(false);
+    }
+  }
+
   const done = domains.length > 0 &&
     domains.every((domain) => domain.status === "active") &&
     (!tenant.handle_domain || tenant.handle_domain_verified);
@@ -757,7 +775,7 @@ function CustomDomainSetup(
                 {domain.ownership_name && domain.ownership_value && (
                   <>
                     <p className="text-muted-foreground text-sm">
-                      {t("If requested, also add this verification record.")}
+                      {t("Add this TXT record to verify domain ownership.")}
                     </p>
                     <DnsRecord
                       type="TXT"
@@ -784,6 +802,22 @@ function CustomDomainSetup(
             )}
           </section>
         ))}
+        {domains.some((domain) => domain.status === "pending") && (
+          <div className="grid gap-2">
+            <div className="flex flex-wrap items-center gap-3">
+              <Button variant="outline" disabled={checking} onClick={() => void checkAgain()}>
+                {checking ? <Spinner label={t("In progress")} /> : <RotateCcw />}
+                {t("Check DNS again")}
+              </Button>
+              {checkRequested && (
+                <p role="status" className="text-muted-foreground text-sm">
+                  {t("DNS check requested. This page updates automatically.")}
+                </p>
+              )}
+            </div>
+            {checkError && <ErrorAlert message={checkError} />}
+          </div>
+        )}
         {tenant.handle_domain && (
           <HandleDomainSetup
             handleDomain={tenant.handle_domain}
