@@ -17,6 +17,13 @@ async fn service_history_is_private_scoped_persisted_and_reset_aware(pool: PgPoo
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query("UPDATE tenants SET handle_domain='handles.example' WHERE id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let inventory = service_usage::inventory(&pool).await.unwrap();
+    assert_eq!(inventory, vec![(id, runtime, "handles.example".to_owned())]);
     let now = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
     sqlx::query("INSERT INTO tenant_service_samples(tenant_id,sampled_at,epoch,requests,errors,duration_sum,duration_count,pool) VALUES($1,$2,'blue:1',10,1,1,10,2),($1,$3,'blue:1',30,3,5,30,3),($1,$4,'green:2',2,0,0.1,2,2)")
         .bind(id).bind(now-30000).bind(now-20000).bind(now-10000).execute(&pool).await.unwrap();

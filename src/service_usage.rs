@@ -192,13 +192,15 @@ async fn scrape(target: &Target, domains: &[String]) -> Option<HashMap<String, S
     Some(rows)
 }
 
+// Runtime telemetry uses LOCAL_DOMAIN, which can differ from the web domain.
+pub(crate) async fn inventory(db: &PgPool) -> Result<Vec<(Uuid, Uuid, String)>, sqlx::Error> {
+    sqlx::query_as("SELECT id,runtime_id,COALESCE(handle_domain,domain) FROM tenants WHERE lifecycle_state IN ('ready','failed')")
+        .fetch_all(db).await
+}
+
 pub(crate) async fn collect(s: &Shared) -> Result<(), ApiError> {
     let targets=sqlx::query_as::<_,Target>("SELECT r.id,i.address,r.tenant_directory,r.service_label,r.blue_bind_address,r.green_bind_address,r.router_enabled FROM runtimes r JOIN instances i ON i.id=r.instance_id WHERE EXISTS(SELECT 1 FROM tenants t WHERE t.runtime_id=r.id AND t.lifecycle_state IN ('ready','failed'))").fetch_all(&s.db).await?;
-    let tenants = sqlx::query_as::<_, (Uuid, Uuid, String)>(
-        "SELECT id,runtime_id,domain FROM tenants WHERE lifecycle_state IN ('ready','failed')",
-    )
-    .fetch_all(&s.db)
-    .await?;
+    let tenants = inventory(&s.db).await?;
     let groups = stream::iter(targets.into_iter().map(|target| {
         let tenants = tenants
             .iter()
