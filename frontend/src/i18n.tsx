@@ -13,7 +13,10 @@ const ko: Record<string, string> = {
   "Billing terms": "결제 안내",
   "Open instance": "인스턴스 열기",
   "No payments yet.": "아직 결제 내역이 없습니다.",
-  "Refunds are available for 7 days after a payment.": "결제 후 7일 동안 환불할 수 있습니다.",
+  "Refunds are available for 7 days after a payment, latest payment first.":
+    "결제 후 7일 동안 환불할 수 있으며, 가장 최근 결제부터 환불합니다.",
+  "Refunds go latest payment first. Refund your later payments before this one.":
+    "환불은 가장 최근 결제부터 진행됩니다. 이후 결제를 먼저 환불해 주세요.",
   Site: "사이트",
   "Switch to the light theme": "밝은 테마로 전환",
   "Switch to the dark theme": "어두운 테마로 전환",

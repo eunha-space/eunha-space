@@ -222,8 +222,12 @@ What a refund does depends on who gave it back, which is
 - **A customer's own** full refund of any other payment ends a running
   subscription at once (`canceled`), retires its card and takes its instances
   offline with their data kept. Subscribing again starts a new period that day
-  at today's price and serves them again. Refunding the renewal for the period
-  being served also requests a refund of any upgrade charged for that period.
+  at today's price and serves them again.
+- Customers refund **latest payment first**: a payment can be asked back only
+  when every later one is refunded or failed (`LATEST_FIRST`). So no refund
+  takes another payment with it, and the confirmation's amount is all that
+  goes back. A renewal with an upgrade after it waits until the upgrade is
+  refunded, which returns the plan before it.
 - **An operator's**, from `/admin/billing` or the TossPayments dashboard, whose
   webhook below brings it into the ledger, returns the money and changes nothing
   else. The plan, the renewal and the instances all stay as they were, so the

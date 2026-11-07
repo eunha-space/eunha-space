@@ -28,7 +28,7 @@ const REFUND_POLICY_KO = [
   ],
   [
     "환불 후 이용",
-    "정기 결제를 환불하면 구독이 해지되고 인스턴스는 즉시 중단됩니다. 데이터는 보관되며, 다시 구독하면 이어서 이용할 수 있습니다. 요금제 업그레이드 결제를 환불하면 이전 요금제와 요금으로 돌아가며 구독은 계속됩니다. 이 경우 현재 기간의 가장 최근 업그레이드부터 환불할 수 있고, 이전 요금제의 인스턴스 한도를 넘는 인스턴스는 먼저 삭제해야 합니다.",
+    "정기 결제를 환불하면 구독이 해지되고 인스턴스는 즉시 중단됩니다. 데이터는 보관되며, 다시 구독하면 이어서 이용할 수 있습니다. 요금제 업그레이드 결제를 환불하면 이전 요금제와 요금으로 돌아가며 구독은 계속됩니다. 이전 요금제의 인스턴스 한도를 넘는 인스턴스는 먼저 삭제해야 합니다. 환불은 가장 최근 결제부터 신청할 수 있으며, 한 결제를 환불해도 다른 결제는 함께 환불되지 않습니다.",
   ],
   [
     "해지",
@@ -60,7 +60,7 @@ const REFUND_POLICY_EN = [
   ],
   [
     "After a refund",
-    "Refunding a recurring payment cancels your subscription and takes your instances offline at once. Their data is kept, and subscribing again lets you carry on. Refunding a plan upgrade returns you to your previous plan and its price, and your subscription goes on. Upgrades in the current period are refunded latest first, and instances over the previous plan's limit have to be deleted first.",
+    "Refunding a recurring payment cancels your subscription and takes your instances offline at once. Their data is kept, and subscribing again lets you carry on. Refunding a plan upgrade returns you to your previous plan and its price, and your subscription goes on. Instances over the previous plan's limit have to be deleted first. Refunds go latest payment first, and refunding one payment never refunds another with it.",
   ],
   [
     "Cancelling",

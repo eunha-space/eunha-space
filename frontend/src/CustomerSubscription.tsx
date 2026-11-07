@@ -720,7 +720,7 @@ export function SubscriptionSections(
             </Table>
         )}
       <p className="text-muted-foreground text-sm">
-        {billing.payments.length > 0 ? `${t("Refunds are available for 7 days after a payment.")} ` : ""}
+        {billing.payments.length > 0 ? `${t("Refunds are available for 7 days after a payment, latest payment first.")} ` : ""}
         <a href="/refund-policy" className="text-foreground underline underline-offset-4">
           {t("Refund policy")}
         </a>

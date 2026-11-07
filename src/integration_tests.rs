@@ -2599,7 +2599,7 @@ async fn renewed(pool: &PgPool, state: &Shared, user_id: Uuid) -> Vec<String> {
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
-async fn a_customer_refunding_an_earlier_period_ends_the_subscription_too(pool: PgPool) {
+async fn a_customer_refunds_periods_latest_first(pool: PgPool) {
     let (toss, base) = toss_stand_in().await;
     let state = billed_state(pool.clone(), &base);
     let (user_id, headers) = billed_customer(&pool).await;
@@ -2607,12 +2607,17 @@ async fn a_customer_refunding_an_earlier_period_ends_the_subscription_too(pool: 
     let id = ready_instance(&pool, user_id).await;
     let orders = renewed(&pool, &state, user_id).await;
 
-    let view = refund(&state, &headers, &orders[0]).await.unwrap();
+    // The earlier period waits for the later one.
+    assert_eq!(
+        refund(&state, &headers, &orders[0]).await.unwrap_err(),
+        StatusCode::CONFLICT
+    );
+    let view = refund(&state, &headers, &orders[1]).await.unwrap();
     assert_eq!(view["subscription"]["status"], "canceled");
     assert_eq!(view["subscription"]["has_card"], false);
     assert_eq!(lifecycle(&pool, id).await.0, "deprovisioning");
-    // The other payment can still be given back, and ends nothing more.
-    let view = refund(&state, &headers, &orders[1]).await.unwrap();
+    // Then it can be given back too, and ends nothing more.
+    let view = refund(&state, &headers, &orders[0]).await.unwrap();
     assert!(
         view["payments"]
             .as_array()
@@ -2736,7 +2741,21 @@ async fn a_refund_tosspayments_refuses_is_withdrawn_and_renewals_resume(pool: Pg
     assert!(billing::charge_due(&state, None).await.unwrap());
     assert_eq!(toss.charges().len(), 2);
 
-    // And it can be asked for again.
+    // And it can be asked for again, after the renewal since: latest first.
+    toss.refuse_cancel
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        refund(&state, &headers, &order_id).await.unwrap_err(),
+        StatusCode::CONFLICT
+    );
+    let renewal: String = sqlx::query_scalar(
+        "SELECT order_id FROM subscription_payments WHERE user_id=$1 ORDER BY period DESC LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    refund(&state, &headers, &renewal).await.unwrap();
     let view = refund(&state, &headers, &order_id).await.unwrap();
     assert_eq!(
         view["payments"]
@@ -3618,26 +3637,42 @@ async fn a_customer_refunding_an_upgrade_returns_the_plan_before_it_and_an_opera
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
-async fn refunding_the_period_also_refunds_its_upgrade(pool: PgPool) {
+async fn refunds_go_latest_payment_first(pool: PgPool) {
     let (_toss, base) = toss_stand_in().await;
     let state = billed_state(pool.clone(), &base);
     let (user_id, headers) = billed_customer(&pool).await;
     let view = subscribe(&state, &headers).await;
     let first = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
     let big = plan(&pool, 19900, None).await;
-    change_plan(&state, &headers, big).await.unwrap();
+    let view = change_plan(&state, &headers, big).await.unwrap();
+    let upgrade = view["payments"][0]["order_id"].as_str().unwrap().to_owned();
 
+    // The renewal waits for the upgrade after it.
+    assert_eq!(view["payments"][0]["refundable"], true);
+    assert_eq!(view["payments"][1]["refundable"], false);
+    assert_eq!(
+        refund(&state, &headers, &first).await.unwrap_err(),
+        StatusCode::CONFLICT
+    );
+    let view = refund(&state, &headers, &upgrade).await.unwrap();
+    assert_eq!(view["subscription"]["status"], "active");
+    while billing_sync::refund_due(&state, None).await.unwrap() {}
+
+    // Then it can go, and takes nothing else with it.
+    let view = billing::view(&state, user_id).await.unwrap();
+    let view = serde_json::to_value(view).unwrap();
+    assert_eq!(view["payments"][1]["refundable"], true);
     let view = refund(&state, &headers, &first).await.unwrap();
     assert_eq!(view["subscription"]["status"], "canceled");
     while billing_sync::refund_due(&state, None).await.unwrap() {}
-    let unrefunded: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM subscription_payments WHERE user_id=$1 AND status<>'refunded'",
+    let refunded: Vec<String> = sqlx::query_scalar(
+        "SELECT order_id FROM subscription_payments WHERE user_id=$1 AND status='refunded' ORDER BY requested_at",
     )
     .bind(user_id)
-    .fetch_one(&pool)
+    .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(unrefunded, 0);
+    assert_eq!(refunded, vec![first, upgrade]);
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -5439,7 +5474,8 @@ async fn only_the_first_polar_payment_can_be_refunded_by_its_customer(pool: PgPo
             )
         })
         .collect();
-    assert_eq!(refundable["ord_1"], true);
+    // The first waits for the renewal after it: latest first.
+    assert_eq!(refundable["ord_1"], false);
     assert_eq!(refundable["ord_2"], false);
     // The renewal is not the customer's to give back, but an operator's.
     assert_eq!(
@@ -5452,6 +5488,15 @@ async fn only_the_first_polar_payment_can_be_refunded_by_its_customer(pool: PgPo
             .unwrap(),
         StatusCode::NO_CONTENT
     );
+    while billing_sync::refund_due(&state, None).await.unwrap() {}
+    let view = polar_view(&state, &headers).await;
+    let first = view["payments"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["order_id"] == "ord_1")
+        .unwrap();
+    assert_eq!(first["refundable"], true);
 
     // A customer who has had a refund of their own gets no second one: here
     // an earlier TossPayments refund they asked for.
@@ -5532,12 +5577,12 @@ async fn paused_signups_refuse_new_subscriptions_only(pool: PgPool) {
     );
 
     // A subscription that runs can still change its card while paused.
-    set(serde_json::json!({"toss_signups": true}))
+    let _ = set(serde_json::json!({"toss_signups": true}))
         .await
         .unwrap();
     let view = subscribe(&state, &headers).await;
     assert_eq!(view["subscription"]["status"], "active");
-    set(serde_json::json!({"toss_signups": false}))
+    let _ = set(serde_json::json!({"toss_signups": false}))
         .await
         .unwrap();
     assert!(
@@ -5608,7 +5653,7 @@ async fn an_upgrade_charges_only_the_amount_the_customer_was_shown(pool: PgPool)
     );
 
     // The amount shown is the amount charged.
-    choose(shown["switch_charge"].as_i64().unwrap())
+    let _ = choose(shown["switch_charge"].as_i64().unwrap())
         .await
         .unwrap();
     assert_eq!(

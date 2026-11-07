@@ -18,7 +18,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use serde::Deserialize;
-use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
@@ -44,6 +43,10 @@ pub(crate) const REFUND_WINDOW: &str = "7 days";
 /// moved from. An earlier one is refunded after the later ones, and one from a
 /// period already over is an operator's call.
 pub(crate) const UPGRADE_SELF_REFUND: &str = "(p.kind<>'upgrade' OR (p.from_plan_id IS NOT NULL AND p.from_amount IS NOT NULL AND EXISTS(SELECT 1 FROM subscriptions s WHERE s.user_id=p.user_id AND s.status IN ('active','past_due') AND s.plan_id=p.plan_id AND s.current_period_end=p.period_end)))";
+
+/// Whether payment `p` is the latest a customer can still ask back: refunds
+/// go latest first, so none ever takes another payment back with it.
+pub(crate) const LATEST_FIRST: &str = "NOT EXISTS(SELECT 1 FROM subscription_payments l WHERE l.user_id=p.user_id AND l.requested_at>p.requested_at AND l.status='paid' AND l.refunded_amount=0)";
 
 pub(crate) const POLAR_SELF_REFUND: &str = "(p.provider<>'polar' OR (p.kind='renewal' AND NOT EXISTS(SELECT 1 FROM subscription_payments e WHERE e.user_id=p.user_id AND e.provider='polar' AND e.kind='renewal' AND e.status IN ('paid','refunded') AND (e.settled_at,e.order_id)<(p.settled_at,p.order_id)) AND NOT EXISTS(SELECT 1 FROM subscription_payments r WHERE r.user_id=p.user_id AND r.order_id<>p.order_id AND r.refund_requested_by=r.user_id)))";
 
@@ -250,8 +253,8 @@ pub(crate) async fn start_refund(
         ));
     }
     let mut tx = s.db.begin().await?;
-    let (user_id, refundable, allowed) = sqlx::query_as::<_, (Uuid, bool, bool)>(&format!(
-        "SELECT p.user_id,p.status='paid' AND p.refunded_amount=0 AND p.refund_requested_at IS NULL AND (NOT $3 OR p.settled_at>now()-interval '{REFUND_WINDOW}') AND (p.payment_key IS NOT NULL OR p.provider='polar') AND (NOT $3 OR {UPGRADE_SELF_REFUND}),NOT $3 OR {POLAR_SELF_REFUND} FROM subscription_payments p WHERE p.order_id=$1 AND ($2::uuid IS NULL OR p.user_id=$2) FOR UPDATE OF p"
+    let (user_id, refundable, allowed, latest) = sqlx::query_as::<_, (Uuid, bool, bool, bool)>(&format!(
+        "SELECT p.user_id,p.status='paid' AND p.refunded_amount=0 AND p.refund_requested_at IS NULL AND (NOT $3 OR p.settled_at>now()-interval '{REFUND_WINDOW}') AND (p.payment_key IS NOT NULL OR p.provider='polar') AND (NOT $3 OR {UPGRADE_SELF_REFUND}),NOT $3 OR {POLAR_SELF_REFUND},NOT $3 OR {LATEST_FIRST} FROM subscription_payments p WHERE p.order_id=$1 AND ($2::uuid IS NULL OR p.user_id=$2) FOR UPDATE OF p"
     ))
     .bind(order_id)
     .bind(owner)
@@ -263,6 +266,12 @@ pub(crate) async fn start_refund(
         return Err(ApiError(
             StatusCode::CONFLICT,
             "This payment can no longer be refunded.".into(),
+        ));
+    }
+    if !latest {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Refunds go latest payment first. Refund your later payments before this one.".into(),
         ));
     }
     // Taking an upgrade back returns its old plan, which has to hold the
@@ -450,9 +459,10 @@ async fn withdraw_refund(s: &Shared, due: &DueRefund, reason: &str) -> anyhow::R
 
 /// Record what TossPayments has given back of a payment, from its own record:
 /// a refund asked for here, or one made in the TossPayments dashboard. A
-/// customer's own full refund ends the subscription and takes its instances
-/// offline at once, and one of the period being served takes that period's
-/// upgrades back with it. What an operator gives back, here or in the dashboard,
+/// customer's own full refund of an upgrade returns the plan before it; of
+/// anything else, it ends the subscription and takes its instances offline at
+/// once. Customers refund latest first (`LATEST_FIRST`), so nothing else goes
+/// back with it. What an operator gives back, here or in the dashboard,
 /// returns the money and changes nothing else.
 pub(crate) async fn apply_cancellation(
     s: &Shared,
@@ -461,8 +471,8 @@ pub(crate) async fn apply_cancellation(
 ) -> anyhow::Result<()> {
     let refunded = payment.refunded();
     let mut tx = s.db.begin().await?;
-    let Some((user_id, amount, previously, current_period, running, kind, requested_by, period_end, back_to)) = sqlx::query_as::<_, (Uuid, i64, i64, bool, bool, String, Option<Uuid>, OffsetDateTime, Option<(Uuid, i64)>)>(
-        "SELECT p.user_id,p.amount,p.refunded_amount,p.period_end=s.current_period_end,s.status IN ('active','past_due'),p.kind,p.refund_requested_by,p.period_end,CASE WHEN p.from_plan_id IS NOT NULL AND p.from_amount IS NOT NULL AND s.plan_id=p.plan_id THEN (p.from_plan_id,p.from_amount) END FROM subscription_payments p JOIN subscriptions s ON s.user_id=p.user_id JOIN users u ON u.id=p.user_id WHERE p.order_id=$1 AND p.status IN ('paid','refunded') FOR UPDATE OF p,s",
+    let Some((user_id, amount, previously, current_period, running, kind, requested_by, back_to)) = sqlx::query_as::<_, (Uuid, i64, i64, bool, bool, String, Option<Uuid>, Option<(Uuid, i64)>)>(
+        "SELECT p.user_id,p.amount,p.refunded_amount,p.period_end=s.current_period_end,s.status IN ('active','past_due'),p.kind,p.refund_requested_by,CASE WHEN p.from_plan_id IS NOT NULL AND p.from_amount IS NOT NULL AND s.plan_id=p.plan_id THEN (p.from_plan_id,p.from_amount) END FROM subscription_payments p JOIN subscriptions s ON s.user_id=p.user_id JOIN users u ON u.id=p.user_id WHERE p.order_id=$1 AND p.status IN ('paid','refunded') FOR UPDATE OF p,s",
     )
     .bind(order_id)
     .fetch_optional(&mut *tx)
@@ -517,15 +527,6 @@ pub(crate) async fn apply_cancellation(
     let ends = own && reverted.is_none();
     let mut suspended = Vec::new();
     if ends {
-        if current_period && kind != "upgrade" {
-            // The renewer carries these through like any other refund.
-            sqlx::query("UPDATE subscription_payments SET refund_requested_at=now(),refund_requested_by=$3,refund_next_attempt_at=now(),refund_error=NULL WHERE user_id=$1 AND kind='upgrade' AND period_end=$2 AND status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND (payment_key IS NOT NULL OR provider='polar')")
-                .bind(user_id)
-                .bind(period_end)
-                .bind(requested_by)
-                .execute(&mut *tx)
-                .await?;
-        }
         suspended = billing::end_subscription(&mut tx, user_id, "canceled").await?;
     }
     crate::billing_mail::refund(
