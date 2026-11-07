@@ -344,6 +344,12 @@ export function SubscriptionSections(
             <span className="tabular-nums">
               {price(plan)} {t("/ month")}
             </span>
+            {/* Either card can still pay on signing up; a change keeps the currency. */}
+            {choosing && polarOpen && internationalPrice(plan) && (
+              <span className="text-muted-foreground text-xs tabular-nums">
+                {t("International cards:")} {internationalPrice(plan)} {t("/ month")}
+              </span>
+            )}
             {limitLabel(plan) && (
               <span className="text-muted-foreground text-xs">{limitLabel(plan)}</span>
             )}
