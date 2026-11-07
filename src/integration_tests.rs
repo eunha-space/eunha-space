@@ -5586,6 +5586,56 @@ async fn only_the_first_polar_payment_can_be_refunded_by_its_customer(pool: PgPo
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_polar_renewal_is_announced_with_an_upgrades_difference(pool: PgPool) {
+    let (polar, base) = polar_stand_in().await;
+    let state = polar_state(pool.clone(), &base, None);
+    let (user_id, _) = billed_customer(&pool).await;
+    let (standard, large) = offer_polar_plans(&pool).await;
+    polar.holds_subscription("sub_1", user_id, "active", "prod_standard", 699);
+    polar_webhook(
+        &state,
+        "subscription.created",
+        serde_json::json!({"id": "sub_1"}),
+        true,
+    )
+    .await;
+    // Five days to the renewal of a thirty-day period, upgraded halfway.
+    sqlx::query("UPDATE subscriptions SET current_period_end=now()+interval '5 days',anchor_at=now()-interval '25 days',periods_paid=1,plan_id=$2,amount=1499,unbilled_from_plan_id=$3,unbilled_since=now()-interval '10 days' WHERE user_id=$1")
+        .bind(user_id)
+        .bind(large)
+        .bind(standard)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        billing_mail::schedule_renewal_notices(&state)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        billing_mail::schedule_renewal_notices(&state)
+            .await
+            .unwrap(),
+        0
+    );
+    let notice = emails(&pool, user_id)
+        .await
+        .into_iter()
+        .find(|email| email.0 == "renewal_notice")
+        .unwrap();
+    // $8.00 more a month for half the period: about $4.00.
+    assert!(
+        notice.2.contains(
+            "Polar, which bills international cards for us, will charge about $18.99: $14.99 for the month ahead, and about $4.00 for the rest of this period"
+        ),
+        "{}",
+        notice.2
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
 async fn paused_signups_refuse_new_subscriptions_only(pool: PgPool) {
     let (_toss, toss_base) = toss_stand_in().await;
     let (_polar, polar_base) = polar_stand_in().await;

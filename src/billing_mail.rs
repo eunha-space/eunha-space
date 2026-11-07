@@ -318,6 +318,86 @@ pub(crate) async fn schedule_renewal_notices(s: &Shared) -> Result<u64> {
         tx.commit().await?;
         written += 1;
     }
+    written += schedule_polar_renewal_notices(s).await?;
+    Ok(written)
+}
+
+/// The same reminder for subscriptions Polar bills, which sends receipts but
+/// no warning. A renewal after a Polar upgrade carries that upgrade's
+/// difference (`prorate`), so it is bigger than the plan's price, and an
+/// unexpected charge is what gets disputed. Polar does not say what it will
+/// charge, so the difference is worked out here the way it prorates, by the
+/// second from the upgrade, and called approximate.
+async fn schedule_polar_renewal_notices(s: &Shared) -> Result<u64> {
+    let due = sqlx::query_as::<_, (Uuid, i64, String, i64, String, String, bool)>(&format!(
+        "SELECT s.user_id,COALESCE(next.polar_amount,s.amount),s.currency,
+            CASE WHEN s.unbilled_from_plan_id IS DISTINCT FROM s.plan_id AND s.unbilled_since IS NOT NULL
+              THEN COALESCE(GREATEST(round((s.amount-f.polar_amount)::numeric*extract(epoch FROM s.current_period_end-s.unbilled_since)/NULLIF(extract(epoch FROM s.current_period_end-(s.anchor_at+make_interval(months => GREATEST(s.periods_paid-1,0)))),0)),0),0)::bigint
+              ELSE 0 END,
+            to_char(s.current_period_end AT TIME ZONE 'UTC','YYYY-MM-DD'),to_char(s.current_period_end,'YYYYMMDDHH24MISS'),coalesce(s.trial_ends_at>now(),false)
+        FROM subscriptions s LEFT JOIN plans next ON next.id=s.pending_plan_id LEFT JOIN plans f ON f.id=s.unbilled_from_plan_id
+        WHERE s.provider='polar' AND s.status='active' AND NOT s.cancel_at_period_end AND s.polar_live
+          AND s.current_period_end > now()+interval '{RENEWAL_NOTICE_TOO_LATE}'
+          AND s.current_period_end <= now()+interval '{RENEWAL_NOTICE}'
+          AND NOT EXISTS(SELECT 1 FROM billing_emails e WHERE e.dedupe_key='renewal:'||s.user_id||':'||to_char(s.current_period_end,'YYYYMMDDHH24MISS'))
+        LIMIT 200"
+    ))
+    .fetch_all(&s.db)
+    .await?;
+    let mut written = 0;
+    for (user_id, price, currency, carried, renews_on, period_key, trialing) in due {
+        let mut tx = s.db.begin().await?;
+        let language = language(&mut tx, user_id).await?;
+        let total = money(price + carried, &currency);
+        let price = money(price, &currency);
+        let carried = (carried > 0).then(|| money(carried, &currency));
+        let (subject, body) = match language {
+            Locale::En => {
+                let what = match (&carried, trialing) {
+                    (Some(carried), _) => format!(
+                        "about {total}: {price} for the month ahead, and about {carried} for the rest of this period on the plan you upgraded to"
+                    ),
+                    (None, true) => format!("{price}, the first charge after your free trial,"),
+                    (None, false) => price.clone(),
+                };
+                (
+                    format!("Your eunha space subscription renews on {renews_on}"),
+                    format!(
+                        "On {renews_on} (UTC), Polar, which bills international cards for us, will charge {what} to your card, plus any sales tax.\n\nNothing needs doing to keep it. To stop it, cancel before then on your account page; your instances keep running until the paid period ends. To use another card, open Manage billing there."
+                    ),
+                )
+            }
+            Locale::Ko => {
+                let what = match (&carried, trialing) {
+                    (Some(carried), _) => format!(
+                        "약 {total}(다음 한 달 요금 {price}, 그리고 업그레이드한 요금제의 이번 기간 남은 차액 약 {carried})"
+                    ),
+                    (None, true) => format!("무료 체험 후 첫 결제인 {price}"),
+                    (None, false) => price.clone(),
+                };
+                (
+                    format!("은하공간 구독이 {renews_on}에 갱신됩니다"),
+                    format!(
+                        "{renews_on}(UTC)에 해외 카드 결제를 맡고 있는 Polar가 {what}을 카드로 결제할 예정입니다. 세금이 있으면 함께 청구됩니다.\n\n계속 이용하려면 따로 하실 일은 없습니다. 갱신을 원하지 않으면 그 전에 계정 페이지에서 구독을 해지하세요. 결제한 기간이 끝날 때까지 인스턴스는 계속 운영됩니다. 다른 카드를 쓰려면 같은 곳의 결제 관리에서 변경할 수 있습니다."
+                    ),
+                )
+            }
+        };
+        enqueue(
+            &mut tx,
+            user_id,
+            Email {
+                kind: "renewal_notice",
+                dedupe_key: format!("renewal:{user_id}:{period_key}"),
+                language,
+                subject,
+                body,
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        written += 1;
+    }
     Ok(written)
 }
 

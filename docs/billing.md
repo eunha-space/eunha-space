@@ -333,7 +333,12 @@ configured, nothing is sent.
   digits, the period, the order id and TossPayments' receipt link.
 - **Renewal reminder**, seven days before a subscription renews: the date, the
   amount and the card, and how to cancel or change the card. Not sent for a
-  subscription set to end, or one renewing within a day.
+  subscription set to end, or one renewing within a day. Polar sends its own
+  receipts but no warning, so a Polar subscription gets this reminder too,
+  dated in UTC and naming Polar. Its renewal carries any upgrade's difference
+  (`prorate`), which Polar does not let us look up, so the reminder works it
+  out the way Polar prorates, by the second from `unbilled_since`, and says
+  "about". A larger charge than expected is what card holders dispute.
 - **Refund confirmation**, for every refund recorded. After a full refund it says
   that the subscription will not be charged again and the day its instances go
   offline.
