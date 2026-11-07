@@ -195,7 +195,7 @@ pub(crate) async fn begin(
     }
     let runtime = |runtime_id: Uuid| {
         sqlx::query_as::<_, Target>(
-            "SELECT r.name,i.address,r.deployed_ref FROM runtimes r JOIN instances i ON i.id=r.instance_id WHERE r.id=$1",
+            "SELECT r.name,h.address,r.deployed_ref FROM runtimes r JOIN hosts h ON h.id=r.host_id WHERE r.id=$1",
         )
         .bind(runtime_id)
     };
@@ -210,7 +210,7 @@ pub(crate) async fn begin(
         || to.address != configured_host
     {
         return Err(conflict(
-            "Both runtimes must be on the instance this control plane manages.",
+            "Both runtimes must be on the host this control plane manages.",
         ));
     }
     if sqlx::query_scalar::<_, bool>(

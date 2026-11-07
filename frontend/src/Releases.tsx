@@ -512,7 +512,7 @@ function RuntimesCard({
                 <div className="min-w-0">
                   <h3 className="text-sm font-semibold">{runtime.name}</h3>
                   <p className="text-muted-foreground mt-0.5 text-xs break-words">
-                    {runtime.instance_name} ({runtime.instance_address}) · {runtime.tenant_count} tenant
+                    {runtime.host_name} ({runtime.host_address}) · {runtime.tenant_count} tenant
                     {runtime.tenant_count === 1 ? "" : "s"}
                   </p>
                   <p
@@ -580,7 +580,7 @@ function RuntimesCard({
                   disabledReason="A release for this runtime is already in progress."
                   confirm={{
                     title: `Deploy the latest Eunha to ${runtime.name}?`,
-                    description: `This deploys the newest build to every tenant on ${runtime.name} (${runtime.tenant_count} tenant${runtime.tenant_count === 1 ? "" : "s"}) on ${runtime.instance_address} now, ahead of any rollout. The runtime restarts, and a failed health check restores the previous release.`,
+                    description: `This deploys the newest build to every tenant on ${runtime.name} (${runtime.tenant_count} tenant${runtime.tenant_count === 1 ? "" : "s"}) on ${runtime.host_address} now, ahead of any rollout. The runtime restarts, and a failed health check restores the previous release.`,
                     action: "Deploy now",
                   }}
                   onClick={() => act(`/runtimes/${runtime.id}/release`, `release-${runtime.id}`)}

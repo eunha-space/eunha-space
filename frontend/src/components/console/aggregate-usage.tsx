@@ -21,8 +21,8 @@ export function formatBytes(value: number) {
 export const formatNumber = (value: number) => oneDecimal.format(value);
 const number = formatNumber;
 
-export function AggregateUsage({ instanceId, readings, expected, now, loaded, minutes }: {
-  minutes: number; instanceId?: string; readings: UsageReading[]; expected: number; now: number; loaded: boolean;
+export function AggregateUsage({ hostId, readings, expected, now, loaded, minutes }: {
+  minutes: number; hostId?: string; readings: UsageReading[]; expected: number; now: number; loaded: boolean;
 }) {
   const [history, setHistory] = useState<AggregateHistory>();
   const [error, setError] = useState(false);
@@ -34,7 +34,7 @@ export function AggregateUsage({ instanceId, readings, expected, now, loaded, mi
       if (inFlight || document.hidden) return;
       inFlight = true;
       try {
-        const result = await api<AggregateHistory>(`/usage/history?minutes=${minutes}${instanceId ? `&instance_id=${encodeURIComponent(instanceId)}` : ""}`);
+        const result = await api<AggregateHistory>(`/usage/history?minutes=${minutes}${hostId ? `&host_id=${encodeURIComponent(hostId)}` : ""}`);
         if (!disposed) { setHistory(result); setError(false); }
       } catch { if (!disposed) setError(true); }
       finally { inFlight = false; }
@@ -44,7 +44,7 @@ export function AggregateUsage({ instanceId, readings, expected, now, loaded, mi
     const visible = () => { if (!document.hidden) void load(); };
     document.addEventListener("visibilitychange", visible);
     return () => { disposed = true; clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
-  }, [instanceId, minutes]);
+  }, [hostId, minutes]);
   const eligible = history?.eligible_tenants ?? expected;
   const fresh = readings.filter(row => now - row.sampled_at <= 30000);
   const reporting = fresh.filter(row => row.database_bytes !== null).length;

@@ -86,10 +86,10 @@ export function Tenants({ tenants, runtimes, channels, busy, act }: Props) {
   );
 
   const hostByRuntime = useMemo(
-    () => new Map(runtimes.map((runtime) => [runtime.name, runtime.instance_name])),
+    () => new Map(runtimes.map((runtime) => [runtime.name, runtime.host_name])),
     [runtimes],
   );
-  const hostCount = useMemo(() => new Set(runtimes.map((r) => r.instance_name)).size, [runtimes]);
+  const hostCount = useMemo(() => new Set(runtimes.map((r) => r.host_name)).size, [runtimes]);
 
   // Grouping only earns its headers once the fleet spans more than one instance.
   const [grouped, setGrouped] = useState<boolean | null>(null);
@@ -511,7 +511,7 @@ function CreateTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
           <div className="grid gap-4">
             <div className="grid gap-2"><Label htmlFor="tenant-subdomain">Eunha hostname</Label><div className="flex items-center"><Input id="tenant-subdomain" className="rounded-r-none" value={subdomain} onChange={(e) => setSubdomain(e.target.value.toLowerCase())} placeholder="example" pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?" required /><span className="border-input bg-muted text-muted-foreground flex h-9 items-center rounded-r-md border border-l-0 px-3 text-sm">.eunha.space</span></div></div>
             <div className="grid gap-2"><Label htmlFor="tenant-handle-domain">Handle domain</Label><Input id="tenant-handle-domain" value={handleDomain} onChange={(e) => setHandleDomain(e.target.value.toLowerCase())} placeholder="eunha.space" /><p className="text-muted-foreground text-sm">Optional, for eunha space's own instances: handles such as @nyx@eunha.space while the instance is served at its hostname. Neither can be changed afterwards.</p></div>
-            <div className="grid gap-2"><Label htmlFor="tenant-runtime">Runtime</Label><select id="tenant-runtime" className="border-input bg-background h-9 rounded-md border px-3 text-sm" value={selectedRuntime} onChange={(e) => setRuntimeId(e.target.value)} required>{runtimes.map((runtime) => <option key={runtime.id} value={runtime.id}>{runtime.instance_name} / {runtime.name}</option>)}</select></div>
+            <div className="grid gap-2"><Label htmlFor="tenant-runtime">Runtime</Label><select id="tenant-runtime" className="border-input bg-background h-9 rounded-md border px-3 text-sm" value={selectedRuntime} onChange={(e) => setRuntimeId(e.target.value)} required>{runtimes.map((runtime) => <option key={runtime.id} value={runtime.id}>{runtime.host_name} / {runtime.name}</option>)}</select></div>
           </div>
           <DialogFooter><Button type="submit" disabled={busy || !selectedRuntime}>{busy ? "Provisioning…" : "Provision tenant"}</Button></DialogFooter>
         </form>
@@ -576,7 +576,7 @@ function ImportTenantDialog({ runtimes, busy, act }: { runtimes: Runtime[]; busy
               <Input id="import-domain" value={domain} onChange={(e) => setDomain(e.target.value.toLowerCase())} placeholder="seoul.earth" required />
               <p className="text-muted-foreground text-xs">It keeps this domain. Its accounts&rsquo; identity is on it and remote servers know them there, so an import is never also a move.</p>
             </div>
-            <div className="grid gap-2"><Label htmlFor="import-runtime">Runtime</Label><select id="import-runtime" className="border-input bg-background h-9 rounded-md border px-3 text-sm" value={selectedRuntime} onChange={(e) => setRuntimeId(e.target.value)} required>{runtimes.map((runtime) => <option key={runtime.id} value={runtime.id}>{runtime.instance_name} / {runtime.name}</option>)}</select></div>
+            <div className="grid gap-2"><Label htmlFor="import-runtime">Runtime</Label><select id="import-runtime" className="border-input bg-background h-9 rounded-md border px-3 text-sm" value={selectedRuntime} onChange={(e) => setRuntimeId(e.target.value)} required>{runtimes.map((runtime) => <option key={runtime.id} value={runtime.id}>{runtime.host_name} / {runtime.name}</option>)}</select></div>
             <Separator />
             <div className="grid gap-2">
               <Label htmlFor="import-dump">Database dump</Label>
@@ -734,9 +734,9 @@ function MoveDialog({
   const [target, setTarget] = useState("");
   const current = runtimes.find((runtime) => runtime.name === tenant.runtime_name);
   const channelName = (id: string | null) => channels.find((channel) => channel.id === id)?.name ?? "no channel";
-  // Moves are between runtimes on one instance; the control plane manages one.
+  // Moves are between runtimes on one host; the control plane manages one.
   const targets = runtimes.filter(
-    (runtime) => runtime.id !== current?.id && runtime.instance_id === current?.instance_id,
+    (runtime) => runtime.id !== current?.id && runtime.host_id === current?.host_id,
   );
   const selected = target || targets[0]?.id || "";
   const open_ = move !== null && move.finished_at === null;

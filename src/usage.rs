@@ -59,7 +59,7 @@ FROM readings GROUP BY tenant_id,sampled_at/$3 ORDER BY sampled_at/$3"#)
 
 #[derive(Default, Deserialize)]
 pub(crate) struct AggregateScope {
-    pub instance_id: Option<Uuid>,
+    pub host_id: Option<Uuid>,
     #[serde(flatten)]
     pub range: usage_range::Range,
 }
@@ -96,7 +96,7 @@ pub(crate) async fn aggregate_history(
             JOIN tenant_configuration c ON c.tenant_id=t.id
             JOIN runtimes r ON r.id=t.runtime_id
             WHERE t.lifecycle_state IN ('ready','failed','retained')
-              AND ($1::uuid IS NULL OR r.instance_id=$1)
+              AND ($1::uuid IS NULL OR r.host_id=$1)
         ), previous AS (
             SELECT u.*,lag(sampled_at) OVER w previous_at,
                 lag(transactions) OVER w previous_transactions,
@@ -134,7 +134,7 @@ pub(crate) async fn aggregate_history(
         ) SELECT jsonb_build_object(
             'eligible_tenants',(SELECT count(*) FROM eligible),
             'samples',COALESCE((SELECT jsonb_agg(to_jsonb(t) ORDER BY sampled_at) FROM rolled t),'[]'::jsonb))
-        "#).bind(scope.instance_id).bind(cutoff).bind(bucket).fetch_one(&s.db).await?;
+        "#).bind(scope.host_id).bind(cutoff).bind(bucket).fetch_one(&s.db).await?;
     Ok(Json(history))
 }
 

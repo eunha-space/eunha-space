@@ -16,3 +16,9 @@ restoring the instance before then cancels it.
 The control plane is deployed from outside this repository, from what CI
 builds for a commit on `origin/main`. After completing and verifying changes,
 push them to `origin/main`; do not copy patches to production.
+
+Words: an **instance** is a customer's Mastodon site, as Mastodon and Eunha
+use the word; the code and schema call it a **tenant**. A **runtime** is one
+eunha process serving many tenants, and a **host** is a machine running
+runtimes. Never call a host an instance or a server: customers and the
+fediverse already use both words for their sites.

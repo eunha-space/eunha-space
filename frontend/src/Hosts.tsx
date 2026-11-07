@@ -9,17 +9,16 @@ import { EmptyState } from "@/components/console/status";
 import { cn } from "cn";
 
 /**
- * The physical fleet: each instance and the shared runtimes it carries. An
- * instance is a host row in the control plane, so several runtimes can
- * legitimately share one.
+ * The physical fleet: each host and the shared runtimes it carries. Several
+ * runtimes can legitimately share one.
  */
-export function Instances({ runtimes, tenants }: { runtimes: Runtime[]; tenants: Tenant[] }) {
-  const instances = useMemo(() => {
+export function Hosts({ runtimes, tenants }: { runtimes: Runtime[]; tenants: Tenant[] }) {
+  const hosts = useMemo(() => {
     const grouped = new Map<string, Runtime[]>();
     for (const runtime of runtimes) {
-      const existing = grouped.get(runtime.instance_name);
+      const existing = grouped.get(runtime.host_name);
       if (existing) existing.push(runtime);
-      else grouped.set(runtime.instance_name, [runtime]);
+      else grouped.set(runtime.host_name, [runtime]);
     }
     return [...grouped.entries()].sort(([a], [b]) => a.localeCompare(b));
   }, [runtimes]);
@@ -34,37 +33,37 @@ export function Instances({ runtimes, tenants }: { runtimes: Runtime[]; tenants:
     return grouped;
   }, [tenants]);
 
-  if (instances.length === 0) {
+  if (hosts.length === 0) {
     return (
       <Card className="p-0">
-        <EmptyState icon={<HardDrive />}>No instances are registered.</EmptyState>
+        <EmptyState icon={<HardDrive />}>No hosts are registered.</EmptyState>
       </Card>
     );
   }
 
   return (
     <div className="grid gap-3">
-      {instances.map(([instanceName, instanceRuntimes]) => {
-        const instanceTenants = instanceRuntimes.reduce(
+      {hosts.map(([hostName, hostRuntimes]) => {
+        const hostTenants = hostRuntimes.reduce(
           (total, runtime) => total + runtime.tenant_count,
           0,
         );
-        const instanceAddress = instanceRuntimes[0]?.instance_address;
+        const hostAddress = hostRuntimes[0]?.host_address;
         return (
-          <Card key={instanceName} className="gap-0 overflow-hidden p-0">
+          <Card key={hostName} className="gap-0 overflow-hidden p-0">
             <CardHeader className="flex flex-row items-center gap-3 px-4 py-3">
               <HardDrive className="text-muted-foreground" />
               <div className="min-w-0 flex-1">
-                <CardTitle className="font-mono text-base">{instanceName}</CardTitle>
+                <CardTitle className="font-mono text-base">{hostName}</CardTitle>
                 <CardDescription className="text-xs">
-                  {instanceAddress} · {instanceRuntimes.length} runtime
-                  {instanceRuntimes.length === 1 ? "" : "s"} · {instanceTenants} tenant
-                  {instanceTenants === 1 ? "" : "s"}
+                  {hostAddress} · {hostRuntimes.length} runtime
+                  {hostRuntimes.length === 1 ? "" : "s"} · {hostTenants} tenant
+                  {hostTenants === 1 ? "" : "s"}
                 </CardDescription>
               </div>
             </CardHeader>
             <Separator />
-            {instanceRuntimes.map((runtime, index) => (
+            {hostRuntimes.map((runtime, index) => (
               <div
                 key={runtime.id}
                 className={index > 0 ? "border-border border-t px-4 py-3" : "px-4 py-3"}

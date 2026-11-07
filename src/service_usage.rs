@@ -24,7 +24,7 @@ pub(crate) struct Sample {
 #[derive(Default, Deserialize)]
 pub(crate) struct Scope {
     pub tenant_id: Option<Uuid>,
-    pub instance_id: Option<Uuid>,
+    pub host_id: Option<Uuid>,
     #[serde(flatten)]
     pub range: usage_range::Range,
 }
@@ -59,8 +59,8 @@ pub(crate) async fn history(
     Query(scope): Query<Scope>,
 ) -> Result<Json<History>, ApiError> {
     admin_user(&headers, &s.db).await?;
-    let ids = sqlx::query_scalar::<_, Uuid>("SELECT t.id FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.lifecycle_state IN ('ready','failed') AND ($1::uuid IS NULL OR t.id=$1) AND ($2::uuid IS NULL OR r.instance_id=$2)")
-        .bind(scope.tenant_id).bind(scope.instance_id).fetch_all(&s.db).await?;
+    let ids = sqlx::query_scalar::<_, Uuid>("SELECT t.id FROM tenants t JOIN runtimes r ON r.id=t.runtime_id WHERE t.lifecycle_state IN ('ready','failed') AND ($1::uuid IS NULL OR t.id=$1) AND ($2::uuid IS NULL OR r.host_id=$2)")
+        .bind(scope.tenant_id).bind(scope.host_id).fetch_all(&s.db).await?;
     let (cutoff, bucket) = scope.range.bounds(now())?;
     let SqlJson(history)=sqlx::query_scalar::<_,SqlJson<History>>(r#"
 WITH previous AS (
@@ -199,7 +199,7 @@ pub(crate) async fn inventory(db: &PgPool) -> Result<Vec<(Uuid, Uuid, String)>, 
 }
 
 pub(crate) async fn collect(s: &Shared) -> Result<(), ApiError> {
-    let targets=sqlx::query_as::<_,Target>("SELECT r.id,i.address,r.tenant_directory,r.service_label,r.blue_bind_address,r.green_bind_address,r.router_enabled FROM runtimes r JOIN instances i ON i.id=r.instance_id WHERE EXISTS(SELECT 1 FROM tenants t WHERE t.runtime_id=r.id AND t.lifecycle_state IN ('ready','failed'))").fetch_all(&s.db).await?;
+    let targets=sqlx::query_as::<_,Target>("SELECT r.id,h.address,r.tenant_directory,r.service_label,r.blue_bind_address,r.green_bind_address,r.router_enabled FROM runtimes r JOIN hosts h ON h.id=r.host_id WHERE EXISTS(SELECT 1 FROM tenants t WHERE t.runtime_id=r.id AND t.lifecycle_state IN ('ready','failed'))").fetch_all(&s.db).await?;
     let tenants = inventory(&s.db).await?;
     let groups = stream::iter(targets.into_iter().map(|target| {
         let tenants = tenants

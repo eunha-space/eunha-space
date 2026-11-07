@@ -306,12 +306,12 @@ export type Operation = {
 
 export type Runtime = {
   id: string;
-  instance_id: string;
+  host_id: string;
   name: string;
-  /** Stable operator-facing name of the physical instance. */
-  instance_name: string;
-  /** Address of the instance the runtime runs on, from the instances table. */
-  instance_address: string;
+  /** Stable operator-facing name of the host. */
+  host_name: string;
+  /** Address of the host the runtime runs on, from the hosts table. */
+  host_address: string;
   bind_address: string;
   service_label: string;
   tenant_directory: string;

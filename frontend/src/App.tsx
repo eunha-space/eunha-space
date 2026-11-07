@@ -25,7 +25,7 @@ import {
 import { relativeTime } from "@/format";
 import { BILLING_PAGES, Billing, billingPage } from "@/Billing";
 import { Usage } from "@/Usage";
-import { Instances } from "@/Instances";
+import { Hosts } from "@/Hosts";
 import { Operations } from "@/Operations";
 import { Releases } from "@/Releases";
 import { Tenants } from "@/Tenants";
@@ -212,7 +212,7 @@ export function App() {
   const sections: { id: View; label: string; icon: typeof Server }[] = [
     { id: "tenants", label: "Tenants", icon: Server },
     { id: "usage", label: "Resource usage", icon: Activity },
-    { id: "instances", label: "Instances", icon: HardDrive },
+    { id: "hosts", label: "Hosts", icon: HardDrive },
     { id: "releases", label: "Releases", icon: Rocket },
     { id: "users", label: "Users", icon: UsersRound },
     { id: "billing", label: "Billing", icon: CreditCard },
@@ -382,8 +382,8 @@ export function App() {
             />
           )}
           {view === "usage" && <Usage tenants={tenants} runtimes={runtimes} />}
-          {view === "instances" && (
-            <Instances runtimes={runtimes} tenants={tenants} />
+          {view === "hosts" && (
+            <Hosts runtimes={runtimes} tenants={tenants} />
           )}
           {view === "releases" && (
             <Releases

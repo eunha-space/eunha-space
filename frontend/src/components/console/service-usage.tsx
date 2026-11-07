@@ -23,7 +23,7 @@ const metrics = [
   { field: "rejected_rate", title: "Capacity rejections / second", format: number },
 ] as const;
 
-export function ServiceUsage({ instanceId, tenantId, now, minutes }: { instanceId?: string; tenantId?: string; now: number; minutes: number }) {
+export function ServiceUsage({ hostId, tenantId, now, minutes }: { hostId?: string; tenantId?: string; now: number; minutes: number }) {
   const [history, setHistory] = useState<History>();
   const [error, setError] = useState(false);
   useEffect(() => {
@@ -35,7 +35,7 @@ export function ServiceUsage({ instanceId, tenantId, now, minutes }: { instanceI
       if (inFlight || document.hidden) return;
       inFlight = true;
       const query = new URLSearchParams({ minutes: String(minutes) });
-      if (instanceId) query.set("instance_id", instanceId);
+      if (hostId) query.set("host_id", hostId);
       if (tenantId) query.set("tenant_id", tenantId);
       try {
         const result = await api<History>(`/usage/service/history?${query}`);
@@ -48,7 +48,7 @@ export function ServiceUsage({ instanceId, tenantId, now, minutes }: { instanceI
     const visible = () => { if (!document.hidden) void load(); };
     document.addEventListener("visibilitychange", visible);
     return () => { disposed = true; clearInterval(timer); document.removeEventListener("visibilitychange", visible); };
-  }, [instanceId, tenantId, minutes]);
+  }, [hostId, tenantId, minutes]);
   const latest = history?.samples.at(-1);
   const fresh = latest && now - latest.sampled_at <= (minutes > 60 ? 90000 : 30000);
   return <div className="grid gap-3">

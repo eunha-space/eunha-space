@@ -243,10 +243,10 @@ struct OperationSummary {
 #[derive(Serialize, sqlx::FromRow)]
 struct RuntimeSummary {
     id: Uuid,
-    instance_id: Uuid,
+    host_id: Uuid,
     name: String,
-    instance_name: String,
-    instance_address: String,
+    host_name: String,
+    host_address: String,
     bind_address: String,
     service_label: String,
     tenant_directory: String,
@@ -3907,7 +3907,7 @@ async fn unrender_tenant_from(
     runtime_id: Option<Uuid>,
 ) -> Result<()> {
     let (directory, runtime_host) = sqlx::query_as::<_, (String, String)>(
-        "SELECT r.tenant_directory,i.address FROM tenants t JOIN runtimes r ON r.id=COALESCE($2,t.runtime_id) JOIN instances i ON i.id=r.instance_id WHERE t.id=$1",
+        "SELECT r.tenant_directory,h.address FROM tenants t JOIN runtimes r ON r.id=COALESCE($2,t.runtime_id) JOIN hosts h ON h.id=r.host_id WHERE t.id=$1",
     )
     .bind(tenant_id)
     .bind(runtime_id)
@@ -3935,7 +3935,7 @@ async fn rename_legacy_tenant_files(state: &Shared) -> Result<()> {
         return Ok(());
     }
     let tenants = sqlx::query_as::<_, (Uuid, String, String)>(
-        "SELECT t.id,t.domain,r.tenant_directory FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id WHERE i.address=$1 AND t.lifecycle_state<>'purged'",
+        "SELECT t.id,t.domain,r.tenant_directory FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN hosts h ON h.id=r.host_id WHERE h.address=$1 AND t.lifecycle_state<>'purged'",
     )
     .bind(&configured_host)
     .fetch_all(&state.db)
@@ -4260,7 +4260,7 @@ async fn create_tenant_owner(state: &Shared, tenant_id: Uuid) -> Result<()> {
 /// Like every other runtime command, its output is never persisted or logged.
 async fn tenant_account_command(state: &Shared, tenant_id: Uuid, args: &[&str]) -> Result<String> {
     let (domain, tenant_directory, runtime_host) = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT t.domain,r.tenant_directory,i.address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id WHERE t.id=$1",
+        "SELECT t.domain,r.tenant_directory,h.address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN hosts h ON h.id=r.host_id WHERE t.id=$1",
     )
     .bind(tenant_id)
     .fetch_one(&state.db)
@@ -4525,7 +4525,7 @@ fn known_migrations(code: Option<i32>, stderr: &[u8]) -> KnownMigrations {
 async fn import_tenant_database(state: &Shared, tenant_id: Uuid) -> Result<()> {
     let (domain, dump_path, database_url, tenant_directory, runtime_host) =
         sqlx::query_as::<_, (String, String, String, String, String)>(
-            "SELECT t.domain,m.dump_path,c.database_url,r.tenant_directory,i.address FROM tenants t JOIN tenant_imports m ON m.tenant_id=t.id JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id WHERE t.id=$1",
+            "SELECT t.domain,m.dump_path,c.database_url,r.tenant_directory,h.address FROM tenants t JOIN tenant_imports m ON m.tenant_id=t.id JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN hosts h ON h.id=r.host_id WHERE t.id=$1",
         )
         .bind(tenant_id)
         .fetch_one(&state.db)
@@ -4592,7 +4592,7 @@ async fn import_tenant_database(state: &Shared, tenant_id: Uuid) -> Result<()> {
 async fn upload_imported_media(state: &Shared, tenant_id: Uuid) -> Result<()> {
     let (domain, media_path, tenant_directory, runtime_host, attempts) =
         sqlx::query_as::<_, (String, String, String, String, i32)>(
-            "SELECT t.domain,m.media_path,r.tenant_directory,i.address,p.attempts FROM tenants t JOIN tenant_imports m ON m.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id JOIN provisioning_steps p ON p.tenant_id=t.id AND p.step='media' WHERE t.id=$1 AND m.media_path IS NOT NULL",
+            "SELECT t.domain,m.media_path,r.tenant_directory,h.address,p.attempts FROM tenants t JOIN tenant_imports m ON m.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN hosts h ON h.id=r.host_id JOIN provisioning_steps p ON p.tenant_id=t.id AND p.step='media' WHERE t.id=$1 AND m.media_path IS NOT NULL",
         )
         .bind(tenant_id)
         .fetch_one(&state.db)
@@ -4740,7 +4740,7 @@ async fn render_provisioned_tenant(state: &Shared, tenant_id: Uuid) -> Result<()
 /// belongs to it.
 async fn render_tenant_on(state: &Shared, tenant_id: Uuid, runtime_id: Option<Uuid>) -> Result<()> {
     let row = sqlx::query_as::<_, (SqlJson<StoredTenant>, SqlJson<StoredConfig>, String, String, String, String, i64)>(
-        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,i.address,r.tenant_directory,r.bind_address,t.config_revision FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=COALESCE($2,t.runtime_id) JOIN instances i ON i.id=r.instance_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
+        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,h.address,r.tenant_directory,r.bind_address,t.config_revision FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=COALESCE($2,t.runtime_id) JOIN hosts h ON h.id=r.host_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
     ).bind(tenant_id).bind(runtime_id).fetch_one(&state.db).await?;
     let (SqlJson(tenant), SqlJson(config), bucket, runtime_host, directory, bind_address, revision) =
         row;
@@ -5082,7 +5082,7 @@ async fn runtimes(
     headers: HeaderMap,
 ) -> Result<Json<Vec<RuntimeSummary>>, ApiError> {
     admin_user(&headers, &s.db).await?;
-    Ok(Json(sqlx::query_as("SELECT r.id,r.instance_id,r.name,i.name instance_name,i.address instance_address,r.bind_address,r.service_label,r.tenant_directory,r.origin_hostname,r.router_enabled,r.blue_bind_address,r.green_bind_address,(SELECT count(*) FROM tenants WHERE runtime_id=r.id) tenant_count,r.auto_deploy_enabled,r.deployed_ref,r.channel_id,o.id release_operation_id,o.status release_status,e.message release_message FROM runtimes r JOIN instances i ON i.id=r.instance_id LEFT JOIN LATERAL (SELECT id,status FROM operations WHERE runtime_id=r.id AND kind='runtime_release' ORDER BY created_at DESC LIMIT 1) o ON true LEFT JOIN LATERAL (SELECT string_agg(message,E'\\n' ORDER BY id) message FROM operation_events WHERE operation_id=o.id) e ON true ORDER BY i.name,r.name").fetch_all(&s.db).await?))
+    Ok(Json(sqlx::query_as("SELECT r.id,r.host_id,r.name,h.name host_name,h.address host_address,r.bind_address,r.service_label,r.tenant_directory,r.origin_hostname,r.router_enabled,r.blue_bind_address,r.green_bind_address,(SELECT count(*) FROM tenants WHERE runtime_id=r.id) tenant_count,r.auto_deploy_enabled,r.deployed_ref,r.channel_id,o.id release_operation_id,o.status release_status,e.message release_message FROM runtimes r JOIN hosts h ON h.id=r.host_id LEFT JOIN LATERAL (SELECT id,status FROM operations WHERE runtime_id=r.id AND kind='runtime_release' ORDER BY created_at DESC LIMIT 1) o ON true LEFT JOIN LATERAL (SELECT string_agg(message,E'\\n' ORDER BY id) message FROM operation_events WHERE operation_id=o.id) e ON true ORDER BY h.name,r.name").fetch_all(&s.db).await?))
 }
 
 async fn set_automatic_release(
@@ -5133,7 +5133,7 @@ pub(crate) async fn queue_runtime_release(
     rollout_id: Option<Uuid>,
 ) -> Result<Uuid, ApiError> {
     let row = sqlx::query_as::<_, (String, String, String, String, String, bool, String, String, String)>(
-        "SELECT r.name,i.address,r.tenant_directory,r.service_label,r.bind_address,r.router_enabled,r.blue_bind_address,r.green_bind_address,COALESCE((SELECT domain FROM tenants WHERE runtime_id=r.id AND lifecycle_state='ready' ORDER BY created_at LIMIT 1),'') FROM runtimes r JOIN instances i ON i.id=r.instance_id WHERE r.id=$1",
+        "SELECT r.name,h.address,r.tenant_directory,r.service_label,r.bind_address,r.router_enabled,r.blue_bind_address,r.green_bind_address,COALESCE((SELECT domain FROM tenants WHERE runtime_id=r.id AND lifecycle_state='ready' ORDER BY created_at LIMIT 1),'') FROM runtimes r JOIN hosts h ON h.id=r.host_id WHERE r.id=$1",
     )
     .bind(runtime_id)
     .fetch_optional(&state.db)
@@ -6258,7 +6258,7 @@ pub(crate) async fn local_runtimes(state: &Shared) -> Result<Vec<Uuid>> {
         return Ok(Vec::new());
     }
     Ok(sqlx::query_scalar::<_, Uuid>(
-        "SELECT r.id FROM runtimes r JOIN instances i ON i.id=r.instance_id WHERE i.address=$1 ORDER BY r.name",
+        "SELECT r.id FROM runtimes r JOIN hosts h ON h.id=r.host_id WHERE h.address=$1 ORDER BY r.name",
     )
     .bind(configured_host)
     .fetch_all(&state.db)
@@ -6285,7 +6285,7 @@ pub(crate) async fn reconcile_runtime_drift(state: &Shared, runtime_id: Uuid) ->
     // One still provisioning has a job of its own rendering and reloading
     // it, and a retained or purging one was taken off disk deliberately.
     let drifted = sqlx::query_as::<_, (Uuid, i64)>(
-        "SELECT t.id,t.config_revision FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id WHERE t.runtime_id=$1 AND i.address=$2 AND t.lifecycle_state='ready' AND t.desired_state='running' AND t.reconcile_failures<$3 AND (t.rendered_revision IS NULL OR t.rendered_revision<t.config_revision) ORDER BY t.created_at",
+        "SELECT t.id,t.config_revision FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN hosts h ON h.id=r.host_id WHERE t.runtime_id=$1 AND h.address=$2 AND t.lifecycle_state='ready' AND t.desired_state='running' AND t.reconcile_failures<$3 AND (t.rendered_revision IS NULL OR t.rendered_revision<t.config_revision) ORDER BY t.created_at",
     )
     .bind(runtime_id)
     .bind(&configured_host)
@@ -6487,7 +6487,7 @@ async fn render_tenant(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let (admin_user_id, _) = admin_user(&headers, &s.db).await?;
     let row = sqlx::query_as::<_, (SqlJson<StoredTenant>, SqlJson<StoredConfig>, String, String, String, String, String, bool, i64, Uuid)>(
-        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,i.address,r.tenant_directory,r.service_label,r.bind_address,r.router_enabled,t.config_revision,r.id FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
+        "SELECT to_jsonb(t),to_jsonb(c),b.bucket_name,h.address,r.tenant_directory,r.service_label,r.bind_address,r.router_enabled,t.config_revision,r.id FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id JOIN runtimes r ON r.id=t.runtime_id JOIN hosts h ON h.id=r.host_id JOIN r2_buckets b ON b.tenant_id=t.id WHERE t.id=$1",
     )
     .bind(id)
     .fetch_optional(&s.db)

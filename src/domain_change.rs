@@ -792,7 +792,7 @@ async fn eunha(
     timeout: Duration,
 ) -> Result<String> {
     let (domain, tenant_directory, runtime_host) = sqlx::query_as::<_, (String, String, String)>(
-        "SELECT t.domain,r.tenant_directory,i.address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN instances i ON i.id=r.instance_id WHERE t.id=$1",
+        "SELECT t.domain,r.tenant_directory,h.address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN hosts h ON h.id=r.host_id WHERE t.id=$1",
     )
     .bind(tenant_id)
     .fetch_one(&state.db)

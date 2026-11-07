@@ -13,15 +13,15 @@ Missing readings and collection pauses longer than thirty seconds break graph
 lines. Cached samples are not added twice.
 
 The page has three subpages, each fetching and drawing only its own scope:
-`/admin/usage` for the fleet, `/admin/usage/servers/<instance UUID>` for one
-hosting server, and `/admin/usage/tenants/<tenant UUID>` for one tenant's trends
-with the filterable live table of every tenant. Without an ID, the server page
-shows the first server by name and the tenant page the largest database. A hosting server groups all runtimes
-with the same instance ID; it is the physical instance shown on the Instances
-page. These totals describe its tenants' PostgreSQL usage, not total host CPU or
-RAM. The authenticated `/api/usage/history` endpoint returns fleet history;
-`?instance_id=<UUID>` scopes it to one hosting server. Aggregation uses current
-tenant placement and eligibility, so moving a tenant changes its history's scope.
+`/admin/usage` for the fleet, `/admin/usage/hosts/<host UUID>` for one host,
+and `/admin/usage/tenants/<tenant UUID>` for one tenant's trends with the
+filterable live table of every tenant. Without an ID, the host page shows the
+first host by name and the tenant page the largest database. A host is the
+machine shown on the Hosts page, and groups all runtimes with its host ID.
+These totals describe its tenants' PostgreSQL usage, not total host CPU or RAM.
+The authenticated `/api/usage/history` endpoint returns fleet history;
+`?host_id=<UUID>` scopes it to one host. Aggregation uses current tenant
+placement and eligibility, so moving a tenant changes its history's scope.
 
 Aggregate history takes the latest sample per tenant in each ten-second bucket.
 Transaction rates are calculated per tenant before summing, and counter resets
@@ -59,7 +59,7 @@ admission rejections, and application database-pool connections.
 ## Service collection and charts
 
 The control plane scrapes this Prometheus exposition privately, using its
-existing operator SSH access to each hosting server. It does not run a separate
+existing operator SSH access to each host. It does not run a separate
 Prometheus server. The sampler reads the active blue/green slot and scrapes its
 loopback listener; draining slots are deliberately excluded to avoid counting a
 tenant twice. A slot switch during a scrape invalidates that reading. Requests
@@ -80,12 +80,12 @@ Retained tenants have no serving service and are excluded. Ready and failed
 tenants remain eligible, with failures reflected in coverage.
 
 Migration 044 stores numeric service samples and private process identities for
-28 days. The operator-only `/api/usage/service/history` returns the selected range (ten minutes by default), with optional `tenant_id=<UUID>` or `instance_id=<UUID>` filters.
+28 days. The operator-only `/api/usage/service/history` returns the selected range (ten minutes by default), with optional `tenant_id=<UUID>` or `host_id=<UUID>` filters.
 Scope uses current tenant placement. The API exposes numeric summaries and
 coverage, never process identities or runtime paths. Reloading the page restores
 charts from PostgreSQL.
 
-Fleet, hosting-server, and tenant charts show requests per second, 5xx error
+Fleet, host, and tenant charts show requests per second, 5xx error
 percentage, mean response-header latency, in-flight requests, total and idle
 application pool connections, aborted requests per second, and capacity
 rejections per second. Mean latency uses histogram sum/count deltas, weighted by
@@ -96,7 +96,7 @@ Monitoring requests are included in service traffic.
 Counter rates require consecutive readings within thirty seconds, with the same
 active slot, process PID, and process start time. Deployments, restarts, declining
 counters (including idle-series expiration), failed scrapes, and longer pauses
-produce gaps. Every tenant must report a metric for fleet/server totals to be
+produce gaps. Every tenant must report a metric for fleet/host totals to be
 shown; partial coverage is explicit. Error percentage and latency are missing
 when there is no traffic. Recent chart readings are marked stale when collection or history refresh falls
 behind its expected cadence; the threshold accommodates longer-range refreshes.
@@ -104,7 +104,7 @@ behind its expected cadence; the threshold accommodates longer-range refreshes.
 ## Shared time range
 
 A single selector at the top of `/admin/usage` controls every database and service
-chart, and keeps its value when moving between the fleet, hosting-server, and
+chart, and keeps its value when moving between the fleet, host, and
 tenant subpages. Presets cover ten minutes,
 one or six hours, one or three days, and one, two, or four weeks. Current database cards
 continue to show live readings regardless of the selected historical range.

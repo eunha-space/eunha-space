@@ -24,7 +24,7 @@ const RANGES = [
 ];
 const PAGES = [
   { id: "fleet", label: "Fleet", path: [] },
-  { id: "servers", label: "Hosting servers", path: ["servers"] },
+  { id: "hosts", label: "Hosts", path: ["hosts"] },
   { id: "tenants", label: "Tenants", path: ["tenants"] },
 ] as const;
 type Page = (typeof PAGES)[number]["id"];
@@ -32,12 +32,12 @@ type Page = (typeof PAGES)[number]["id"];
 const eligible = (tenant: Tenant) => ["ready", "failed", "retained"].includes(tenant.lifecycle_state);
 
 /**
- * Fleet, hosting-server, and tenant usage are separate pages under
+ * Fleet, host, and tenant usage are separate pages under
  * /admin/usage so only one scope's charts are fetched and drawn at a time.
  */
 export function Usage({ tenants, runtimes }: { tenants: Tenant[]; runtimes: Runtime[] }) {
   const [segments, go] = useSubroute("usage");
-  const page: Page = segments[0] === "servers" || segments[0] === "tenants" ? segments[0] : "fleet";
+  const page: Page = segments[0] === "hosts" || segments[0] === "tenants" ? segments[0] : "fleet";
   const [minutes, setMinutes] = useState(60);
   const [readings, setReadings] = useState<Reading[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -100,8 +100,8 @@ export function Usage({ tenants, runtimes }: { tenants: Tenant[]; runtimes: Runt
     <p className="text-muted-foreground text-xs">Live database and Eunha service metrics, collected privately in the background about every 10 seconds. Capacity is measured separately every 15 minutes. CPU, RAM, and bandwidth are not measured. Database connections reflect PostgreSQL backends; service pool charts show application connections. Long ranges use coarser chart samples, and history is retained for 28 days. Current cards always show live readings.</p>
     {error && <Alert variant="destructive"><AlertDescription>Usage refresh failed. Previous readings may be stale. {error}</AlertDescription></Alert>}
     {page === "fleet" && <FleetUsage tenants={tenants} readings={readings} minutes={minutes} now={now} loaded={loaded} />}
-    {page === "servers" && <ServerUsage tenants={tenants} runtimes={runtimes} readings={readings} minutes={minutes} now={now} loaded={loaded}
-      instanceId={segments[1]} onSelect={id => go(["servers", id])} />}
+    {page === "hosts" && <HostUsage tenants={tenants} runtimes={runtimes} readings={readings} minutes={minutes} now={now} loaded={loaded}
+      hostId={segments[1]} onSelect={id => go(["hosts", id])} />}
     {page === "tenants" && <TenantUsage tenants={tenants} readings={readings} minutes={minutes} now={now} loaded={loaded}
       tenantId={segments[1]} onSelect={id => go(["tenants", id])} />}
   </div>;
@@ -112,33 +112,33 @@ type Scope = { tenants: Tenant[]; readings: Reading[]; minutes: number; now: num
 function FleetUsage({ tenants, readings, minutes, now, loaded }: Scope) {
   const ids = new Set(tenants.filter(eligible).map(tenant => tenant.id));
   return <section className="grid gap-3" aria-labelledby="fleet-usage-title">
-    <div><h2 id="fleet-usage-title" className="font-semibold">Fleet-wide usage</h2><p className="text-muted-foreground text-xs">Database and service usage across every hosting server and runtime.</p></div>
+    <div><h2 id="fleet-usage-title" className="font-semibold">Fleet-wide usage</h2><p className="text-muted-foreground text-xs">Database and service usage across every host and runtime.</p></div>
     <AggregateUsage minutes={minutes} readings={readings.filter(row => ids.has(row.tenant_id))} expected={ids.size} now={now} loaded={loaded} />
     <CapacityUsage now={now} />
     <ServiceUsage minutes={minutes} now={now} />
   </section>;
 }
 
-function ServerUsage({ tenants, runtimes, readings, minutes, now, loaded, instanceId, onSelect }: Scope & { runtimes: Runtime[]; instanceId?: string; onSelect: (id: string) => void }) {
-  const instances = [...new Map(runtimes.map(runtime => [runtime.instance_id, { id: runtime.instance_id, name: runtime.instance_name }])).values()].sort((a, b) => a.name.localeCompare(b.name));
-  const instance = instances.find(row => row.id === instanceId) ?? instances[0];
-  const runtimeNames = new Set(runtimes.filter(runtime => runtime.instance_id === instance?.id).map(runtime => runtime.name));
+function HostUsage({ tenants, runtimes, readings, minutes, now, loaded, hostId, onSelect }: Scope & { runtimes: Runtime[]; hostId?: string; onSelect: (id: string) => void }) {
+  const hosts = [...new Map(runtimes.map(runtime => [runtime.host_id, { id: runtime.host_id, name: runtime.host_name }])).values()].sort((a, b) => a.name.localeCompare(b.name));
+  const host = hosts.find(row => row.id === hostId) ?? hosts[0];
+  const runtimeNames = new Set(runtimes.filter(runtime => runtime.host_id === host?.id).map(runtime => runtime.name));
   const ids = new Set(tenants.filter(tenant => eligible(tenant) && runtimeNames.has(tenant.runtime_name)).map(tenant => tenant.id));
-  return <section className="grid gap-3" aria-labelledby="instance-usage-title">
+  return <section className="grid gap-3" aria-labelledby="host-usage-title">
     <div className="flex flex-wrap items-end justify-between gap-3">
-      <div><h2 id="instance-usage-title" className="font-semibold">Hosting server usage</h2><p className="text-muted-foreground text-xs">Combined tenant database and service usage for the selected hosting server.</p></div>
-      <label className="grid gap-1 text-sm">Hosting server
-        <NativeSelect value={instance?.id ?? ""} onChange={event => onSelect(event.target.value)} disabled={!instances.length}>
-          {!instances.length && <option value="">No hosting servers</option>}
-          {instances.map(row => <option key={row.id} value={row.id}>{row.name}</option>)}
+      <div><h2 id="host-usage-title" className="font-semibold">Host usage</h2><p className="text-muted-foreground text-xs">Combined tenant database and service usage for the selected host.</p></div>
+      <label className="grid gap-1 text-sm">Host
+        <NativeSelect value={host?.id ?? ""} onChange={event => onSelect(event.target.value)} disabled={!hosts.length}>
+          {!hosts.length && <option value="">No hosts</option>}
+          {hosts.map(row => <option key={row.id} value={row.id}>{row.name}</option>)}
         </NativeSelect>
       </label>
     </div>
-    {instance ? <>
-      <AggregateUsage minutes={minutes} key={instance.id} instanceId={instance.id}
+    {host ? <>
+      <AggregateUsage minutes={minutes} key={host.id} hostId={host.id}
         readings={readings.filter(row => ids.has(row.tenant_id))} expected={ids.size} now={now} loaded={loaded} />
-      <ServiceUsage minutes={minutes} key={`service-${instance.id}`} instanceId={instance.id} now={now} />
-    </> : <p className="text-muted-foreground text-sm">No hosting servers are registered.</p>}
+      <ServiceUsage minutes={minutes} key={`service-${host.id}`} hostId={host.id} now={now} />
+    </> : <p className="text-muted-foreground text-sm">No hosts are registered.</p>}
   </section>;
 }
 

@@ -56,7 +56,7 @@ async fn service_history_is_private_scoped_persisted_and_reset_aware(pool: PgPoo
         State(shared.clone()),
         headers.clone(),
         Query(service_usage::Scope {
-            instance_id: Some(Uuid::new_v4()),
+            host_id: Some(Uuid::new_v4()),
             ..Default::default()
         }),
     )
@@ -175,14 +175,27 @@ fn state(pool: PgPool) -> Shared {
 }
 
 async fn fixture(pool: &PgPool) -> (Uuid, HeaderMap) {
-    let instance = Uuid::new_v4();
+    let host = Uuid::new_v4();
     let runtime = Uuid::new_v4();
-    sqlx::query("INSERT INTO instances(id,name,address) VALUES($1,'test','127.0.0.1')")
-        .bind(instance)
-        .execute(pool)
+    // Migration tests build this on a schema from before 080, which still
+    // called a host an instance.
+    let renamed = sqlx::query_scalar::<_, bool>("SELECT to_regclass('hosts') IS NOT NULL")
+        .fetch_one(pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO runtimes(id,name,instance_id,tenant_directory,service_label,binary_path,bind_address,blue_bind_address,green_bind_address,origin_hostname) VALUES($1,'test',$2,'/tmp/test','test.runtime','/tmp/test/eunha','127.0.0.1:60000','127.0.0.1:61000','127.0.0.1:61001','test.origin.example')").bind(runtime).bind(instance).execute(pool).await.unwrap();
+    let (hosts, host_id) = if renamed {
+        ("hosts", "host_id")
+    } else {
+        ("instances", "instance_id")
+    };
+    sqlx::query(&format!(
+        "INSERT INTO {hosts}(id,name,address) VALUES($1,'test','127.0.0.1')"
+    ))
+    .bind(host)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query(&format!("INSERT INTO runtimes(id,name,{host_id},tenant_directory,service_label,binary_path,bind_address,blue_bind_address,green_bind_address,origin_hostname) VALUES($1,'test',$2,'/tmp/test','test.runtime','/tmp/test/eunha','127.0.0.1:60000','127.0.0.1:61000','127.0.0.1:61001','test.origin.example')")).bind(runtime).bind(host).execute(pool).await.unwrap();
     let user_id = Uuid::new_v4();
     sqlx::query("INSERT INTO users(id,email,password_hash,email_verified_at,is_admin) VALUES($1,'admin@example.com','unused',now(),true)")
         .bind(user_id).execute(pool).await.unwrap();
@@ -543,22 +556,22 @@ async fn interrupted_provisioning_step_resumes_and_completed_step_is_skipped(poo
 #[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
 async fn fleet_history_groups_hosts_without_double_counting_or_hiding_gaps(pool: PgPool) {
     let (runtime, headers) = fixture(&pool).await;
-    let host = sqlx::query_scalar::<_, Uuid>("SELECT instance_id FROM runtimes WHERE id=$1")
+    let host = sqlx::query_scalar::<_, Uuid>("SELECT host_id FROM runtimes WHERE id=$1")
         .bind(runtime)
         .fetch_one(&pool)
         .await
         .unwrap();
     let other_host = Uuid::new_v4();
     let other_runtime = Uuid::new_v4();
-    sqlx::query("INSERT INTO instances(id,name,address) VALUES($1,'other-host','127.0.0.2')")
+    sqlx::query("INSERT INTO hosts(id,name,address) VALUES($1,'other-host','127.0.0.2')")
         .bind(other_host)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO runtimes(id,name,instance_id,tenant_directory,service_label,binary_path,bind_address,blue_bind_address,green_bind_address,origin_hostname) VALUES($1,'other-runtime',$2,'/tmp/other','other.runtime','/tmp/other/eunha','127.0.0.1:60002','127.0.0.1:61002','127.0.0.1:61003','other.origin.example')")
+    sqlx::query("INSERT INTO runtimes(id,name,host_id,tenant_directory,service_label,binary_path,bind_address,blue_bind_address,green_bind_address,origin_hostname) VALUES($1,'other-runtime',$2,'/tmp/other','other.runtime','/tmp/other/eunha','127.0.0.1:60002','127.0.0.1:61002','127.0.0.1:61003','other.origin.example')")
         .bind(other_runtime).bind(other_host).execute(&pool).await.unwrap();
     let sibling_runtime = Uuid::new_v4();
-    sqlx::query("INSERT INTO runtimes(id,name,instance_id,tenant_directory,service_label,binary_path,bind_address,blue_bind_address,green_bind_address,origin_hostname) VALUES($1,'sibling-runtime',$2,'/tmp/sibling','sibling.runtime','/tmp/sibling/eunha','127.0.0.1:60004','127.0.0.1:61004','127.0.0.1:61005','sibling.origin.example')")
+    sqlx::query("INSERT INTO runtimes(id,name,host_id,tenant_directory,service_label,binary_path,bind_address,blue_bind_address,green_bind_address,origin_hostname) VALUES($1,'sibling-runtime',$2,'/tmp/sibling','sibling.runtime','/tmp/sibling/eunha','127.0.0.1:60004','127.0.0.1:61004','127.0.0.1:61005','sibling.origin.example')")
         .bind(sibling_runtime).bind(host).execute(&pool).await.unwrap();
     let ids = [
         tenant(&pool, runtime).await,
@@ -627,7 +640,7 @@ async fn fleet_history_groups_hosts_without_double_counting_or_hiding_gaps(pool:
         State(app.clone()),
         headers.clone(),
         Query(usage::AggregateScope {
-            instance_id: Some(host),
+            host_id: Some(host),
             range: usage_range::Range::default(),
         }),
     )
@@ -650,7 +663,7 @@ async fn fleet_history_groups_hosts_without_double_counting_or_hiding_gaps(pool:
         State(app.clone()),
         headers,
         Query(usage::AggregateScope {
-            instance_id: Some(Uuid::new_v4()),
+            host_id: Some(Uuid::new_v4()),
             ..Default::default()
         }),
     )
@@ -3926,7 +3939,7 @@ async fn an_administrator_signs_in_as_a_customer_and_comes_back(pool: PgPool) {
 /// A second runtime on the fixture's instance, in `channel`.
 async fn second_runtime(pool: &PgPool, first: Uuid, name: &str) -> Uuid {
     let id = Uuid::new_v4();
-    sqlx::query("INSERT INTO runtimes(id,name,instance_id,tenant_directory,service_label,binary_path,bind_address,blue_bind_address,green_bind_address,origin_hostname,channel_id) SELECT $1,$2,instance_id,'/tmp/'||$2,$2||'.runtime','/tmp/eunha','127.0.0.1:'||(60100+(SELECT count(*) FROM runtimes)),'127.0.0.1:'||(61100+2*(SELECT count(*) FROM runtimes)),'127.0.0.1:'||(61101+2*(SELECT count(*) FROM runtimes)),$2||'.origin.example',channel_id FROM runtimes WHERE id=$3")
+    sqlx::query("INSERT INTO runtimes(id,name,host_id,tenant_directory,service_label,binary_path,bind_address,blue_bind_address,green_bind_address,origin_hostname,channel_id) SELECT $1,$2,host_id,'/tmp/'||$2,$2||'.runtime','/tmp/eunha','127.0.0.1:'||(60100+(SELECT count(*) FROM runtimes)),'127.0.0.1:'||(61100+2*(SELECT count(*) FROM runtimes)),'127.0.0.1:'||(61101+2*(SELECT count(*) FROM runtimes)),$2||'.origin.example',channel_id FROM runtimes WHERE id=$3")
         .bind(id).bind(name).bind(first).execute(pool).await.unwrap();
     id
 }
@@ -4057,7 +4070,7 @@ async fn a_move_is_admitted_only_where_it_is_safe_and_holds_its_runtimes(pool: P
         .await
         .unwrap_err();
     assert!(
-        refused.1.contains("instance this control plane manages"),
+        refused.1.contains("host this control plane manages"),
         "{}",
         refused.1
     );

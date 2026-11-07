@@ -179,7 +179,7 @@ A move is refused unless:
 
 - the tenant is ready, has no other lifecycle work in progress, and is not
   already moving;
-- both runtimes are on the instance this control plane manages;
+- both runtimes are on the host this control plane manages;
 - the new runtime runs the tenant's release or a newer one, by eunha's commit
   graph (see [releases](releases.md#which-release-is-newer)). Its release
   migrates the database, and an older one would serve a schema it does not

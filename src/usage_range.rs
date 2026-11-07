@@ -48,13 +48,13 @@ mod tests {
     fn scoped_history_accepts_browser_query_parameters() {
         for minutes in [10, 60, 360, 1440, 10080, 40320] {
             let uri = format!(
-                "/usage/history?minutes={minutes}&instance_id=00000000-0000-0000-0000-000000000001"
+                "/usage/history?minutes={minutes}&host_id=00000000-0000-0000-0000-000000000001"
             )
             .parse()
             .unwrap();
             let Query(scope) = Query::<usage::AggregateScope>::try_from_uri(&uri).unwrap();
             assert_eq!(scope.range.minutes, Some(minutes));
-            assert!(scope.instance_id.is_some());
+            assert!(scope.host_id.is_some());
             let Query(scope) = Query::<service_usage::Scope>::try_from_uri(&uri).unwrap();
             assert_eq!(scope.range.minutes, Some(minutes));
             let Query(range) = Query::<Range>::try_from_uri(&uri).unwrap();
