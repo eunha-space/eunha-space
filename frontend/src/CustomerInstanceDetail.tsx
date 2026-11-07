@@ -1,3 +1,4 @@
+import { MemberUsage } from "@/components/customer/usage";
 import { useEffect, useState } from "react";
 import { Copy, ExternalLink, KeyRound, RotateCcw, Trash2 } from "lucide-react";
 import { useLingui } from "@lingui/react";
@@ -317,6 +318,7 @@ export function CustomerInstanceDetail({ id }: { id: string }) {
           detail.domains.some((domain) =>
             domain.kind === "custom" && domain.status === "active" && domain.is_primary
           ) && <CustomerSmtp key={id} tenantId={id} />}
+        {ready && <MemberUsage tenantId={id} />}
         <DeleteInstance
           tenant={detail.tenant}
           onChanged={() => setRevision((value) => value + 1)}

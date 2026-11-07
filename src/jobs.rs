@@ -368,7 +368,7 @@ pub(crate) async fn schedule_due_purge(state: &Shared, tenant_id: Uuid) -> Resul
 /// dies mid-pass holds the runtime up for no longer than that.
 pub(crate) async fn claim_reconcile(db: &PgPool, runtime_id: Uuid) -> Result<bool, sqlx::Error> {
     Ok(sqlx::query_scalar::<_, bool>(
-        "UPDATE runtimes SET reconcile_next_at=now()+make_interval(secs => $2) WHERE id=$1 AND reconcile_next_at<=now() RETURNING true",
+        "UPDATE runtimes SET reconcile_next_at=now()+make_interval(secs => $2),reconcile_lease_until=now()+make_interval(secs => $2),reconcile_requested=false WHERE id=$1 AND (reconcile_next_at<=now() OR reconcile_requested) AND (reconcile_lease_until IS NULL OR reconcile_lease_until<=now()) RETURNING true",
     )
     .bind(runtime_id)
     .bind((RECONCILE_TIMEOUT + RECONCILE_INTERVAL).as_secs_f64())
@@ -393,7 +393,7 @@ async fn reconcile_pass(state: &Shared, runtime_id: Uuid) {
         _ => tracing::warn!(%runtime_id, "runtime reconciliation failed; it will run again"),
     }
     let _ = sqlx::query(
-        "UPDATE runtimes SET reconcile_next_at=now()+make_interval(secs => $2) WHERE id=$1",
+        "UPDATE runtimes SET reconcile_next_at=CASE WHEN reconcile_requested THEN now() ELSE now()+make_interval(secs => $2) END,reconcile_lease_until=NULL WHERE id=$1",
     )
     .bind(runtime_id)
     .bind(RECONCILE_INTERVAL.as_secs_f64())

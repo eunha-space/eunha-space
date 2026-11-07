@@ -5994,3 +5994,338 @@ async fn capacity_persistence_failure_does_not_discard_health_and_retries_next_p
         1
     );
 }
+
+async fn quota_fixture(pool: &PgPool) -> (Shared, Uuid, Uuid, Uuid, HeaderMap, HeaderMap) {
+    let (runtime, admin) = fixture(pool).await;
+    let (owner, headers) = billed_customer(pool).await;
+    let id = tenant(pool, runtime).await;
+    sqlx::query("UPDATE tenants SET user_id=$2,lifecycle_state='ready' WHERE id=$1")
+        .bind(id)
+        .bind(owner)
+        .execute(pool)
+        .await
+        .unwrap();
+    let plan=sqlx::query_scalar::<_,Uuid>("INSERT INTO plans(name_en,name_ko,amount,user_limit,media_gb,database_gb,monthly_activities) VALUES('Small','작음',9900,10,1,1,100) RETURNING id").fetch_one(pool).await.unwrap();
+    sqlx::query("INSERT INTO subscriptions(user_id,customer_key,status,amount,plan_id,current_period_end,periods_paid) VALUES($1,$2,'active',9900,$3,now()+interval '1 month',1)").bind(owner).bind(Uuid::new_v4()).bind(plan).execute(pool).await.unwrap();
+    (state(pool.clone()), owner, id, plan, headers, admin)
+}
+async fn quota_sample(pool: &PgPool, id: Uuid, users: i64, media: i64, db: i64) {
+    let at = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
+    sqlx::query("INSERT INTO tenant_usage(tenant_id,sampled_at,users,local_media_bytes,database_bytes) VALUES($1,$2,$3,$4,$5) ON CONFLICT(tenant_id,sampled_at) DO UPDATE SET users=$3,local_media_bytes=$4,database_bytes=$5")
+        .bind(id).bind(at).bind(users).bind(media).bind(db).execute(pool).await.unwrap();
+    // Inserts trigger policy; explicit refresh also covers a same-millisecond
+    // fixture update without manufacturing a future observation timestamp.
+    sqlx::query("SELECT refresh_tenant_limits($1)")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+async fn quota_flags(pool: &PgPool, id: Uuid) -> (bool, bool) {
+    sqlx::query_as("SELECT limit_registrations,limit_media_uploads FROM tenants WHERE id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn quota_notices_grace_enforcement_and_stale_fail_open_are_durable(pool: PgPool) {
+    let (s, owner, id, _, _, admin) = quota_fixture(&pool).await;
+    quota_sample(&pool, id, 8, 0, 1024).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM billing_emails WHERE kind='usage_notice'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        0
+    );
+    limit_policy::set_mode(
+        State(s.clone()),
+        admin.clone(),
+        Json(
+            serde_json::from_value(
+                serde_json::json!({"mode":"warn","reason":"Observation reviewed"}),
+            )
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        sqlx::query("SELECT refresh_tenant_limits($1)")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM billing_emails WHERE kind='usage_notice'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    sqlx::query("INSERT INTO tenant_delivery_daily(tenant_id,day,deliveries,observed_ms) VALUES($1,(now() AT TIME ZONE 'UTC')::date,200,10000)").bind(id).execute(&pool).await.unwrap();
+    quota_sample(&pool, id, 10, 1_000_000_000, 1_000_000_000).await;
+    assert_eq!(quota_flags(&pool, id).await, (true, true));
+    let grace:bool=sqlx::query_scalar("SELECT bool_and(grace_until BETWEEN now()+interval '13 days' AND now()+interval '15 days') FROM tenant_limit_states WHERE tenant_id=$1 AND resource IN ('users','media')").bind(id).fetch_one(&pool).await.unwrap();
+    assert!(grace);
+    limit_policy::set_mode(
+        State(s.clone()),
+        admin,
+        Json(
+            serde_json::from_value(
+                serde_json::json!({"mode":"enforce","reason":"Runtime deployed"}),
+            )
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(quota_flags(&pool, id).await, (true, true));
+    sqlx::query("UPDATE tenant_limit_states SET over_since=now()-interval '15 days',grace_until=now()-interval '1 day' WHERE tenant_id=$1").bind(id).execute(&pool).await.unwrap();
+    sqlx::query("SELECT refresh_tenant_limits($1)")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(quota_flags(&pool, id).await, (false, false));
+    let advisory:i64=sqlx::query_scalar("SELECT count(*) FROM tenant_limit_states WHERE tenant_id=$1 AND resource IN ('database','activities') AND enforced_at IS NOT NULL").bind(id).fetch_one(&pool).await.unwrap();
+    assert_eq!(advisory, 0);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT lifecycle_state FROM tenants WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        "ready"
+    );
+    let lease: i64 = sqlx::query_scalar("SELECT limits_valid_until FROM tenants WHERE id=$1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(lease > OffsetDateTime::now_utc().unix_timestamp());
+    sqlx::query("UPDATE tenant_usage SET sampled_at=sampled_at-1860000 WHERE tenant_id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("SELECT refresh_tenant_limits($1)")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(quota_flags(&pool, id).await, (true, true));
+    quota_sample(&pool, id, 10, 1_000_000_000, 1_000_000_000).await;
+    assert_eq!(quota_flags(&pool, id).await, (true, true));
+    quota_sample(&pool, id, 2, 0, 1024).await;
+    assert!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM billing_emails WHERE user_id=$1 AND dedupe_key LIKE '%recovered:%'").bind(owner).fetch_one(&pool).await.unwrap()>0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn quota_plan_changes_exemptions_and_previews_apply_without_waiting_for_a_scan(pool: PgPool) {
+    let (s, owner, id, small, _, admin) = quota_fixture(&pool).await;
+    limit_policy::set_mode(
+        State(s.clone()),
+        admin.clone(),
+        Json(
+            serde_json::from_value(serde_json::json!({"mode":"enforce","reason":"Ready"})).unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    quota_sample(&pool, id, 20, 2_000_000_000, 1024).await;
+    sqlx::query(
+        "UPDATE tenant_limit_states SET grace_until=now()-interval '1 day' WHERE tenant_id=$1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("SELECT refresh_tenant_limits($1)")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(quota_flags(&pool, id).await, (false, false));
+    let large=sqlx::query_scalar::<_,Uuid>("INSERT INTO plans(name_en,name_ko,amount,user_limit,media_gb) VALUES('Large','큼',19900,100,10) RETURNING id").fetch_one(&pool).await.unwrap();
+    sqlx::query("UPDATE subscriptions SET plan_id=$2 WHERE user_id=$1")
+        .bind(owner)
+        .bind(large)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(quota_flags(&pool, id).await, (true, true));
+    let SqlJson(preview) =
+        sqlx::query_scalar::<_, SqlJson<serde_json::Value>>("SELECT instance_over_limits($1,$2)")
+            .bind(owner)
+            .bind(small)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(preview.as_array().unwrap().len(), 2);
+    sqlx::query("UPDATE subscriptions SET plan_id=$2 WHERE user_id=$1")
+        .bind(owner)
+        .bind(small)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(quota_flags(&pool, id).await, (true, true));
+    let started:bool=sqlx::query_scalar("SELECT bool_and(over_since>now()-interval '1 minute') FROM tenant_limit_states WHERE tenant_id=$1 AND resource IN ('users','media')").bind(id).fetch_one(&pool).await.unwrap();
+    assert!(started);
+    limit_policy::set_override(State(s.clone()),admin.clone(),Path(id),Json(serde_json::from_value(serde_json::json!({"resource":"users","exempt":false,"extend_days":14,"reason":"Community migration"})).unwrap())).await.unwrap();
+    assert!(sqlx::query_scalar::<_,bool>("SELECT grace_until>now()+interval '27 days' FROM tenant_limit_states WHERE tenant_id=$1 AND resource='users'").bind(id).fetch_one(&pool).await.unwrap());
+    limit_policy::set_override(
+        State(s),
+        admin,
+        Path(id),
+        Json(
+            serde_json::from_value(
+                serde_json::json!({"resource":"media","exempt":true,"reason":"Storage agreement"}),
+            )
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(sqlx::query_scalar::<_,i64>("SELECT count(*) FROM tenant_limit_events WHERE action='override' AND actor_id IS NOT NULL").fetch_one(&pool).await.unwrap(),2);
+    sqlx::query("UPDATE users SET billing_exempt=true WHERE id=$1")
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let notices: i64 = sqlx::query_scalar("SELECT count(*) FROM billing_emails")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    quota_sample(&pool, id, 500, 100_000_000_000, 1024).await;
+    assert_eq!(quota_flags(&pool, id).await, (true, true));
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM billing_emails")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        notices
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn quota_member_readings_and_rechecks_are_owner_scoped(pool: PgPool) {
+    let (s, owner, id, _, headers, admin) = quota_fixture(&pool).await;
+    quota_sample(&pool, id, 8, 0, 1024).await;
+    let Json(rows) = limit_policy::customer_usage(State(s.clone()), headers.clone())
+        .await
+        .unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 4);
+    assert!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["tenant_id"] == serde_json::json!(id))
+    );
+    assert!(!rows.to_string().contains(&owner.to_string()));
+    assert_eq!(
+        limit_policy::get_mode(State(s.clone()), headers.clone())
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        limit_policy::check_now(State(s.clone()), headers.clone(), Path(Uuid::new_v4()))
+            .await
+            .unwrap_err()
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    limit_policy::check_now(State(s.clone()), headers, Path(id))
+        .await
+        .unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM tenant_usage_rechecks WHERE tenant_id=$1"
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    assert!(limit_policy::get_mode(State(s), admin).await.is_ok());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn quota_scheduled_downgrade_notices_and_billing_previews_are_deduplicated(pool: PgPool) {
+    let (s, owner, id, small, headers, admin) = quota_fixture(&pool).await;
+    let large=sqlx::query_scalar::<_,Uuid>("INSERT INTO plans(name_en,name_ko,amount,user_limit,media_gb) VALUES('Large','큼',19900,100,10) RETURNING id").fetch_one(&pool).await.unwrap();
+    sqlx::query("UPDATE subscriptions SET plan_id=$2,pending_plan_id=$3,current_period_end=now()+interval '2 days' WHERE user_id=$1").bind(owner).bind(large).bind(small).execute(&pool).await.unwrap();
+    quota_sample(&pool, id, 20, 0, 1024).await;
+    limit_policy::set_mode(
+        State(s.clone()),
+        admin,
+        Json(
+            serde_json::from_value(
+                serde_json::json!({"mode":"warn","reason":"Observation reviewed"}),
+            )
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    for _ in 0..2 {
+        let mut tx = pool.begin().await.unwrap();
+        limit_policy::schedule_downgrade_notices(&mut tx)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM billing_emails WHERE dedupe_key LIKE 'downgrade-usage:%'"
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1
+    );
+    let Json(view) = billing::get(State(s), headers).await.unwrap();
+    let view = serde_json::to_value(view).unwrap();
+    let small_view = view["plans"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == serde_json::json!(small))
+        .unwrap();
+    assert_eq!(small_view["over_limits"].as_array().unwrap().len(), 1);
+    assert_eq!(small_view["over_limits"][0]["resource"], "users");
+    assert_eq!(small_view["over_limits"][0]["value"], 20);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires disposable PostgreSQL; use mise run test-integration"]
+async fn a_quota_reconcile_wake_preserves_an_inflight_runtime_lease(pool: PgPool) {
+    let (runtime, _) = fixture(&pool).await;
+    assert!(jobs::claim_reconcile(&pool, runtime).await.unwrap());
+    sqlx::query("UPDATE runtimes SET reconcile_requested=true WHERE id=$1")
+        .bind(runtime)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(!jobs::claim_reconcile(&pool, runtime).await.unwrap());
+    sqlx::query("UPDATE runtimes SET reconcile_lease_until=now()-interval '1 second' WHERE id=$1")
+        .bind(runtime)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(jobs::claim_reconcile(&pool, runtime).await.unwrap());
+}

@@ -50,6 +50,7 @@ mod instance_usage;
 #[cfg(test)]
 mod integration_tests;
 mod jobs;
+mod limit_policy;
 mod locale;
 mod masquerade;
 mod release_order;
@@ -640,6 +641,12 @@ impl Default for WorkersToml {
 }
 #[derive(Deserialize, Serialize, Default)]
 struct LimitsToml {
+    #[serde(default)]
+    registrations: Option<bool>,
+    #[serde(default)]
+    media_uploads: Option<bool>,
+    #[serde(default)]
+    valid_until: Option<i64>,
     max_concurrent_requests: Option<i32>,
     process_max_tenants: Option<i32>,
     process_database_connections: Option<i64>,
@@ -686,6 +693,12 @@ struct StoredConfig {
 }
 #[derive(Deserialize)]
 struct StoredTenant {
+    #[serde(default = "default_true")]
+    limit_registrations: bool,
+    #[serde(default = "default_true")]
+    limit_media_uploads: bool,
+    #[serde(default)]
+    limits_valid_until: Option<i64>,
     domain: String,
     #[serde(default)]
     handle_domain: Option<String>,
@@ -804,6 +817,9 @@ fn typed_toml(
             process_delivery_concurrency: config.process_delivery_concurrency,
         },
         limits: LimitsToml {
+            registrations: Some(tenant.limit_registrations),
+            media_uploads: Some(tenant.limit_media_uploads),
+            valid_until: tenant.limits_valid_until,
             max_concurrent_requests: config.max_concurrent_requests,
             process_max_tenants: config.process_max_tenants,
             process_database_connections: config.process_database_connections,
@@ -878,6 +894,7 @@ async fn main() -> Result<()> {
         tracing::error!("could not rename tenant configuration files");
     }
     health::supervise(state.clone(), "usage::sampler", usage::sampler);
+    health::supervise(state.clone(), "limit-policy", limit_policy::sampler);
     health::supervise(
         state.clone(),
         "service_usage::sampler",
@@ -947,6 +964,11 @@ async fn main() -> Result<()> {
             get(customer_tenants).post(customer_create_tenant),
         )
         .route("/customer/tenants/{id}", get(customer_tenant_detail))
+        .route("/customer/usage", get(limit_policy::customer_usage))
+        .route(
+            "/customer/tenants/{id}/usage/check",
+            post(limit_policy::check_now),
+        )
         .route(
             "/customer/tenants/{id}/smtp",
             get(smtp::get).put(smtp::save),
@@ -1004,6 +1026,16 @@ async fn main() -> Result<()> {
         .route("/usage", get(usage::usage))
         .route("/usage/history", get(usage::aggregate_history))
         .route("/usage/capacity", get(instance_usage::latest))
+        .route("/billing/usage", get(limit_policy::admin_usage))
+        .route("/billing/usage/events", get(limit_policy::events))
+        .route(
+            "/billing/usage/mode",
+            get(limit_policy::get_mode).patch(limit_policy::set_mode),
+        )
+        .route(
+            "/billing/usage/{id}",
+            axum::routing::patch(limit_policy::set_override),
+        )
         .route("/tenants/{id}/usage/capacity", get(instance_usage::history))
         .route("/usage/service/history", get(service_usage::history))
         .route("/tenants/{id}/usage/history", get(usage::history))

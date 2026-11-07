@@ -1,3 +1,4 @@
+import { LimitPolicy } from "@/components/console/limit-policy";
 import { money, trialLength, won } from "@/format";
 import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -1081,6 +1082,7 @@ export function Billing() {
       {page === "" && (
         <>
           <SignupSwitches overview={overview} onChanged={load} />
+          <LimitPolicy />
           <TileGroup
             title="Subscriptions"
             description="Select a count to see those accounts."

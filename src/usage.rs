@@ -162,7 +162,7 @@ pub(crate) async fn sampler(s: Shared) {
 
 pub(crate) async fn collect(s: &Shared) -> Result<(), ApiError> {
     let tenants = sqlx::query_as::<_, (Uuid, String, bool)>(
-        "SELECT t.id,c.database_url,COALESCE(u.sampled_at <= $1,true) FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id LEFT JOIN LATERAL (SELECT sampled_at FROM tenant_usage WHERE tenant_id=t.id ORDER BY sampled_at DESC LIMIT 1) u ON true WHERE t.lifecycle_state IN ('ready','failed','retained') ORDER BY u.sampled_at NULLS FIRST,t.domain",
+        "SELECT t.id,c.database_url,(COALESCE(u.sampled_at <= $1,true) OR EXISTS(SELECT 1 FROM tenant_usage_rechecks k WHERE k.tenant_id=t.id AND extract(epoch FROM k.requested_at)*1000>COALESCE(u.sampled_at,0))) FROM tenants t JOIN tenant_configuration c ON c.tenant_id=t.id LEFT JOIN LATERAL (SELECT sampled_at FROM tenant_usage WHERE tenant_id=t.id ORDER BY sampled_at DESC LIMIT 1) u ON true WHERE t.lifecycle_state IN ('ready','failed','retained') ORDER BY 3 DESC,u.sampled_at NULLS FIRST,t.domain",
     ).bind(now_millis()-900_000).fetch_all(&s.db).await.map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "Usage inventory unavailable.".into()))?;
     // Stop starting capacity work after eight seconds. Oldest capacity readings
     // go first, so a large fleet rotates rather than starving its last tenants.

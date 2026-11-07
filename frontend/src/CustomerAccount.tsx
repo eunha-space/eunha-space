@@ -1,3 +1,4 @@
+import { MemberUsage } from "@/components/customer/usage";
 import { useState } from "react";
 import { useLingui } from "@lingui/react";
 import { api, type Customer, errorMessage } from "@/api";
@@ -21,6 +22,7 @@ export function CustomerAccount(
       {customer.has_password && <SubscriptionSections customer={customer} onChanged={onChanged} />}
       <PasswordCard customer={customer} onChanged={onChanged} />
       <LanguageCard />
+      <MemberUsage />
     </Page>
   );
 }

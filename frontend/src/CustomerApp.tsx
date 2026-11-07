@@ -1,3 +1,4 @@
+import { MemberUsage } from "@/components/customer/usage";
 import { useEffect, useRef, useState } from "react";
 import { CreditCard, KeyRound, Plus, Server } from "lucide-react";
 import {
@@ -333,6 +334,7 @@ export function CustomerApp() {
             )}
         </Card>
       )}
+      {customer.has_password && <MemberUsage />}
     </Page>,
   );
 }

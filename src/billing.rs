@@ -653,6 +653,7 @@ pub(crate) struct SubscriptionView {
 
 #[derive(Serialize, sqlx::FromRow)]
 pub(crate) struct PlanView {
+    over_limits: sqlx::types::Json<serde_json::Value>,
     id: Uuid,
     name_en: String,
     name_ko: String,
@@ -686,6 +687,7 @@ pub(crate) struct PlanView {
 
 #[derive(Serialize, sqlx::FromRow)]
 pub(crate) struct PaymentView {
+    over_limits: sqlx::types::Json<serde_json::Value>,
     order_id: String,
     amount: i64,
     provider: String,
@@ -741,13 +743,13 @@ pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiEr
     .fetch_optional(&s.db)
     .await?;
     let payments = sqlx::query_as::<_, PaymentView>(
-        &format!("SELECT order_id,amount,provider,currency,kind,status,period_start,period_end,receipt_url,failure_message,requested_at,(status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND settled_at>now()-interval '{}' AND (payment_key IS NOT NULL OR provider='polar') AND {} AND {} AND {}) refundable,(refund_requested_at IS NOT NULL AND refunded_at IS NULL) refund_pending,refunded_amount,refund_error,(SELECT name_en FROM plans WHERE id=p.from_plan_id AND p.kind='upgrade') refund_plan_en,(SELECT name_ko FROM plans WHERE id=p.from_plan_id AND p.kind='upgrade') refund_plan_ko,{} refund_crowded FROM subscription_payments p WHERE user_id=$1 AND status<>'expired' ORDER BY requested_at DESC LIMIT 24", crate::billing_sync::REFUND_WINDOW, crate::billing_sync::POLAR_SELF_REFUND, crate::billing_sync::UPGRADE_SELF_REFUND, crate::billing_sync::LATEST_FIRST, crate::billing_sync::REFUND_CROWDED),
+        &format!("SELECT instance_over_limits($1,p.from_plan_id) over_limits,order_id,amount,provider,currency,kind,status,period_start,period_end,receipt_url,failure_message,requested_at,(status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND settled_at>now()-interval '{}' AND (payment_key IS NOT NULL OR provider='polar') AND {} AND {} AND {}) refundable,(refund_requested_at IS NOT NULL AND refunded_at IS NULL) refund_pending,refunded_amount,refund_error,(SELECT name_en FROM plans WHERE id=p.from_plan_id AND p.kind='upgrade') refund_plan_en,(SELECT name_ko FROM plans WHERE id=p.from_plan_id AND p.kind='upgrade') refund_plan_ko,{} refund_crowded FROM subscription_payments p WHERE user_id=$1 AND status<>'expired' ORDER BY requested_at DESC LIMIT 24", crate::billing_sync::REFUND_WINDOW, crate::billing_sync::POLAR_SELF_REFUND, crate::billing_sync::UPGRADE_SELF_REFUND, crate::billing_sync::LATEST_FIRST, crate::billing_sync::REFUND_CROWDED),
     )
     .bind(user_id)
     .fetch_all(&s.db)
     .await?;
     let mut plans = sqlx::query_as::<_, PlanView>(
-        "SELECT id,name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,polar_amount,polar_currency,polar_trial_interval,polar_trial_interval_count,(SELECT CASE WHEN t.trial_ends_at>now() AND t.trial_started_at+(polar_trial_interval_count||' '||polar_trial_interval)::interval>now() THEN t.trial_started_at+(polar_trial_interval_count||' '||polar_trial_interval)::interval END FROM subscriptions t WHERE t.user_id=$1) trial_until,active FROM plans WHERE active OR id IN (SELECT plan_id FROM subscriptions WHERE user_id=$1 UNION SELECT pending_plan_id FROM subscriptions WHERE user_id=$1 UNION SELECT unbilled_from_plan_id FROM subscriptions WHERE user_id=$1) ORDER BY amount,created_at",
+        "SELECT instance_over_limits($1,id) over_limits,id,name_en,name_ko,amount,instance_limit,user_limit,media_gb,database_gb,monthly_activities,polar_amount,polar_currency,polar_trial_interval,polar_trial_interval_count,(SELECT CASE WHEN t.trial_ends_at>now() AND t.trial_started_at+(polar_trial_interval_count||' '||polar_trial_interval)::interval>now() THEN t.trial_started_at+(polar_trial_interval_count||' '||polar_trial_interval)::interval END FROM subscriptions t WHERE t.user_id=$1) trial_until,active FROM plans WHERE active OR id IN (SELECT plan_id FROM subscriptions WHERE user_id=$1 UNION SELECT pending_plan_id FROM subscriptions WHERE user_id=$1 UNION SELECT unbilled_from_plan_id FROM subscriptions WHERE user_id=$1) ORDER BY amount,created_at",
     )
     .bind(user_id)
     .fetch_all(&s.db)

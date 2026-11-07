@@ -1,3 +1,4 @@
+import { OverLimitWarning } from "@/components/customer/usage";
 import { money } from "@/format";
 import { useEffect, useState } from "react";
 import { CreditCard, ExternalLink, Globe } from "lucide-react";
@@ -563,6 +564,7 @@ export function SubscriptionSections(
               </AlertDialogDescription>
             </AlertDialogHeader>
             {/* Told before asking, not by a refusal after. */}
+            <OverLimitWarning rows={refunding?.over_limits} />
             {refunding?.refund_crowded && (
               <ErrorAlert message="Refunding this upgrade returns your previous plan. Delete instances until you are within its limit first." />
             )}
@@ -656,6 +658,7 @@ export function SubscriptionSections(
                   : t("It starts at your next renewal. Nothing changes until then, and you can change your mind.")}
               </AlertDialogDescription>
             </AlertDialogHeader>
+            <OverLimitWarning rows={switching?.over_limits} />
             <AlertDialogFooter>
               <AlertDialogCancel>{t("Keep this plan")}</AlertDialogCancel>
               <AlertDialogAction onClick={() => switching && void changePlan(switching)}>

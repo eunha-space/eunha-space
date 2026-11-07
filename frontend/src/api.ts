@@ -135,6 +135,7 @@ export type SubscriptionStatus =
   | "lapsed";
 
 export type Plan = {
+  over_limits?: import("@/components/customer/usage").OverLimit[];
   id: string;
   name_en: string;
   name_ko: string;
@@ -242,6 +243,7 @@ export type Billing = {
     refund_plan_ko: string | null;
     /** That plan is too small for the account's instances: refused for now. */
     refund_crowded: boolean;
+    over_limits?: import("@/components/customer/usage").OverLimit[];
   }[];
 };
 

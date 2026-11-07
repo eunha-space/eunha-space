@@ -81,6 +81,13 @@ pub(crate) async fn probe(
 pub(crate) async fn persist(s: &Shared, rows: &[Reading]) -> Result<(), ApiError> {
     let now = (OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000) as i64;
     let mut tx = s.db.begin().await?;
+    // Policy triggers also wake shared runtimes. Lock the entire batch first,
+    // in the same order as billing changes, before taking any runtime lock.
+    let ids = rows.iter().map(|row| row.tenant_id).collect::<Vec<_>>();
+    sqlx::query("SELECT id FROM tenants WHERE id=ANY($1) ORDER BY id FOR UPDATE")
+        .bind(ids)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("INSERT INTO tenant_usage SELECT * FROM jsonb_populate_recordset(NULL::tenant_usage,$1) ON CONFLICT DO NOTHING").bind(SqlJson(&rows)).execute(&mut *tx).await?;
     sqlx::query("INSERT INTO tenant_usage_daily SELECT u.*,(to_timestamp(sampled_at/1000.0) AT TIME ZONE 'UTC')::date FROM jsonb_populate_recordset(NULL::tenant_usage,$1) u ON CONFLICT (tenant_id,day) DO UPDATE SET sampled_at=EXCLUDED.sampled_at,users=EXCLUDED.users,local_media_bytes=EXCLUDED.local_media_bytes,remote_media_bytes=EXCLUDED.remote_media_bytes,database_bytes=EXCLUDED.database_bytes WHERE tenant_usage_daily.sampled_at<EXCLUDED.sampled_at").bind(SqlJson(&rows)).execute(&mut *tx).await?;
     sqlx::query("DELETE FROM tenant_usage WHERE sampled_at<$1")

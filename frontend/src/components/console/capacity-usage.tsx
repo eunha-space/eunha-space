@@ -11,7 +11,7 @@ type Capacity = {
   monthly_deliveries: number | null; delivery_observed_ms: number | null;
 };
 const gb = 1_000_000_000;
-const ratio = (value: number | null, limit: number | null) => value === null || limit === null ? null : limit === 0 ? (value > 0 ? Infinity : 0) : value / limit;
+const ratio = (value: number | null, limit: number | null) => value === null || limit === null ? null : limit === 0 ? (value > 0 ? Infinity : 1) : value / limit;
 const pressure = (r: Capacity, now: number) => !r.sampled_at || now - r.sampled_at > 1_800_000 ? -1 : Math.max(-1,
   ratio(r.users, r.user_limit) ?? -1,
   r.media_exempt ? -1 : ratio(r.local_media_bytes, r.media_gb === null ? null : r.media_gb * gb) ?? -1,

@@ -1,0 +1,27 @@
+import { useEffect, useState } from "react";
+import { api, errorMessage } from "@/api";
+import { type LimitReading, usageAmount } from "@/components/customer/usage";
+import { Card, CardContent } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { NativeSelect } from "@/components/ui/native-select";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+
+type Event = { id:number; tenant_id:string|null; resource:string|null; action:string; reason:string|null; created_at:string };
+export function LimitPolicy() {
+ const [rows,setRows]=useState<LimitReading[]>([]);const [events,setEvents]=useState<Event[]>([]);const [mode,setMode]=useState("show");const [choice,setChoice]=useState<string|null>(null);const [reason,setReason]=useState("");const [selected,setSelected]=useState("");const [days,setDays]=useState("14");const [busy,setBusy]=useState(false);const [error,setError]=useState("");
+ async function load(){try{const [readings,setting,audit]=await Promise.all([api<LimitReading[]>("/billing/usage"),api<{mode:string}>("/billing/usage/mode"),api<Event[]>("/billing/usage/events")]);setRows(readings);setMode(setting.mode);setEvents(audit);setError("");}catch(e){setError(errorMessage(e));}}
+ useEffect(()=>{void load();const timer=setInterval(()=>{if(!document.hidden)void load();},30000);return()=>clearInterval(timer);},[]);
+ async function save(path:string,body:unknown){setBusy(true);try{await api(path,{method:"PATCH",body:JSON.stringify(body)});setReason("");await load();}catch(e){setError(errorMessage(e));}finally{setBusy(false);}}
+ const row=rows.find(r=>`${r.tenant_id}/${r.resource}`===selected);
+ const attention=rows.filter(r=>r.over_since||r.enforced||r.exempt||(r.fresh&&r.value!==null&&r.allowance!==null&&r.value>=r.allowance*.8));
+ return <Card><CardContent className="grid gap-4">
+ <div><h3 className="font-semibold">Instance allowances</h3><p className="text-muted-foreground text-xs">Current rollout: {mode}. Show collects and displays only; warn starts notices and 14-day grace; enforce also blocks registrations and media uploads after grace. Review the observation window and deploy a compatible runtime before enabling enforcement. Missing or stale readings never restrict growth.</p></div>
+ {error&&<p role="status" className="text-destructive text-sm">{error}</p>}
+ <label className="grid gap-1 text-sm">Reason for change<Input value={reason} onChange={e=>setReason(e.target.value)} maxLength={1000} /></label>
+ <div className="flex flex-wrap items-end gap-2"><label className="grid gap-1 text-sm">Rollout mode<NativeSelect value={choice??mode} onChange={e=>setChoice(e.target.value)}><option value="show">Show</option><option value="warn">Warn</option><option value="enforce">Enforce growth limits</option></NativeSelect></label><Button disabled={busy||!reason.trim()||(choice??mode)===mode} onClick={()=>void save("/billing/usage/mode",{mode:choice??mode,reason})}>Apply mode</Button></div>
+ <Table><TableHeader><TableRow><TableHead>Instance</TableHead><TableHead>Limit</TableHead><TableHead>Usage / allowance</TableHead><TableHead>Reading</TableHead><TableHead>Grace ends</TableHead><TableHead>Decision</TableHead></TableRow></TableHeader><TableBody>{attention.map(r=><TableRow key={`${r.tenant_id}/${r.resource}`}><TableCell>{r.domain}</TableCell><TableCell>{r.resource}</TableCell><TableCell>{usageAmount(r.value,r.resource)} / {usageAmount(r.allowance,r.resource)}</TableCell><TableCell>{r.fresh?"Fresh":"Stale / unavailable"}</TableCell><TableCell>{r.grace_until?new Date(r.grace_until).toLocaleString():"—"}</TableCell><TableCell>{r.exempt?"Exempt":r.enforced?"Growth blocked":["database","activities"].includes(r.resource)?"Advisory":"Warning"}</TableCell></TableRow>)}{!attention.length&&<TableRow><TableCell colSpan={6}>No instances near their allowances.</TableCell></TableRow>}</TableBody></Table>
+ <div className="flex flex-wrap items-end gap-2"><label className="grid gap-1 text-sm">Instance and limit<NativeSelect value={selected} onChange={e=>setSelected(e.target.value)}><option value="">Select…</option>{rows.map(r=><option key={`${r.tenant_id}/${r.resource}`} value={`${r.tenant_id}/${r.resource}`}>{r.domain} · {r.resource}</option>)}</NativeSelect></label><Button variant="outline" disabled={busy||!row||!reason.trim()} onClick={()=>row&&void save(`/billing/usage/${row.tenant_id}`,{resource:row.resource,exempt:!row.override_exempt,reason})}>{row?.override_exempt?"Remove exemption":"Exempt this limit"}</Button><label className="grid gap-1 text-sm">Additional grace days<Input type="number" min={1} max={365} value={days} onChange={e=>setDays(e.target.value)} className="w-24" /></label><Button variant="outline" disabled={busy||!row?.over_since||!reason.trim()||Number(days)<1||Number(days)>365||!["users","media"].includes(row?.resource??"")} onClick={()=>row&&void save(`/billing/usage/${row.tenant_id}`,{resource:row.resource,exempt:row.override_exempt,extend_days:Number(days),reason})}>Extend grace</Button></div>
+ <details><summary className="cursor-pointer text-sm">Recent policy audit events</summary><ul className="text-muted-foreground mt-2 grid max-h-48 gap-1 overflow-auto text-xs">{events.map(e=><li key={e.id}>{new Date(e.created_at).toLocaleString()} · {e.action} · {e.resource??"rollout"} · {e.reason??e.tenant_id}</li>)}</ul></details>
+ </CardContent></Card>;
+}

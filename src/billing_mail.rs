@@ -417,6 +417,11 @@ pub(crate) async fn send_due(s: &Shared) -> Result<bool> {
         return Ok(false);
     };
     let mut tx = s.db.begin().await?;
+    // Exempt accounts and a paused rollout must never receive queued quota warnings.
+    sqlx::query("UPDATE billing_emails e SET abandoned_at=now() FROM users u WHERE e.user_id=u.id AND e.kind='usage_notice' AND e.sent_at IS NULL AND e.abandoned_at IS NULL AND (u.is_admin OR u.billing_exempt OR (SELECT usage_mode FROM billing_settings)='show')")
+        .execute(&mut *tx).await?;
+    sqlx::query("UPDATE billing_emails e SET abandoned_at=now() WHERE e.kind='usage_notice' AND e.dedupe_key LIKE 'downgrade-usage:%' AND e.sent_at IS NULL AND e.abandoned_at IS NULL AND NOT EXISTS(SELECT 1 FROM subscriptions s WHERE s.user_id=e.user_id AND s.pending_plan_id IS NOT NULL AND NOT s.cancel_at_period_end AND e.dedupe_key='downgrade-usage:'||s.user_id||':'||s.pending_plan_id||':'||s.current_period_end)")
+        .execute(&mut *tx).await?;
     // An email that could not be sent for days would arrive about something
     // long past.
     sqlx::query(&format!("UPDATE billing_emails SET abandoned_at=now() WHERE sent_at IS NULL AND abandoned_at IS NULL AND created_at<now()-interval '{GIVE_UP_AFTER}'"))

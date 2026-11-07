@@ -1,7 +1,8 @@
 # Plan: measuring instances and enforcing plan limits
 
-Status: Phase 1 implemented, 2026-11-07. Phases 2–4 remain gated on two to
-four weeks of measurements and a review of the limits and pricing.
+Status: Phases 1–4 implemented, 2026-11-07. The default rollout is `show`.
+Warning and enforcement activation remain gated on reviewing two to four weeks
+of measurements, the limits, pricing and media calibration.
 
 Implementation review
 ---------------------
@@ -43,14 +44,14 @@ Implementation review
   limits, keep unavailable/stale readings visible, and show daily history on
   the tenant page. Retained tenants remain operator-only storage inventory.
 
-Decisions before Phases 2–4
+Decisions before activation
 ---------------------------
 
 Keep the proposed sign-in-capable account count, rather than changing a
 promised user limit to a moving 30-day activity count. Keep database and
-activities advisory: neither has a safe growth-only blocking rule. A
-14-day grace period is a reasonable proposal, but no grace or enforcement
-state is activated in Phase 1. Remote cache caps require a separate runtime
+activities advisory: neither has a safe growth-only blocking rule. The
+implemented grace period is 14 days. Warning and enforcement state is activated
+only by the operator rollout switch. Remote cache caps require a separate runtime
 retention policy. After the observation window, confirm these choices and
 calibrate recorded media sizes against actual storage before member warnings
 or growth restrictions are enabled.
@@ -147,7 +148,7 @@ Exit: two to four weeks of data. With it:
 
 1. A daily job compares the latest reading with the plan, per instance.
    - At 80%, email the owner once per limit per period.
-   - At 100%, email the owner and start a grace period (proposed: 14 days),
+   - At 100%, email the owner and start a grace period (14 days),
      recorded in `tenant_limit_states(tenant_id, limit, over_since, notified_at,
      enforced_at)`.
 2. A Billing admin page lists instances over or near their limits, with grace
@@ -193,13 +194,44 @@ uploads happen. The control plane only decides.
 - **Admin and billing-exempt accounts** are measured but never warned or
   enforced, as with the instance count today.
 
-## Open questions for you
+## Decisions and follow-ups
 
-1. Grace period length: 14 days, or the rest of the billing period?
-2. Do remote-media caches need their own operator-side cap per tenant (for
-   example a shorter `media remove` age when one tenant's cache is large)?
-3. Should users count active people (signed in within the last 30 days)
-   rather than accounts? That is friendlier to communities with many dormant
-   sign-ups, but harder to explain.
-4. Is database size worth promising at all, or should it come off the plans
-   and be covered by fair use, as activities are?
+1. The grace period is 14 days from the fresh overage or applicable plan change.
+2. Remote-cache caps remain a separate runtime retention-policy follow-up.
+3. Users count sign-in-capable local accounts rather than a moving active-user window.
+4. Database size and activities stay advisory, with no automatic blocking.
+
+## Implemented rollout for Phases 2–4
+
+The implementation ships in `show` mode. Member usage appears on the account,
+instance list and instance detail pages, including freshness, recorded media
+bytes, exemptions and UTC monthly delivery observations. Plan and refund
+previews report `over_limits` without refusing a change for these four limits.
+Instance-count refusals are unchanged.
+
+Billing's **Instance allowances** section controls `show`, `warn` and `enforce`.
+Each change requires an operator reason and is audited. Review the collection
+window and media calibration, and deploy the runtime with growth-limit support,
+before choosing enforcement. In `warn`, crossing 80% writes one notice per
+resource per subscription period; reaching the allowance starts 14 days of
+grace for users and media. Database and activities stay advisory. A pending
+plan's overages are emailed again within three days of renewal.
+
+PostgreSQL holds the decisions in `tenant_limit_states` and their audit trail
+in `tenant_limit_events`. Sample inserts and subscription plan/status changes
+recompute policy in their own transaction. Plan edits and account exemptions
+also recompute it. A minute safety check catches elapsed grace and stale data.
+Operators can exempt an instance/resource or extend its grace with a recorded
+reason. A fresh under-allowance reading clears the state and queues recovery
+mail. Missing or stale readings clear restrictions and restart grace only
+when a fresh overage is seen again. Superseded unsent notices are withdrawn.
+
+Only `enforce` renders restrictions. `[limits] registrations`, `media_uploads`
+and `valid_until` are disposable decisions generated from PostgreSQL. A changed
+decision advances the configuration revision and wakes durable reconciliation.
+Eunha replaces these flags in place on SIGHUP, preserving tenant pools,
+streaming connections and background jobs. The lease ends 30 minutes after
+the supporting sample; the runtime allows growth after expiry even if the
+control plane is unavailable. An upgrade fitting current usage clears the
+flags in the billing transaction and queues reconciliation immediately.
+An owner's **Check now** queues a bounded recheck on the shared health sampler.
