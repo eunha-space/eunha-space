@@ -775,7 +775,7 @@ function CustomDomainSetup(
                 {domain.ownership_name && domain.ownership_value && (
                   <>
                     <p className="text-muted-foreground text-sm">
-                      {t("Add this TXT record to verify domain ownership.")}
+                      {t("You can add this TXT record to verify domain ownership before switching the CNAME.")}
                     </p>
                     <DnsRecord
                       type="TXT"
