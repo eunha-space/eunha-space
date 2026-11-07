@@ -4,7 +4,7 @@ import { api, errorMessage } from "@/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { ErrorAlert, SectionCard, SuccessAlert } from "@/components/customer/page";
+import { ErrorAlert, SectionCard, StateBadge, SuccessAlert } from "@/components/customer/page";
 
 export function CustomerSmtp({ tenantId }: { tenantId: string }) {
   const { i18n } = useLingui();
@@ -16,11 +16,12 @@ export function CustomerSmtp({ tenantId }: { tenantId: string }) {
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [configured, setConfigured] = useState(false);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   useEffect(() => {
     let active = true;
-    api<{ host: string | null; port: number | null; from: string | null }>(
+    api<{ configured: boolean; host: string | null; port: number | null; from: string | null }>(
       `/customer/tenants/${tenantId}/smtp`,
     )
       .then((settings) => {
@@ -28,6 +29,7 @@ export function CustomerSmtp({ tenantId }: { tenantId: string }) {
         setHost(settings.host ?? "");
         setPort(String(settings.port ?? 587));
         setFrom(settings.from ?? "");
+        setConfigured(settings.configured);
         setLoaded(true);
       })
       .catch((failure) => active && setError(errorMessage(failure)));
@@ -47,6 +49,7 @@ export function CustomerSmtp({ tenantId }: { tenantId: string }) {
       });
       setUsername("");
       setPassword("");
+      setConfigured(true);
       setMessage(t("Saved. Your instance will apply these settings shortly."));
     } catch (failure) {
       setError(errorMessage(failure));
@@ -56,10 +59,16 @@ export function CustomerSmtp({ tenantId }: { tenantId: string }) {
   }
   return (
     <SectionCard
+      highlight={loaded && !configured}
       title={t("Email delivery")}
-      description={t(
-        "Custom domains require your own SMTP credentials. Email delivery is unavailable until you save them.",
-      )}
+      badge={loaded && (configured
+        ? <StateBadge tone="ok">{t("Configured")}</StateBadge>
+        : <StateBadge tone="problem">{t("Not configured")}</StateBadge>)}
+      description={!loaded || configured
+        ? t("Your instance sends email through the SMTP server below. To change it, enter the credentials again and save.")
+        : t(
+          "Custom domains require your own SMTP credentials. Email delivery is unavailable until you save them.",
+        )}
     >
       <form className="grid gap-4" onSubmit={save}>
         <div className="grid gap-2">
