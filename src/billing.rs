@@ -855,10 +855,13 @@ async fn new_order_id(tx: &mut sqlx::PgConnection) -> sqlx::Result<String> {
     }
 }
 
-/// The whole days left of a period, the day under way counted as used: what
-/// an upgrade is charged for. Never more than the period's own days.
+/// The days left of a period, the day under way counted as left: what an
+/// upgrade is charged for, so one on the day of subscribing costs the whole
+/// difference. Never more than the period's own days.
 pub(crate) fn days_left(start: OffsetDateTime, end: OffsetDateTime, now: OffsetDateTime) -> i64 {
-    (end - now).whole_days().clamp(0, period_days(start, end))
+    const DAY: i64 = 86_400;
+    let seconds = (end - now).whole_seconds().max(0);
+    ((seconds + DAY - 1) / DAY).min(period_days(start, end))
 }
 
 /// A period's length in days: 28 to 31 for a month.

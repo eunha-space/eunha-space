@@ -3354,15 +3354,20 @@ fn an_upgrade_costs_the_difference_for_what_is_left_of_the_period() {
     let charge = |now| billing::upgrade_charge(19900, 9900, start, end, now);
     assert_eq!(charge(start), 10000);
     assert_eq!(charge(start + time::Duration::days(15)), 5000);
-    // The day under way counts as used, and the rest is rounded up to ten
-    // won: 8,000 won for 29 days of 30 is 7,733.33, charged as 7,740.
+    // The day under way counts as left, so the day of subscribing costs the
+    // whole difference; the rest is rounded up to ten won: 8,000 won for 29
+    // days of 30 is 7,733.33, charged as 7,740.
     let personal = |now| billing::upgrade_charge(14900, 6900, start, end, now);
-    assert_eq!(personal(start + time::Duration::minutes(21)), 7740);
-    assert_eq!(personal(start + time::Duration::hours(23)), 7740);
-    assert_eq!(personal(start + time::Duration::hours(25)), 7470);
+    assert_eq!(personal(start + time::Duration::minutes(21)), 8000);
+    assert_eq!(personal(start + time::Duration::hours(23)), 8000);
+    assert_eq!(personal(start + time::Duration::hours(25)), 7740);
+    // The last hour is the last day.
+    assert_eq!(charge(end - time::Duration::hours(1)), 340);
     // Too little to put through a card, or nothing at all.
-    assert_eq!(charge(end - time::Duration::hours(1)), 0);
+    let small = |now| billing::upgrade_charge(9950, 9900, start, end, now);
+    assert_eq!(small(end - time::Duration::hours(1)), 0);
     assert_eq!(charge(end + time::Duration::days(1)), 0);
+    assert_eq!(charge(end), 0);
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -3391,12 +3396,8 @@ async fn an_upgrade_is_charged_now_and_keeps_the_renewal_date(pool: PgPool) {
     assert_eq!(view["payments"][0]["kind"], "upgrade");
     assert_eq!(view["payments"][0]["status"], "paid");
     let charged = view["payments"][0]["amount"].as_i64().unwrap();
-    // The day under way counts as used: 10,000 won for all but one day of a
-    // 28- to 31-day month, rounded up to ten won.
-    assert!(
-        (9650..=9680).contains(&charged) && charged % 10 == 0,
-        "charged {charged}"
-    );
+    // On the day of subscribing, the whole difference.
+    assert_eq!(charged, 10000);
     assert_eq!(toss.charges().len(), 2);
     assert_eq!(period_end(pool.clone()).await, renews_on);
     assert_eq!(
@@ -5572,8 +5573,8 @@ async fn an_upgrade_charges_only_the_amount_the_customer_was_shown(pool: PgPool)
         .find(|plan| plan["id"] == big.to_string())
         .unwrap()
         .clone();
-    // The day under way counts as used.
-    assert!((27..=30).contains(&shown["switch_days"].as_i64().unwrap()));
+    // The day under way counts as left.
+    assert!((28..=31).contains(&shown["switch_days"].as_i64().unwrap()));
     let choose = |expected: i64| {
         billing::change_plan(
             State(state.clone()),
