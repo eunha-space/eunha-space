@@ -1,6 +1,6 @@
 import { MemberUsage } from "@/components/customer/usage";
 import { useEffect, useState } from "react";
-import { Copy, ExternalLink, KeyRound, RotateCcw, Trash2 } from "lucide-react";
+import { CircleCheck, Copy, ExternalLink, KeyRound, RotateCcw, Trash2 } from "lucide-react";
 import { useLingui } from "@lingui/react";
 import {
   api,
@@ -664,8 +664,12 @@ function CustomDomainSetup(
 ) {
   const { i18n } = useLingui();
   const t = (message: string) => i18n._(message);
+  const done = domains.length > 0 &&
+    domains.every((domain) => domain.status === "active") &&
+    (!tenant.handle_domain || tenant.handle_domain_verified);
   return (
     <SectionCard
+      success={done}
       title={t("Custom domain setup")}
       description={t("Keep each domain's DNS record in place for as long as it is connected.")}
     >
@@ -673,7 +677,8 @@ function CustomDomainSetup(
           <section key={domain.hostname} className="grid gap-3">
             <div className="flex items-center justify-between gap-3">
               <strong className="break-all">{domain.hostname}</strong>
-              <StateBadge tone={domain.status === "active" ? "ok" : "waiting"}>
+              <StateBadge tone={domain.status === "active" ? "success" : "waiting"}>
+                {domain.status === "active" && <CircleCheck />}
                 {domain.status === "active"
                   ? t("Connected")
                   : domain.status === "removing"
@@ -754,7 +759,8 @@ function HandleDomainSetup(
     <section className="grid gap-3">
       <div className="flex items-center justify-between gap-3">
         <strong className="break-all">{handleDomain}</strong>
-        <StateBadge tone={verified ? "ok" : "waiting"}>
+        <StateBadge tone={verified ? "success" : "waiting"}>
+          {verified && <CircleCheck />}
           {verified ? t("Redirecting") : t("Waiting for the redirect")}
         </StateBadge>
       </div>
