@@ -981,6 +981,10 @@ async fn main() -> Result<()> {
             get(smtp::get).put(smtp::save),
         )
         .route(
+            "/customer/tenants/{id}/owner/username",
+            post(customer_rename_owner),
+        )
+        .route(
             "/customer/tenants/{id}/owner/password",
             post(customer_reset_owner_password),
         )
@@ -4261,7 +4265,7 @@ async fn create_tenant_owner(state: &Shared, tenant_id: Uuid) -> Result<()> {
     }
 
     tenant_account_command(
-        state,
+        &state.db,
         tenant_id,
         &[
             "accounts",
@@ -4281,12 +4285,27 @@ async fn create_tenant_owner(state: &Shared, tenant_id: Uuid) -> Result<()> {
 /// with the runtime's current release, and return that password.
 ///
 /// Like every other runtime command, its output is never persisted or logged.
-async fn tenant_account_command(state: &Shared, tenant_id: Uuid, args: &[&str]) -> Result<String> {
+async fn tenant_account_command<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    tenant_id: Uuid,
+    args: &[&str],
+) -> Result<String> {
+    let output = run_tenant_account_command(db, tenant_id, args).await?;
+    anyhow::ensure!(output.status.success(), "account command failed");
+    printed_password(&String::from_utf8_lossy(&output.stdout))
+        .context("account command printed no password")
+}
+
+async fn run_tenant_account_command<'e>(
+    db: impl sqlx::PgExecutor<'e>,
+    tenant_id: Uuid,
+    args: &[&str],
+) -> Result<std::process::Output> {
     let (domain, tenant_directory, runtime_host) = sqlx::query_as::<_, (String, String, String)>(
         "SELECT t.domain,r.tenant_directory,h.address FROM tenants t JOIN runtimes r ON r.id=t.runtime_id JOIN hosts h ON h.id=r.host_id WHERE t.id=$1",
     )
     .bind(tenant_id)
-    .fetch_one(&state.db)
+    .fetch_one(db)
     .await?;
     let configured_host = std::env::var("CONTROL_RUNTIME_HOST").unwrap_or_default();
     anyhow::ensure!(
@@ -4298,7 +4317,7 @@ async fn tenant_account_command(state: &Shared, tenant_id: Uuid, args: &[&str]) 
         .parent()
         .context("runtime directory has no parent")?
         .to_path_buf();
-    let output = tokio::time::timeout(
+    Ok(tokio::time::timeout(
         Duration::from_secs(60),
         tokio::process::Command::new(runtime_root.join("current/eunha"))
             .arg("--tenants")
@@ -4313,10 +4332,7 @@ async fn tenant_account_command(state: &Shared, tenant_id: Uuid, args: &[&str]) 
             .output(),
     )
     .await
-    .context("account command timed out")??;
-    anyhow::ensure!(output.status.success(), "account command failed");
-    printed_password(&String::from_utf8_lossy(&output.stdout))
-        .context("account command printed no password")
+    .context("account command timed out")??)
 }
 
 /// The password `tootctl`-style account commands print after `OK`.
@@ -4335,18 +4351,149 @@ fn is_valid_owner_username(username: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
 }
 
+#[derive(Deserialize)]
+struct OwnerUsernameRequest {
+    username: String,
+}
+
+async fn customer_rename_owner(
+    State(s): State<Shared>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(body): Json<OwnerUsernameRequest>,
+) -> Result<StatusCode, ApiError> {
+    let (user_id, _) = customer(&headers, &s.db).await?;
+    let username = body.username.trim();
+    if !is_valid_owner_username(username) {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "Use up to 30 letters, numbers, and underscores for the admin username.".into(),
+        ));
+    }
+
+    let mut tx = s.db.begin().await?;
+    let (old_username, email, runtime_id) = sqlx::query_as::<_, (String, String, Uuid)>(
+        "SELECT t.owner_username,t.owner_email,t.runtime_id FROM tenants t
+         WHERE t.id=$1 AND t.user_id=$2 AND t.lifecycle_state='ready'
+           AND t.owner_username IS NOT NULL AND t.owner_email IS NOT NULL
+           AND t.owner_password_issued_at IS NULL
+           AND EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded')
+         FOR NO KEY UPDATE OF t",
+    )
+    .bind(id).bind(user_id).fetch_optional(&mut *tx).await?
+    .ok_or_else(|| ApiError(StatusCode::CONFLICT, "The admin username can only be changed before creating a password.".into()))?;
+
+    let pending = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id,detail->>'username' FROM operations WHERE tenant_id=$1 AND kind='owner_rename' AND status='running'",
+    ).bind(id).fetch_optional(&mut *tx).await?;
+    let operation_id = match pending {
+        Some((operation_id, target)) if target == username => operation_id,
+        Some((_, target)) => {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                format!("Retry the pending username change to {target} first.").into(),
+            ));
+        }
+        None if old_username == username => return Ok(StatusCode::NO_CONTENT),
+        None => {
+            // Keep the intent if the request is interrupted after the runtime
+            // commits. The runtime can recognize a retry by the Owner email.
+            let operation_id = Uuid::new_v4();
+            sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) VALUES($1,$2,$3,'owner_rename','running',$4,jsonb_build_object('username',$5::text),now())")
+                .bind(operation_id).bind(id).bind(runtime_id).bind(user_id).bind(username)
+                .execute(&mut *tx).await?;
+            operation_id
+        }
+    };
+
+    tx.commit().await?;
+    let mut tx = s.db.begin().await?;
+    let current_username = sqlx::query_scalar::<_, String>(
+        "SELECT owner_username FROM tenants WHERE id=$1 AND user_id=$2
+         AND lifecycle_state='ready' AND owner_password_issued_at IS NULL FOR NO KEY UPDATE",
+    )
+    .bind(id)
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| {
+        ApiError(
+            StatusCode::CONFLICT,
+            "The admin account is no longer ready.".into(),
+        )
+    })?;
+    if current_username == username {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+    let still_pending = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM operations WHERE id=$1 AND status='running')",
+    )
+    .bind(operation_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !still_pending {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Retry the username change.".into(),
+        ));
+    }
+
+    let output = run_tenant_account_command(
+        &mut *tx,
+        id,
+        &[
+            "accounts",
+            "rename-unused-owner",
+            &old_username,
+            username,
+            &format!("--email={email}"),
+        ],
+    )
+    .await
+    .map_err(|_| {
+        ApiError(
+            StatusCode::BAD_GATEWAY,
+            "The username change was interrupted. Retry with the same username.".into(),
+        )
+    })?;
+    if output.status.code().is_none() {
+        return Err(ApiError(
+            StatusCode::BAD_GATEWAY,
+            "The username change was interrupted. Retry with the same username.".into(),
+        ));
+    }
+    if !output.status.success() {
+        sqlx::query("UPDATE operations SET status='failed',error='Runtime refused the username change',finished_at=now() WHERE id=$1")
+            .bind(operation_id).execute(&mut *tx).await?;
+        tx.commit().await?;
+        return Err(ApiError(StatusCode::CONFLICT, "The runtime could not change the username. The account must be unused and the username available.".into()));
+    }
+    sqlx::query("UPDATE tenants SET owner_username=$2,updated_at=now() WHERE id=$1")
+        .bind(id)
+        .bind(username)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE operations SET status='succeeded',finished_at=now() WHERE id=$1")
+        .bind(operation_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn customer_reset_owner_password(
     State(s): State<Shared>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Response, ApiError> {
     let (user_id, _) = customer(&headers, &s.db).await?;
+    let mut tx = s.db.begin().await?;
     let owner = sqlx::query_as::<_, (Option<String>, Option<String>, bool, Uuid)>(
-        "SELECT t.owner_username,t.owner_email,t.lifecycle_state='ready' AND EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded'),t.runtime_id FROM tenants t WHERE t.id=$1 AND t.user_id=$2",
+        "SELECT t.owner_username,t.owner_email,t.lifecycle_state='ready' AND EXISTS(SELECT 1 FROM provisioning_steps p WHERE p.tenant_id=t.id AND p.step='owner' AND p.status='succeeded'),t.runtime_id FROM tenants t WHERE t.id=$1 AND t.user_id=$2 FOR NO KEY UPDATE OF t",
     )
     .bind(id)
     .bind(user_id)
-    .fetch_optional(&s.db)
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "Instance not found".into()))?;
     let (Some(username), Some(email), true, runtime_id) = owner else {
@@ -4356,11 +4503,16 @@ async fn customer_reset_owner_password(
         ));
     };
 
+    if sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM operations WHERE tenant_id=$1 AND kind='owner_rename' AND status='running')")
+        .bind(id).fetch_one(&mut *tx).await? {
+        return Err(ApiError(StatusCode::CONFLICT, "Finish the pending username change before creating a password.".into()));
+    }
+
     let operation_id = Uuid::new_v4();
     sqlx::query("INSERT INTO operations(id,tenant_id,runtime_id,kind,status,requested_by,detail,started_at) VALUES($1,$2,$3,'owner_password_reset','running',$4,jsonb_build_object('username',$5::text),now())")
-        .bind(operation_id).bind(id).bind(runtime_id).bind(user_id).bind(&username).execute(&s.db).await?;
+        .bind(operation_id).bind(id).bind(runtime_id).bind(user_id).bind(&username).execute(&mut *tx).await?;
     let password = match tenant_account_command(
-        &s,
+        &mut *tx,
         id,
         &["accounts", "modify", &username, "--reset-password"],
     )
@@ -4369,22 +4521,30 @@ async fn customer_reset_owner_password(
         Ok(password) => password,
         Err(_) => {
             let message = "The admin password could not be reset.";
-            mark_operation_failed(&s.db, operation_id, message).await;
+            sqlx::query(
+                "UPDATE operations SET status='failed',error=$2,finished_at=now() WHERE id=$1",
+            )
+            .bind(operation_id)
+            .bind(message)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
             return Err(ApiError(StatusCode::BAD_GATEWAY, message.into()));
         }
     };
     sqlx::query("UPDATE tenants SET owner_password_issued_at=now(),updated_at=now() WHERE id=$1")
         .bind(id)
-        .execute(&s.db)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("UPDATE operations SET status='succeeded',finished_at=now() WHERE id=$1")
         .bind(operation_id)
-        .execute(&s.db)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("INSERT INTO operation_events(operation_id,message) VALUES($1,'Admin password reset; every session was signed out.')")
         .bind(operation_id)
-        .execute(&s.db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
         Json(serde_json::json!({ "username": username, "email": email, "password": password })),

@@ -192,6 +192,8 @@ const ko: Record<string, string> = {
   "Sign in to your instance as its owner to manage it.":
     "소유자로 인스턴스에 로그인하여 관리하세요.",
   Username: "사용자명",
+  "Change admin username": "관리자 사용자명 변경",
+  "Save username": "사용자명 저장",
   "Sign-in email": "로그인 이메일",
   "Sign-in page": "로그인 페이지",
   "Create password": "비밀번호 만들기",

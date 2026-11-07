@@ -361,7 +361,7 @@ function InstanceSetup(
 type IssuedPassword = { username: string; email: string; password: string };
 
 function AdminAccount(
-  { tenantId, domain, username, email, passwordIssued }: {
+  { tenantId, domain, username: initialUsername, email, passwordIssued: previouslyIssued }: {
     tenantId: string;
     domain: string;
     username: string;
@@ -377,6 +377,28 @@ function AdminAccount(
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState("");
 
+  const [username, setUsername] = useState(initialUsername);
+  const [newUsername, setNewUsername] = useState(initialUsername);
+  const [passwordCreated, setPasswordCreated] = useState(false);
+  const passwordIssued = previouslyIssued || passwordCreated;
+
+  async function rename(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await api(`/customer/tenants/${tenantId}/owner/username`, {
+        method: "POST",
+        body: JSON.stringify({ username: newUsername }),
+      });
+      setUsername(newUsername);
+    } catch (failure) {
+      setError(errorMessage(failure));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function issue() {
     setConfirming(false);
     setBusy(true);
@@ -391,6 +413,7 @@ function AdminAccount(
           method: "POST",
         }),
       );
+      setPasswordCreated(true);
     } catch (failure) {
       setError(errorMessage(failure));
     } finally {
@@ -442,6 +465,29 @@ function AdminAccount(
             </a>
           </Detail>
         </dl>
+
+        {!passwordIssued && (
+          <form className="grid gap-2" onSubmit={rename}>
+            <label className="text-sm font-medium" htmlFor="owner-new-username">
+              {t("Change admin username")}
+            </label>
+            <div className="flex flex-wrap gap-2">
+              <Input
+                id="owner-new-username"
+                className="w-auto"
+                value={newUsername}
+                onChange={(event) => setNewUsername(event.target.value)}
+                pattern="[A-Za-z0-9_]{1,30}"
+                maxLength={30}
+                disabled={busy}
+                required
+              />
+              <Button variant="outline" type="submit" disabled={busy || newUsername === username}>
+                {t("Save username")}
+              </Button>
+            </div>
+          </form>
+        )}
 
         {issued && (
           <div className="bg-muted/60 grid gap-3 rounded-md p-3 text-sm">

@@ -171,6 +171,11 @@ to the customer once with `Cache-Control: no-store`, and records an
 account out of every session and app. Like other runtime commands, these must
 run on the machine whose `CONTROL_RUNTIME_HOST` matches the runtime.
 
+Before creating a password, the instance owner can change the admin username
+on the same page. The instance must be ready and the account unused. The
+runtime must support `accounts rename-unused-owner`, which preserves the
+Owner's numeric ActivityPub actor ID.
+
 **Delete instance** takes an instance offline at once, whether it is ready,
 failed or still setting up. Deprovisioning removes the tenant's runtime file,
 reloads the runtime, and confirms the domain is no longer served, retrying failed
