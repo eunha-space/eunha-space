@@ -73,25 +73,31 @@ export function BackLink({ href, label }: { href: string; label: string }) {
 }
 
 /** One topic on a page. */
+const CARD_TONE = {
+  success: "bg-success/10 ring-success/40",
+  problem: "bg-destructive/10 ring-destructive/50",
+} as const;
+
 export function SectionCard(
-  { title, badge, description, highlight = false, success = false, children }: {
+  { title, badge, description, highlight = false, tone, children }: {
     title: ReactNode;
     badge?: ReactNode;
     description?: ReactNode;
     /** For the section the reader has to act on first. */
     highlight?: boolean;
-    /** For a section whose setup is done, tinted so it reads at a glance. */
-    success?: boolean;
+    /** Tints the whole card: success once its setup is done, problem when it needs fixing. */
+    tone?: "success" | "problem";
     children?: ReactNode;
   },
 ) {
   return (
     <Card
-      className={highlight
+      // A problem outranks "act on this first", which outranks "done".
+      className={tone === "problem"
+        ? CARD_TONE.problem
+        : highlight
         ? "ring-primary/40"
-        : success
-        ? "bg-success/10 ring-success/40"
-        : undefined}
+        : tone && CARD_TONE[tone]}
     >
       <CardHeader>
         <CardTitle>

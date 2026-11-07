@@ -1,7 +1,7 @@
 import { OverLimitWarning } from "@/components/customer/usage";
 import { money } from "@/format";
 import { useEffect, useState } from "react";
-import { CreditCard, ExternalLink, Globe } from "lucide-react";
+import { CircleCheck, CreditCard, ExternalLink, Globe } from "lucide-react";
 import { useLingui } from "@lingui/react";
 import { api, type Billing, type Customer, errorMessage, type Plan } from "@/api";
 import { cn } from "cn";
@@ -377,9 +377,19 @@ export function SubscriptionSections(
     <>
     <SectionCard
       highlight={customer.subscription_required}
+      tone={status === "active" && !subscription?.cancel_at_period_end
+        ? "success"
+        : status === "past_due"
+        ? "problem"
+        : undefined}
       title={t("Subscription")}
       badge={status === "active" && !subscription?.cancel_at_period_end
-        ? <StateBadge tone="ok">{t("Active")}</StateBadge>
+        ? (
+          <StateBadge tone="success">
+            <CircleCheck />
+            {t("Active")}
+          </StateBadge>
+        )
         : status === "active"
         ? <StateBadge tone="neutral">{t("Cancelled")}</StateBadge>
         : status === "past_due"

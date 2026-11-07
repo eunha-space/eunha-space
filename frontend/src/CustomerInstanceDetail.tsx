@@ -338,6 +338,7 @@ function InstanceSetup(
   const t = (message: string) => i18n._(message);
   return (
     <SectionCard
+      tone={finished ? "success" : undefined}
       title={t("Instance setup")}
       description={finished
         ? (
@@ -421,6 +422,9 @@ function AdminAccount(
 
   return (
     <SectionCard
+      // Until a password is issued, the owner can't sign in to their instance.
+      highlight={!passwordIssued}
+      tone={passwordIssued ? "success" : undefined}
       title={t("Admin account")}
       description={t("Sign in to your instance as its owner to manage it.")}
     >
@@ -669,7 +673,7 @@ function CustomDomainSetup(
     (!tenant.handle_domain || tenant.handle_domain_verified);
   return (
     <SectionCard
-      success={done}
+      tone={done ? "success" : undefined}
       title={t("Custom domain setup")}
       description={t("Keep each domain's DNS record in place for as long as it is connected.")}
     >

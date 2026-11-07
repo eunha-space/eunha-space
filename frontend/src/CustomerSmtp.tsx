@@ -88,7 +88,7 @@ export function CustomerSmtp({ tenantId }: { tenantId: string }) {
   return (
     <SectionCard
       highlight={loaded && !configured}
-      success={loaded && configured}
+      tone={loaded && configured ? "success" : undefined}
       title={t("Email delivery")}
       badge={loaded && (configured
         ? (

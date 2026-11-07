@@ -1,6 +1,7 @@
 import { MemberUsage } from "@/components/customer/usage";
 import { useState } from "react";
 import { useLingui } from "@lingui/react";
+import { KeyRound } from "lucide-react";
 import { api, type Customer, errorMessage } from "@/api";
 import { navigate } from "@/navigation";
 import { Button } from "@/components/ui/button";
@@ -63,7 +64,16 @@ function PasswordCard(
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [changed, setChanged] = useState(false);
+  // A first password is the point of the card; a change waits to be asked for.
+  const [editing, setEditing] = useState(false);
   const first = !customer.has_password;
+  const showForm = first || editing;
+  function cancel() {
+    setCurrent("");
+    setNext("");
+    setError("");
+    setEditing(false);
+  }
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -92,6 +102,7 @@ function PasswordCard(
       setCurrent("");
       setNext("");
       setChanged(true);
+      setEditing(false);
       await onChanged();
     } catch (e) {
       setError(errorMessage(e));
@@ -103,50 +114,78 @@ function PasswordCard(
   return (
     <SectionCard
       highlight={first}
-      title={first ? t("Set your password") : t("Change your password")}
+      title={first
+        ? t("Set your password")
+        : editing
+        ? t("Change your password")
+        : t("Password")}
       description={first
         ? t("Your email is verified. Add a password of at least 14 characters for password sign-in.")
         : t("A new password of at least 14 characters signs out every other device.")}
     >
-        <form onSubmit={submit} className="grid gap-4">
-          {customer.requires_current_password && (
-            <div className="grid gap-2">
-              <Label htmlFor="current-password">{t("Current password")}</Label>
-              <Input
-                id="current-password"
-                type="password"
-                autoComplete="current-password"
-                value={current}
-                onChange={(e) => setCurrent(e.target.value)}
-                required
-              />
-            </div>
+        {showForm
+          ? (
+            <form onSubmit={submit} className="grid gap-4">
+              {customer.requires_current_password && (
+                <div className="grid gap-2">
+                  <Label htmlFor="current-password">{t("Current password")}</Label>
+                  <Input
+                    id="current-password"
+                    type="password"
+                    autoComplete="current-password"
+                    value={current}
+                    onChange={(e) => setCurrent(e.target.value)}
+                    required
+                  />
+                </div>
+              )}
+              <div className="grid gap-2">
+                <Label htmlFor="new-password">
+                  {first ? t("Password") : t("New password")}
+                </Label>
+                <Input
+                  id="new-password"
+                  type="password"
+                  autoComplete="new-password"
+                  value={next}
+                  onChange={(e) => setNext(e.target.value)}
+                  required
+                />
+              </div>
+              {error && <ErrorAlert message={error} />}
+              <div className="flex flex-wrap gap-2">
+                <Button type="submit" disabled={busy}>
+                  {busy
+                    ? t("Please wait…")
+                    : first
+                    ? t("Set password")
+                    : t("Change password")}
+                </Button>
+                {!first && (
+                  <Button type="button" variant="outline" disabled={busy} onClick={cancel}>
+                    {t("Cancel")}
+                  </Button>
+                )}
+              </div>
+            </form>
+          )
+          : (
+            <>
+              {changed && <SuccessAlert>{t("Your password was changed.")}</SuccessAlert>}
+              <div>
+                <Button
+                  variant="outline"
+                  onClick={() => {
+                    setChanged(false);
+                    setEditing(true);
+                  }}
+                >
+                  <KeyRound />
+                  {t("Change password")}
+                </Button>
+              </div>
+            </>
           )}
-          <div className="grid gap-2">
-            <Label htmlFor="new-password">
-              {first ? t("Password") : t("New password")}
-            </Label>
-            <Input
-              id="new-password"
-              type="password"
-              autoComplete="new-password"
-              value={next}
-              onChange={(e) => setNext(e.target.value)}
-              required
-            />
-          </div>
-          {error && <ErrorAlert message={error} />}
-          {changed && <SuccessAlert>{t("Your password was changed.")}</SuccessAlert>}
-          <div>
-            <Button type="submit" disabled={busy}>
-              {busy
-                ? t("Please wait…")
-                : first
-                ? t("Set password")
-                : t("Change password")}
-            </Button>
-          </div>
-        </form>
     </SectionCard>
   );
 }
