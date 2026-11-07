@@ -7,7 +7,6 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 const en: Record<string, string> = {};
 const ko: Record<string, string> = {
   "Port 465 uses TLS; port 587 requires STARTTLS.": "포트 465는 TLS를, 포트 587은 STARTTLS를 사용합니다.",
-  "Enter both credentials whenever you save; saved credentials are never displayed.": "저장할 때마다 사용자 이름과 비밀번호를 입력하세요. 저장된 인증 정보는 표시되지 않습니다.",
   "Refund policy": "환불 정책",
   "Community guidelines": "커뮤니티 가이드라인",
   "Billing terms": "결제 안내",
@@ -22,9 +21,12 @@ const ko: Record<string, string> = {
   "Switch to the dark theme": "어두운 테마로 전환",
   "Custom domains require your own SMTP credentials. Email delivery is unavailable until you save them.": "커스텀 도메인은 직접 SMTP 인증 정보를 설정해야 합니다. 저장하기 전까지 이메일을 발송할 수 없습니다.",
   "Email delivery": "이메일 발송",
+  "Your instance sends email through this SMTP server.": "인스턴스는 이 SMTP 서버로 이메일을 발송합니다.",
+  "Enter the credentials again whenever you change these settings; saved credentials are never displayed.": "설정을 변경할 때마다 인증 정보를 다시 입력하세요. 저장된 인증 정보는 표시되지 않습니다.",
+  "SMTP server": "SMTP 서버",
+  "Change settings": "설정 변경",
   "Configured": "설정됨",
   "Not configured": "설정되지 않음",
-  "Your instance sends email through the SMTP server below. To change it, enter the credentials again and save.": "인스턴스는 아래 SMTP 서버로 이메일을 발송합니다. 변경하려면 인증 정보를 다시 입력하고 저장하세요.",
   "SMTP hostname": "SMTP 호스트 이름",
   "Port": "포트",
   "Sender email": "발신 이메일 주소",

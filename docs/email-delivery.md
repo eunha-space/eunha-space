@@ -6,6 +6,8 @@ port, sender email address, username, and password. Port 465 uses implicit TLS;
 port 587 requires STARTTLS. Both verify the server certificate. The section
 shows a *Configured* or *Not configured* badge from the `configured` field of
 `GET /customer/tenants/{id}/smtp`, and stands out while nothing is saved.
+Once saved, it shows only the server and sender; **Change settings** opens
+the form, which needs both credentials again.
 
 Tenants whose primary domain is `eunha.space` or a subdomain use the shared
 control-plane SMTP credentials and `noreply@eunha.space` as their sender. New
