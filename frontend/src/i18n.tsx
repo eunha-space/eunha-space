@@ -326,8 +326,6 @@ const ko: Record<string, string> = {
     "국내 카드로 구독하기",
   "Pay with an international card":
     "해외 카드로 결제하기",
-  "With an international card":
-    "해외 카드 요금",
   "International cards:":
     "해외 카드:",
   "Manage billing":
@@ -342,8 +340,6 @@ const ko: Record<string, string> = {
     "그때부터 매월 Polar가 해외 카드로 결제합니다. 그 전에 해지하면 요금이 청구되지 않습니다.",
   "New subscriptions are paused for now. Please try again later.":
     "지금은 새 구독을 받지 않고 있습니다. 나중에 다시 시도해 주세요.",
-  "With a Korean card":
-    "국내 카드 요금",
   "Full refund within 7 days":
     "7일 이내 전액 환불",
   "Korean cards: full refund within 7 days":

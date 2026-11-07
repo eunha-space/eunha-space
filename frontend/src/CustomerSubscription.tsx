@@ -342,10 +342,12 @@ export function SubscriptionSections(
               {scheduled ? ` · ${t("From your next renewal")}` : ""}
             </span>
             <span className="tabular-nums">
-              {price(plan)} {t("/ month")}
+              {choosing && !tossOpen && polarOpen && internationalPrice(plan)
+                ? internationalPrice(plan)
+                : price(plan)} {t("/ month")}
             </span>
             {/* Either card can still pay on signing up; a change keeps the currency. */}
-            {choosing && polarOpen && internationalPrice(plan) && (
+            {choosing && tossOpen && polarOpen && internationalPrice(plan) && (
               <span className="text-muted-foreground text-xs tabular-nums">
                 {t("International cards:")} {internationalPrice(plan)} {t("/ month")}
               </span>
@@ -383,9 +385,31 @@ export function SubscriptionSections(
         : undefined}
       description={description}
     >
+        {/* Nothing to list yet while a plan is being chosen. */}
+        {!choosing && (
         <dl className="grid grid-cols-2 gap-4">
-          {subscribed && currentPlan && (
-            <Detail label={t("Plan")}>{planName(currentPlan)}</Detail>
+          {subscribed && currentPlan && subscription && (
+            <Detail label={t("Plan")}>
+              {planName(currentPlan)}
+              <span className="text-muted-foreground block text-sm tabular-nums">
+                {money(subscription.amount, subscription.currency)} {t("/ month")}
+              </span>
+            </Detail>
+          )}
+          {status === "active" && subscription?.current_period_end && (
+            <Detail
+              label={subscription.cancel_at_period_end
+                ? t("Ends on")
+                : subscription.trial_ends_at
+                ? t("First charge on")
+                : t("Renews on")}
+            >
+              {day(
+                subscription.cancel_at_period_end
+                  ? subscription.current_period_end
+                  : (subscription.renews_at ?? subscription.current_period_end),
+              )}
+            </Detail>
           )}
           {status === "active" && nextPlan && !subscription?.cancel_at_period_end && (
             <Detail label={t("From your next renewal")}>
@@ -405,62 +429,27 @@ export function SubscriptionSections(
               )}
             </Detail>
           )}
-          {amount != null && (
-            <Detail
-              label={choosing && canPayInternationally && billing.toss
-                ? t("With a Korean card")
-                : t("Monthly price")}
-            >
-              {amount}
-              {/* The Korean card's counterpart to a trial: REFUND_WINDOW. */}
-              {choosing && billing.toss && (
-                <span className="text-muted-foreground block text-sm">
-                  {t("Full refund within 7 days")}
-                </span>
-              )}
-            </Detail>
-          )}
-          {choosing && chosenPlan && canPayInternationally && (
-            <Detail label={t("With an international card")}>
-              {internationalPrice(chosenPlan)}
-              {trialLength(chosenPlan, i18n.locale === "ko") && (
-                <span className="text-muted-foreground block text-sm">
-                  {trialLength(chosenPlan, i18n.locale === "ko")}
-                </span>
-              )}
-            </Detail>
+          {/* While a payment is confirmed, before there is a plan to show. */}
+          {!choosing && !(subscribed && currentPlan) && amount != null && (
+            <Detail label={t("Monthly price")}>{amount}</Detail>
           )}
           {subscribed && subscription?.has_card && (
             <Detail label={t("Card")}>
               {[subscription.card_company, subscription.card_number].filter(Boolean).join(" ")}
             </Detail>
           )}
-          {status === "active" && subscription?.current_period_end && (
-            <Detail
-              label={subscription.cancel_at_period_end
-                ? t("Ends on")
-                : subscription.trial_ends_at
-                ? t("First charge on")
-                : t("Renews on")}
-            >
-              {day(
-                subscription.cancel_at_period_end
-                  ? subscription.current_period_end
-                  : (subscription.renews_at ?? subscription.current_period_end),
-              )}
-            </Detail>
-          )}
           {status === "past_due" && subscription?.next_attempt_at && (
             <Detail label={t("Next attempt")}>{absoluteTime(subscription.next_attempt_at)}</Detail>
           )}
         </dl>
+        )}
         {subscription?.last_error &&
           (status === "past_due" || status === "incomplete") &&
           !pending && (
           <ErrorAlert message={subscription.last_error} />
         )}
         {error && <ErrorAlert message={error} />}
-        {choosing && selectable.length > 1 && (
+        {choosing && selectable.length > 0 && (
           <div className="grid gap-2">
             <h3 className="text-sm font-medium">{t("Choose a plan")}</h3>
             {planOptions()}
@@ -471,22 +460,35 @@ export function SubscriptionSections(
             {t("New subscriptions are paused for now. Please try again later.")}
           </p>
         )}
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-start gap-2">
           {!subscribed && !pending && tossOpen && (
-            <Button disabled={busy || !chosenPlan} onClick={() => void openBillingWindow()}>
-              {busy ? <Spinner label={t("Please wait…")} /> : <CreditCard />}
-              {billing.polar ? t("Subscribe with a Korean card") : t("Subscribe with a card")}
-            </Button>
+            <div className="grid gap-1">
+              <Button disabled={busy || !chosenPlan} onClick={() => void openBillingWindow()}>
+                {busy ? <Spinner label={t("Please wait…")} /> : <CreditCard />}
+                {billing.polar ? t("Subscribe with a Korean card") : t("Subscribe with a card")}
+              </Button>
+              {/* The Korean card's counterpart to a trial: REFUND_WINDOW. */}
+              <span className="text-muted-foreground text-xs">
+                {t("Full refund within 7 days")}
+              </span>
+            </div>
           )}
           {!subscribed && !pending && polarOpen && (
-            <Button
-              variant={tossOpen ? "outline" : "default"}
-              disabled={busy}
-              onClick={() => void openPolar("/checkout")}
-            >
-              {!tossOpen && busy ? <Spinner label={t("Please wait…")} /> : <Globe />}
-              {t("Pay with an international card")}
-            </Button>
+            <div className="grid gap-1">
+              <Button
+                variant={tossOpen ? "outline" : "default"}
+                disabled={busy}
+                onClick={() => void openPolar("/checkout")}
+              >
+                {!tossOpen && busy ? <Spinner label={t("Please wait…")} /> : <Globe />}
+                {t("Pay with an international card")}
+              </Button>
+              {chosenPlan && trialLength(chosenPlan, i18n.locale === "ko") && (
+                <span className="text-muted-foreground text-xs">
+                  {trialLength(chosenPlan, i18n.locale === "ko")}
+                </span>
+              )}
+            </div>
           )}
           {canChangePlan && (
             <Button
@@ -516,15 +518,6 @@ export function SubscriptionSections(
               {status === "past_due" ? t("Use another card") : t("Change card")}
             </Button>
           )}
-          {subscribed && !subscription?.cancel_at_period_end && (
-            <Button
-              variant="ghost"
-              disabled={busy}
-              onClick={() => setConfirmingCancel(true)}
-            >
-              {t("Cancel subscription")}
-            </Button>
-          )}
           {subscribed && status === "active" && subscription?.cancel_at_period_end &&
             (subscription.has_card || polar) && (
             <Button disabled={busy} onClick={() => void change("/resume")}>
@@ -532,6 +525,17 @@ export function SubscriptionSections(
             </Button>
           )}
         </div>
+        {subscribed && !subscription?.cancel_at_period_end && (
+          <Button
+            variant="link"
+            size="sm"
+            className="text-muted-foreground h-auto justify-self-start p-0"
+            disabled={busy}
+            onClick={() => setConfirmingCancel(true)}
+          >
+            {t("Cancel subscription")}
+          </Button>
+        )}
         <AlertDialog
           open={refunding !== null}
           onOpenChange={(open) => !open && setRefunding(null)}
