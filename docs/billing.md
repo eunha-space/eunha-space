@@ -217,7 +217,10 @@ What a refund does depends on who gave it back, which is
   served can be asked back this way, while the subscription is still on its
   plan; an earlier one becomes askable once the later ones are refunded. The
   plan it returns has to hold the account's instances, or the request is refused
-  until some are deleted. Upgrades from a period already over are an operator's
+  until some are deleted. The billing view carries what a refund would do, so
+  the confirmation says it before asking: `refund_plan_en`/`refund_plan_ko`,
+  the plan an upgrade's refund returns, and `refund_crowded`, set when that
+  plan is too small, which disables the confirmation and says why. Upgrades from a period already over are an operator's
   call.
 - **A customer's own** full refund of any other payment ends a running
   subscription at once (`canceled`), retires its card and takes its instances

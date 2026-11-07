@@ -454,6 +454,8 @@ const ko: Record<string, string> = {
   "The full amount goes back to your card, and your plan returns to the one before this upgrade, at its price. Your subscription goes on.":
     "전액이 카드로 환불되고, 요금제는 업그레이드 이전의 요금제와 요금으로 돌아갑니다. 구독은 계속됩니다.",
   "Keep the upgrade": "업그레이드 유지",
+  "The full amount goes back to your card, and your plan returns to {plan}, at its price. Your subscription goes on and your instances keep running.":
+    "전액이 카드로 환불되고, 요금제는 {plan}(으)로 돌아가 그 요금이 적용됩니다. 구독은 계속되며 인스턴스도 계속 실행됩니다.",
   "Refunding this upgrade returns your previous plan. Delete instances until you are within its limit first.":
     "이 업그레이드를 환불하면 이전 요금제로 돌아갑니다. 먼저 이전 요금제의 한도에 맞게 인스턴스를 삭제해 주세요.",
   "This payment can no longer be refunded.":

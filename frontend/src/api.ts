@@ -235,6 +235,11 @@ export type Billing = {
     refunded_amount: number;
     /** TossPayments' reason for refusing the last refund asked for. */
     refund_error: string | null;
+    /** For an upgrade, the plan the customer's refund of it returns. */
+    refund_plan_en: string | null;
+    refund_plan_ko: string | null;
+    /** That plan is too small for the account's instances: refused for now. */
+    refund_crowded: boolean;
   }[];
 };
 

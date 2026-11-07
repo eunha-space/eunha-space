@@ -548,17 +548,31 @@ export function SubscriptionSections(
                   : ""}
               </AlertDialogTitle>
               <AlertDialogDescription>
-                {refunding?.kind === "upgrade"
-                  ? t("The full amount goes back to your card, and your plan returns to the one before this upgrade, at its price. Your subscription goes on.")
-                  : t("The full amount goes back to your card. Your subscription is cancelled and your instances go offline immediately. Their data is kept, and subscribing again serves them again.")}
+                {refunding?.kind !== "upgrade"
+                  ? t("The full amount goes back to your card. Your subscription is cancelled and your instances go offline immediately. Their data is kept, and subscribing again serves them again.")
+                  : refunding.refund_plan_en
+                  ? i18n._(
+                    "The full amount goes back to your card, and your plan returns to {plan}, at its price. Your subscription goes on and your instances keep running.",
+                    {
+                      plan: i18n.locale === "ko"
+                        ? (refunding.refund_plan_ko ?? refunding.refund_plan_en)
+                        : refunding.refund_plan_en,
+                    },
+                  )
+                  : t("The full amount goes back to your card, and your plan returns to the one before this upgrade, at its price. Your subscription goes on.")}
               </AlertDialogDescription>
             </AlertDialogHeader>
+            {/* Told before asking, not by a refusal after. */}
+            {refunding?.refund_crowded && (
+              <ErrorAlert message="Refunding this upgrade returns your previous plan. Delete instances until you are within its limit first." />
+            )}
             <AlertDialogFooter>
               <AlertDialogCancel>
                 {refunding?.kind === "upgrade" ? t("Keep the upgrade") : t("Keep my subscription")}
               </AlertDialogCancel>
               <AlertDialogAction
                 variant="destructive"
+                disabled={refunding?.refund_crowded}
                 onClick={() => refunding && void refund(refunding.order_id)}
               >
                 {t("Refund")}

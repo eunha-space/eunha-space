@@ -3606,6 +3606,12 @@ async fn a_customer_refunding_an_upgrade_returns_the_plan_before_it_and_an_opera
         .execute(&pool)
         .await
         .unwrap();
+    // The account page knows before asking.
+    let shown = billing::view(&state, user_id).await.unwrap();
+    let shown = serde_json::to_value(shown).unwrap();
+    assert_eq!(shown["payments"][0]["order_id"], latest.as_str());
+    assert_eq!(shown["payments"][0]["refund_crowded"], true);
+    assert_eq!(shown["payments"][0]["refund_plan_en"], "plan 29900");
     assert_eq!(
         refund(&state, &headers, &latest).await.unwrap_err(),
         StatusCode::CONFLICT

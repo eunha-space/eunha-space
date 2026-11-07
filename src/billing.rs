@@ -703,6 +703,12 @@ pub(crate) struct PaymentView {
     refunded_amount: i64,
     /// TossPayments' reason for refusing the last refund asked for.
     refund_error: Option<String>,
+    /// For an upgrade, the plan the customer's refund of it returns.
+    refund_plan_en: Option<String>,
+    refund_plan_ko: Option<String>,
+    /// Whether that plan is too small for the account's instances, so the
+    /// refund is refused until some are deleted.
+    refund_crowded: bool,
 }
 
 #[derive(Serialize)]
@@ -732,7 +738,7 @@ pub(crate) async fn view(s: &Shared, user_id: Uuid) -> Result<BillingView, ApiEr
     .fetch_optional(&s.db)
     .await?;
     let payments = sqlx::query_as::<_, PaymentView>(
-        &format!("SELECT order_id,amount,provider,currency,kind,status,period_start,period_end,receipt_url,failure_message,requested_at,(status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND settled_at>now()-interval '{}' AND (payment_key IS NOT NULL OR provider='polar') AND {} AND {} AND {}) refundable,(refund_requested_at IS NOT NULL AND refunded_at IS NULL) refund_pending,refunded_amount,refund_error FROM subscription_payments p WHERE user_id=$1 AND status<>'expired' ORDER BY requested_at DESC LIMIT 24", crate::billing_sync::REFUND_WINDOW, crate::billing_sync::POLAR_SELF_REFUND, crate::billing_sync::UPGRADE_SELF_REFUND, crate::billing_sync::LATEST_FIRST),
+        &format!("SELECT order_id,amount,provider,currency,kind,status,period_start,period_end,receipt_url,failure_message,requested_at,(status='paid' AND refunded_amount=0 AND refund_requested_at IS NULL AND settled_at>now()-interval '{}' AND (payment_key IS NOT NULL OR provider='polar') AND {} AND {} AND {}) refundable,(refund_requested_at IS NOT NULL AND refunded_at IS NULL) refund_pending,refunded_amount,refund_error,(SELECT name_en FROM plans WHERE id=p.from_plan_id AND p.kind='upgrade') refund_plan_en,(SELECT name_ko FROM plans WHERE id=p.from_plan_id AND p.kind='upgrade') refund_plan_ko,{} refund_crowded FROM subscription_payments p WHERE user_id=$1 AND status<>'expired' ORDER BY requested_at DESC LIMIT 24", crate::billing_sync::REFUND_WINDOW, crate::billing_sync::POLAR_SELF_REFUND, crate::billing_sync::UPGRADE_SELF_REFUND, crate::billing_sync::LATEST_FIRST, crate::billing_sync::REFUND_CROWDED),
     )
     .bind(user_id)
     .fetch_all(&s.db)

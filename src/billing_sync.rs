@@ -48,6 +48,11 @@ pub(crate) const UPGRADE_SELF_REFUND: &str = "(p.kind<>'upgrade' OR (p.from_plan
 /// go latest first, so none ever takes another payment back with it.
 pub(crate) const LATEST_FIRST: &str = "NOT EXISTS(SELECT 1 FROM subscription_payments l WHERE l.user_id=p.user_id AND l.requested_at>p.requested_at AND l.status='paid' AND l.refunded_amount=0)";
 
+/// Whether refunding upgrade `p` would return a plan too small for the
+/// account's instances. Such a refund is refused, not carried out by stopping
+/// one.
+pub(crate) const REFUND_CROWDED: &str = "(p.kind='upgrade' AND EXISTS(SELECT 1 FROM plans pl JOIN users u ON u.id=p.user_id WHERE pl.id=p.from_plan_id AND pl.instance_limit IS NOT NULL AND NOT (u.is_admin OR u.billing_exempt) AND (SELECT count(*) FROM tenants t WHERE t.user_id=p.user_id AND t.lifecycle_state NOT IN ('deprovisioning','retained','purging','purged'))>pl.instance_limit))";
+
 pub(crate) const POLAR_SELF_REFUND: &str = "(p.provider<>'polar' OR (p.kind='renewal' AND NOT EXISTS(SELECT 1 FROM subscription_payments e WHERE e.user_id=p.user_id AND e.provider='polar' AND e.kind='renewal' AND e.status IN ('paid','refunded') AND (e.settled_at,e.order_id)<(p.settled_at,p.order_id)) AND NOT EXISTS(SELECT 1 FROM subscription_payments r WHERE r.user_id=p.user_id AND r.order_id<>p.order_id AND r.refund_requested_by=r.user_id)))";
 
 /// TossPayments' events are a few hundred bytes.
@@ -277,13 +282,12 @@ pub(crate) async fn start_refund(
     // Taking an upgrade back returns its old plan, which has to hold the
     // instances.
     if within_window {
-        let crowded = sqlx::query_scalar::<_, bool>(
-            "SELECT pl.instance_limit IS NOT NULL AND (SELECT count(*) FROM tenants t WHERE t.user_id=p.user_id AND t.lifecycle_state NOT IN ('deprovisioning','retained','purging','purged'))>pl.instance_limit FROM subscription_payments p JOIN plans pl ON pl.id=p.from_plan_id JOIN users u ON u.id=p.user_id WHERE p.order_id=$1 AND p.kind='upgrade' AND NOT (u.is_admin OR u.billing_exempt)",
-        )
+        let crowded = sqlx::query_scalar::<_, bool>(&format!(
+            "SELECT {REFUND_CROWDED} FROM subscription_payments p WHERE p.order_id=$1"
+        ))
         .bind(order_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .unwrap_or(false);
+        .fetch_one(&mut *tx)
+        .await?;
         if crowded {
             return Err(ApiError(
                 StatusCode::CONFLICT,
