@@ -127,9 +127,8 @@ belongs to one instance and is never another's domain, and it stays reserved
 on the tenant row as its domain does, until the instance is purged. The handle
 domain is fixed once chosen, and so is the web domain: a domain change would
 move every account to handles on the new domain, so one is refused for these
-instances. Health
-checks expect `/api/v2/instance` to name the handle domain, which is what
-Eunha reports as the instance's `domain`.
+instances. Health checks expect `/api/v2/instance` to name the handle domain,
+which is what Eunha reports as the instance's `domain`.
 
 eunha space's own instances are the one exception, and only an operator can
 make one: handles on a provided suffix itself, such as `@nyx@eunha.space`, with
